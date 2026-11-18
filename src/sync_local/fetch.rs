@@ -49,6 +49,19 @@ impl Local<'_, '_> {
         available: &[String],
         clone_lines: Option<Vec<crate::model::Line>>,
     ) -> Result<FetchSelection<StateRec, crate::model::Line>> {
+        let (plan, present) = self.plan_fetch(records, opts, available, clone_lines)?;
+        for id in present {
+            self.repo().p.lock_or_borrow()?.write(|tx| tx.set_present(&id, true))?;
+        }
+        Ok(plan)
+    }
+    pub(super) fn plan_fetch(
+        &self,
+        records: &[String],
+        opts: &Options,
+        available: &[String],
+        clone_lines: Option<Vec<crate::model::Line>>,
+    ) -> Result<(FetchSelection<StateRec, crate::model::Line>, Vec<String>)> {
         let repo = self.repo();
         let ctx = self.ctx;
         let parent = self.parent;
@@ -97,6 +110,7 @@ impl Local<'_, '_> {
         let heads = lines_keep.or(heads);
         let mut left = Vec::new();
         let mut missing = Vec::new();
+        let mut present = Vec::new();
         // A plain fetch of a cache overlay: its states stay on the remote, counted.
         let plain_cache = opts.plain_cache_fetch && repo.p.is_overlay();
         let mut stay = 0;
@@ -161,7 +175,7 @@ impl Local<'_, '_> {
                 continue;
             }
             if repo.p.has_state(id) {
-                repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true))?;
+                present.push(id.clone());
             } else {
                 missing.push(state);
             }
@@ -172,7 +186,7 @@ impl Local<'_, '_> {
             "{stay} state(s) stay on the remote; a new line fetches the cache it starts from, fetch --overlay {name} takes them all"
         ));
         }
-        Ok(FetchSelection { missing, left, omitted, clone_lines, restricted: heads.is_some() })
+        Ok((FetchSelection { missing, left, omitted, clone_lines, restricted: heads.is_some() }, present))
     }
     pub(super) fn stage(&mut self, parent: Option<&str>) -> Result<std::path::PathBuf> {
         anyhow::ensure!(self.stage.is_none(), "a restore is already staged");
@@ -240,7 +254,16 @@ pub(crate) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<Stri
 
 pub(crate) fn walk_ancestry(
     tips: impl IntoIterator<Item = String>,
+    parents: impl FnMut(&str) -> Result<Vec<String>>,
+) -> Result<Vec<String>> {
+    walk_ancestry_until(tips, parents, |_| false)
+}
+
+/// `walk_ancestry`, which stops after the first state that `until` takes.
+fn walk_ancestry_until(
+    tips: impl IntoIterator<Item = String>,
     mut parents: impl FnMut(&str) -> Result<Vec<String>>,
+    mut until: impl FnMut(&str) -> bool,
 ) -> Result<Vec<String>> {
     let mut queue: std::collections::VecDeque<String> = tips.into_iter().collect();
     let mut seen = BTreeSet::new();
@@ -249,16 +272,41 @@ pub(crate) fn walk_ancestry(
         if !seen.insert(id.clone()) {
             continue;
         }
-        queue.extend(parents(&id)?);
+        let stop = until(&id);
+        if !stop {
+            queue.extend(parents(&id)?);
+        }
         order.push(id);
+        if stop {
+            break;
+        }
     }
     Ok(order)
 }
 
+fn state_parents(repo: &Repo, id: &str) -> Result<Vec<String>> {
+    Ok(repo.p.db.state(id)?.map(|state| state.parents.into_iter().chain(state.derived_from).collect()).unwrap_or_default())
+}
+
 pub(crate) fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
-    walk_ancestry(tips, |id| {
-        Ok(repo.p.db.state(id)?.map(|state| state.parents.into_iter().chain(state.derived_from).collect()).unwrap_or_default())
-    })
+    walk_ancestry(tips, |id| state_parents(repo, id))
+}
+
+/// `LocalReplica::nearest_ancestor`.
+pub(crate) fn nearest_ancestor(repo: &Repo, id: &str, wanted: &mut dyn FnMut(&str) -> bool) -> Result<Option<String>> {
+    let mut found = None;
+    walk_ancestry_until(
+        [id.to_string()],
+        |at| state_parents(repo, at),
+        |at| {
+            let hit = at != id && wanted(at);
+            if hit {
+                found = Some(at.to_string());
+            }
+            hit
+        },
+    )?;
+    Ok(found)
 }
 
 pub(crate) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {

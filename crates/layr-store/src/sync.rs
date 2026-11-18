@@ -48,6 +48,21 @@ pub trait LocalReplica {
         available: &[String],
         clone: bool,
     ) -> Result<FetchSelection<Self::State, Self::Line>>;
+    /// Optional W7 local-presence preflight. None requests remote discovery; it must
+    /// not import remote availability or treat unpublished record-only states as held.
+    fn fetch_preflight(
+        &mut self,
+        _records: &[String],
+        _selection: &Self::Selection,
+        _clone: bool,
+    ) -> Result<Option<FetchSelection<Self::State, Self::Line>>> {
+        Ok(None)
+    }
+    /// Optional unused pid-named directory in the replica's swept work area.
+    /// None disables the rebuildable operation cache; cache failure cannot fail fetch.
+    fn fetch_temp_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     fn push_candidates(
         &self,
         records: &[String],
@@ -57,7 +72,8 @@ pub trait LocalReplica {
     ) -> Result<Vec<Self::State>>;
     fn omitted_cache_refs(&self, selection: &Self::Selection) -> Result<Vec<String>>;
     fn tips(&self) -> Result<BTreeSet<String>>;
-    fn ancestry(&self, id: &str) -> Result<Vec<String>>;
+    /// The first ancestor of `id` (breadth first, without `id`) that `wanted` takes. The walk goes no further.
+    fn nearest_ancestor(&self, id: &str, wanted: &mut dyn FnMut(&str) -> bool) -> Result<Option<String>>;
     fn pin_state(&self, id: &str) -> Result<()>;
     fn check_secrets(&self, ids: &[String]) -> Result<()>;
     fn has_state(&self, id: &str) -> bool;

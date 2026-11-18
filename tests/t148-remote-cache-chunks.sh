@@ -103,11 +103,15 @@ LAYR_TEST_CHUNK_GRACE=3600 l push archive -q >/dev/null 2>&1
 eq "a chunk found dead for the first time stays" "$with_y" "$(packs | wc -l | tr -d ' ')"
 marks=$(find "$LAYR_ROOT" -name dead-chunks | head -1)
 ok "the pass marks it" test -s "$marks"
-python3 - "$marks" <<'PY'
-import sys, time
-path = sys.argv[1]
+# The wait passes: the marks and the packs that held their chunks when they were set move back in time together (a
+# pack published after a mark starts its wait again).
+python3 - "$marks" $(find "$T/archive" -path '*/chunks/*') <<'PY'
+import os, sys, time
+path, objects = sys.argv[1], sys.argv[2:]
 lines = [l.split() for l in open(path) if l.strip()]
 open(path, "w").write("".join(f"{i} {int(time.time()) - 7200}\n" for i, _ in lines))
+for name in objects:
+    os.utime(name, (time.time() - 10800, time.time() - 10800))
 PY
 # A push that sends nothing runs no pass: the sweep of the remote runs by itself.
 out=$(LAYR_TEST_CHUNK_GRACE=3600 l gc --remote archive 2>&1)

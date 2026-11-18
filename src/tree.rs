@@ -14,6 +14,23 @@ use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+thread_local! {
+    /// The next folder (`"mkdir"`) or file (`"create"`) that a tree makes on this thread fails with ENOSPC, once.
+    pub(crate) static NO_SPACE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// ENOSPC when a test injects it at `point` (`NO_SPACE`).
+fn no_space(point: &str) -> rustix::io::Result<()> {
+    #[cfg(test)]
+    if NO_SPACE.with(|next| next.get() == Some(point)) {
+        NO_SPACE.with(|next| next.set(None));
+        return Err(rustix::io::Errno::NOSPC);
+    }
+    let _ = point;
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn resolve() -> rustix::fs::ResolveFlags {
     rustix::fs::ResolveFlags::BENEATH | rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_MAGICLINKS
@@ -170,9 +187,10 @@ impl Tree {
                 rustix::fs::unlinkat(&cur, comp, AtFlags::empty())?;
             }
             if !exists_dir {
-                match rustix::fs::mkdirat(&cur, comp, Mode::from_raw_mode(0o755)) {
+                match no_space("mkdir").and_then(|()| rustix::fs::mkdirat(&cur, comp, Mode::from_raw_mode(0o755))) {
                     Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                    Err(e) => return Err(anyhow!("mkdir {comp}: {e}")),
+                    // The kind stays: a full disk is told apart from other failures (`ErrorKind::StorageFull`).
+                    Err(e) => return Err(std::io::Error::from(e)).with_context(|| format!("mkdir {comp}")),
                 }
                 if let Some((u, g)) = own {
                     rustix::fs::chownat(&cur, comp, Some(uid(u)), Some(gid(g)), AtFlags::SYMLINK_NOFOLLOW)?;
@@ -218,13 +236,11 @@ impl Tree {
         if lstat_at(&d, n).is_some() {
             remove_at(&d, n)?;
         }
-        let fd = rustix::fs::openat(
-            &d,
-            n,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(mode as _),
-        )
-        .map_err(|e| anyhow!("create {rel}: {e}"))?;
+        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = no_space("create")
+            .and_then(|()| rustix::fs::openat(&d, n, flags, Mode::from_raw_mode(mode as _)))
+            .map_err(std::io::Error::from)
+            .with_context(|| format!("create {rel}"))?;
         Ok(File::from(fd))
     }
 

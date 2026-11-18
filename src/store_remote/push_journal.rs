@@ -167,6 +167,19 @@ impl Journal {
             Ok(())
         })
     }
+    /// Deletes the chains of `shas`: frames that are gone from the remote. A resumed push must not load them again.
+    pub fn forget(&mut self, shas: &[String]) -> Result<()> {
+        if shas.is_empty() {
+            return Ok(());
+        }
+        self.transaction(false, true, |tx| {
+            let mut delete = tx.prepare_cached("DELETE FROM hashes WHERE sha=?1")?;
+            for sha in shas {
+                delete.execute([sha])?;
+            }
+            Ok(())
+        })
+    }
     pub fn checkpoint(
         &mut self,
         state: &str,

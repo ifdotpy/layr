@@ -410,7 +410,8 @@ impl Api {
     /// Sends a request again while the server is busy (and on a lost connection for an idempotent one), then
     /// turns `426` into the minimum version the server needs.
     fn send(&self, idempotent: bool, build: impl Fn() -> RequestBuilder) -> Result<Response> {
-        let response = super::gateway::send_again(idempotent, || build().send().map_err(|e| super::gateway::send_error("Layr Cloud", e)))?;
+        let response =
+            super::gateway::send_again(idempotent, || build().send().map_err(|e| super::gateway::send_error("Layr Cloud", e)))?;
         if let Some(version) = response.headers().get("layr-server").and_then(|v| v.to_str().ok()) {
             if let Ok(mut server) = self.server.lock() {
                 *server = Some(version.to_string());
@@ -994,7 +995,7 @@ impl Api {
                 }
             }
             for item in listing.requests {
-                if !visit(Object { key: format!("requests/{}.json", item.id), modified: item.modified })? {
+                if !visit(Object { key: format!("requests/{}.json", item.id), modified: item.modified, size: None })? {
                     return Ok(());
                 }
             }
@@ -1022,7 +1023,11 @@ impl Api {
                 .segments(&scope)?
                 .into_iter()
                 .filter(|s| writer.is_empty() || s.writer == writer)
-                .map(|s| Object { key: format!("{scope}{}", format::segment_name(&s.writer, s.first, s.last)), modified: 0 })
+                .map(|s| Object {
+                    key: format!("{scope}{}", format::segment_name(&s.writer, s.first, s.last)),
+                    modified: 0,
+                    size: None,
+                })
                 .collect());
         }
         if rest.is_empty() || rest.starts_with("states/") || rest.starts_with("objects/") {

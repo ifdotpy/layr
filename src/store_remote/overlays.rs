@@ -204,9 +204,9 @@ pub(crate) fn discover_hidden(
     person: Option<&crate::person::Access>,
     paper: Option<&str>,
     cached: &BTreeMap<String, String>,
+    objects: Vec<super::backend::Object>,
 ) -> Result<BTreeMap<String, (Published, String, crate::overlay_managers::Authority)>> {
     let mut found: BTreeMap<String, (Published, String, crate::overlay_managers::Authority)> = BTreeMap::new();
-    let objects = backend.overlay_key_objects()?;
     for object in objects {
         let parts: Vec<_> = object.key.split('/').collect();
         if parts.len() != 4 || parts[2] != "keys" || !parts[3].ends_with(".age") {
@@ -542,7 +542,7 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
             }
         }
-        let push_lock = writer::push_folder_lock(&scoped.dir)?;
+        let push_lock = writer::push_folder_lock(&scoped)?;
         // Test only (tests/t190-overlay-push-lock.sh): a slow upload of the overlay.
         if let Some(ms) = std::env::var("LAYR_TEST_OVERLAY_PUSH_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -914,7 +914,7 @@ pub(crate) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
             continue;
         };
         let scoped = layer(store, published, Some(identity), repo.chunked_overlay(&name)?)?;
-        let _push = writer::push_folder_lock(&scoped.dir)?;
+        let _push = writer::push_folder_lock(&scoped)?;
         let mut swept = sweep_layer(repo, &name, &orepo, &scoped, dry_run)?;
         swept.trees.extend(old.trees);
         swept.parts.extend(old.parts);
@@ -930,7 +930,9 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     let trusted = trusted_keys(repo)?;
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let mut authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
-    let (mut published, refused) = published(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities)?;
+    let objects = store.backend.overlay_key_objects()?;
+    let (mut published, refused) =
+        published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects.clone())?;
     report.omitted.extend(refused);
     let hidden = if store.is_public_reader() {
         BTreeMap::new()
@@ -944,6 +946,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             store.person.as_ref(),
             opts.paper_key.as_deref().or(store.paper_key_text.as_deref()),
             &BTreeMap::new(),
+            objects,
         )?
     };
     let mut identities = BTreeMap::new();
@@ -1127,7 +1130,7 @@ pub(super) fn api_push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, re
         }
         let scoped = api_layer(store, &name, &orepo.p.id)?;
         scoped.private_dir()?;
-        let _push = writer::push_folder_lock(&scoped.dir)?;
+        let _push = writer::push_folder_lock(&scoped)?;
         let selected = layer_selection(repo, &orepo, opts)?;
         let mut pushed = writer::push_locked(&scoped, ctx, &orepo, &selected)?;
         super::push_refs(&scoped, &orepo, &mut pushed)?;

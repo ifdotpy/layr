@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const OBJECT_LIMIT: usize = 32 << 20;
+pub(super) const OBJECT_LIMIT: usize = 32 << 20;
 /// The request header by which a client says that it follows a signed CDN URL, and the type of that answer
 /// (layr-gateway `cdn.rs`).
 const CDN_CAPABILITY: &str = "x-layr-cdn";
@@ -276,24 +276,13 @@ impl Gateway {
         })
     }
 
-    /// Count requests at the attempt boundary and body bytes as HTTP consumes them.
+    /// Count requests, and buffered request bodies in full, at the attempt boundary. The body stays the buffer
+    /// that every try shares: counting must not copy an upload. A streamed body counts as HTTP reads it.
     fn execute(&self, builder: reqwest::blocking::RequestBuilder, upload: bool) -> Result<Response> {
-        let mut request = builder.build().map_err(reqwest::Error::without_url)?;
-        if let Some(body) = request.body_mut().take() {
-            *request.body_mut() = Some(if let Some(bytes) = body.as_bytes() {
-                let length = bytes.len() as u64;
-                reqwest::blocking::Body::sized(
-                    super::download::Counted {
-                        inner: std::io::Cursor::new(bytes.to_vec()),
-                        counters: self.counters.clone(),
-                        payload: false,
-                        upload,
-                    },
-                    length,
-                )
-            } else {
-                body
-            });
+        let request = builder.build().map_err(reqwest::Error::without_url)?;
+        if let Some(length) = request.body().and_then(reqwest::blocking::Body::as_bytes).map(<[u8]>::len) {
+            let counter = if upload { &self.counters.uploaded } else { &self.counters.control };
+            counter.fetch_add(length as u64, Ordering::Relaxed);
         }
         self.counters.requests.fetch_add(1, Ordering::Relaxed);
         self.http.execute(request).map_err(reqwest::Error::without_url).map_err(Into::into)
@@ -620,18 +609,20 @@ impl Gateway {
             url.query_pairs_mut().append_pair(key, value);
         }
         let person = bearer.is_none() && self.person.lock().map_err(|_| anyhow!("gateway session lock failed"))?.is_some();
+        // The body moves into the request once; each try and the session renewal share that buffer.
+        let mut template = self.http.request(method.clone(), url);
+        for (name, value) in headers {
+            template = template.header(*name, *value);
+        }
+        if let Some(data) = data {
+            let content_type =
+                if matches!(action, "token" | "cdn" | "batch") { "application/json" } else { "application/octet-stream" };
+            template = template.header("content-type", content_type).body(data);
+        }
         let send = |token: Option<&str>| -> Result<Response> {
-            let mut request = self.http.request(method.clone(), url.clone());
+            let mut request = template.try_clone().context("gateway request cannot be sent again")?;
             if let Some(token) = token {
                 request = request.bearer_auth(token);
-            }
-            for (name, value) in headers {
-                request = request.header(*name, *value);
-            }
-            if let Some(data) = &data {
-                let content_type =
-                    if matches!(action, "token" | "cdn" | "batch") { "application/json" } else { "application/octet-stream" };
-                request = request.header("content-type", content_type).body(data.clone());
             }
             let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE);
             self.retry(idempotent, || {
@@ -899,7 +890,7 @@ impl Gateway {
         self.get_limited(key, OBJECT_LIMIT)
     }
 
-    fn get_limited(&self, key: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+    pub(super) fn get_limited(&self, key: &str, limit: usize) -> Result<Option<Vec<u8>>> {
         if key == "vault.json" {
             return Ok(None);
         }
@@ -1010,39 +1001,26 @@ impl Gateway {
             && !super::format::release_file(inner)
     }
 
-    /// Vec adapter; consumers of large inventories should use Backend::visit_many.
-    #[allow(dead_code)] // Keep the Vec adapter source-compatible.
-    pub fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
-        let mut out = vec![None; keys.len()];
-        self.visit_many(keys, None, |i, body| {
-            out[i] = body;
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
     pub(super) fn visit_many(
         &self,
         keys: &[String],
-        sizes: Option<&[u64]>,
+        sizes: &[Option<u64>],
         mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>,
     ) -> Result<()> {
         for key in keys {
             super::backend::check_key(key)?;
         }
-        if let Some(sizes) = sizes {
-            if sizes.len() != keys.len() || sizes.iter().any(|&n| n > OBJECT_LIMIT as u64) {
-                bail!("invalid download size bounds (maximum 32 MiB per object)");
-            }
+        if sizes.len() != keys.len() || sizes.iter().flatten().any(|&n| n > OBJECT_LIMIT as u64) {
+            bail!("invalid download size bounds (maximum 32 MiB per object)");
         }
         // Cap bookkeeping and URL answers too. Completed bodies go straight to the consumer.
         for (window, names) in keys.chunks(BATCH_KEYS * 2).enumerate() {
             let offset = window * BATCH_KEYS * 2;
-            let lengths = sizes.map(|s| &s[offset..offset + names.len()]);
+            let lengths = &sizes[offset..offset + names.len()];
             let mut done = vec![false; names.len()];
             let mut groups: std::collections::BTreeMap<&str, Vec<(usize, &str)>> = Default::default();
             for (i, key) in names.iter().enumerate() {
-                if self.batchable(key) && !self.batch_off.load(Ordering::SeqCst) && lengths.is_none() {
+                if self.batchable(key) && !self.batch_off.load(Ordering::SeqCst) {
                     let (epoch, inner) = epoch_path(key).unwrap_or(("root", key));
                     groups.entry(epoch).or_default().push((i, inner));
                 }
@@ -1071,11 +1049,10 @@ impl Gateway {
                     let keys: Vec<_> = items.iter().map(|(_, key)| *key).collect();
                     let body = serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":keys}))?;
                     let response = match self.proof_request(Method::POST, "batch", &[], Some(body), &[]) {
-                        // A gateway can refuse a route it lacks with 401, before routing. Each object read
-                        // that follows still authorizes itself, so nothing is granted by falling back.
-                        Err(error)
-                            if error.is::<super::download::ProofRejected>() && !self.batch_ready.load(Ordering::SeqCst) =>
-                        {
+                        // A gateway can refuse a route it lacks with 401, before routing, also after an earlier
+                        // batch went through (a rolling deploy, a new epoch). Each object read that follows still
+                        // authorizes itself, so nothing is granted by falling back.
+                        Err(error) if error.is::<super::download::ProofRejected>() => {
                             self.batch_off.store(true, Ordering::SeqCst);
                             return Ok(None);
                         }
@@ -1106,6 +1083,10 @@ impl Gateway {
                     if let Some(objects) = objects {
                         for ((i, _), object) in batches[batch].1.iter().zip(objects) {
                             if let Some(body) = object {
+                                let length = body.as_ref().map_or(0, |body| body.len() as u64);
+                                if lengths[*i].is_some_and(|bound| length > bound) {
+                                    bail!("gateway batch: {} exceeds its listed size", names[*i]);
+                                }
                                 done[*i] = true;
                                 visit(offset + *i, body)?;
                             }
@@ -1116,7 +1097,7 @@ impl Gateway {
             )?;
             let pending: Vec<_> = (0..names.len()).filter(|&i| !done[i]).collect();
             // Large known bodies and overflow entries share the same whole-object scheduler.
-            let urls = if self.batch_off.load(Ordering::SeqCst) && lengths.is_none() {
+            let urls = if self.batch_off.load(Ordering::SeqCst) && lengths.iter().all(Option::is_none) {
                 vec![None; names.len()]
             } else {
                 self.cdn_urls(names, &pending)?
@@ -1125,13 +1106,10 @@ impl Gateway {
                 pending.len(),
                 super::download::JOBS,
                 super::download::BYTE_BUDGET,
-                |j| lengths.map_or(OBJECT_LIMIT as u64, |s| s[pending[j]]).max(1),
+                |j| lengths[pending[j]].unwrap_or(OBJECT_LIMIT as u64).max(1),
                 |j| {
                     let i = pending[j];
-                    let limit = match lengths {
-                        Some(s) => usize::try_from(s[i])?,
-                        None => OBJECT_LIMIT,
-                    };
+                    let limit = lengths[i].map_or(Ok(OBJECT_LIMIT), usize::try_from)?;
                     // A CDN failure in an earlier job sends the rest of this window straight to the gateway.
                     if let Some(url) = urls[i].as_deref().filter(|_| !self.cdn_off.load(Ordering::SeqCst)) {
                         if let Some(response) = self.cdn_fetch(url)? {
@@ -1311,7 +1289,7 @@ impl Gateway {
                 let mut objects: Vec<_> = cached
                     .listing
                     .iter()
-                    .map(|entry| Object { key: entry.key.clone(), modified: entry.modified / 1000 })
+                    .map(|entry| Object { key: entry.key.clone(), modified: entry.modified / 1000, size: entry.size })
                     .collect();
                 objects.sort_by(|a, b| a.key.cmp(&b.key));
                 return Ok(objects);
@@ -1343,7 +1321,10 @@ impl Gateway {
             super::listing_cache::store(&path, verified, &objects);
         }
         objects.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(objects.into_iter().map(|entry| Object { key: entry.key, modified: entry.modified / 1000 }).collect())
+        Ok(objects
+            .into_iter()
+            .map(|entry| Object { key: entry.key, modified: entry.modified / 1000, size: entry.size })
+            .collect())
     }
 
     /// Bind the cache to the canonical host/project, public route, full epoch prefix and listing mode.
@@ -1577,8 +1558,13 @@ fn token_file(path: &std::path::Path, uid: u32) -> Result<String> {
     Ok(token.into())
 }
 
+fn epoch_path(key: &str) -> Option<(&str, &str)> {
+    let (epoch, inner) = key.strip_prefix("project/epochs/")?.split_once('/')?;
+    super::format::is_uuid(epoch).then_some((epoch, inner))
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -1603,17 +1589,17 @@ mod tests {
 
     // macOS check sandboxes deny TCP. The same HTTP fixtures use a private Unix socket there;
     // ordinary test runs retain TCP, including its connection and retry behavior.
-    enum TestListener {
+    pub(super) enum TestListener {
         Tcp(std::net::TcpListener),
         Unix(std::os::unix::net::UnixListener),
     }
 
-    enum TestStream {
+    pub(super) enum TestStream {
         Tcp(std::net::TcpStream),
         Unix(std::os::unix::net::UnixStream),
     }
 
-    enum TestEndpoint {
+    pub(in crate::store_remote) enum TestEndpoint {
         Tcp(std::net::SocketAddr),
         Unix(std::path::PathBuf),
     }
@@ -1705,6 +1691,49 @@ mod tests {
             head.push(byte[0]);
         }
         head
+    }
+
+    /// A loopback gateway for `puts` PUTs, one thread per connection, that answers 201 once `together` request bodies
+    /// have arrived. It reads the bodies in small pieces and keeps none of them.
+    #[allow(clippy::unwrap_used)]
+    pub(in crate::store_remote) fn put_fixture(
+        puts: usize,
+        together: usize,
+    ) -> (Gateway, TestEndpoint, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let (listener, endpoint) = test_listener();
+        let arrived = std::sync::Arc::new(std::sync::Barrier::new(together));
+        let server = std::thread::spawn(move || {
+            let connections: Vec<_> = (0..puts)
+                .map(|_| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let arrived = arrived.clone();
+                    std::thread::spawn(move || {
+                        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+                        let head = String::from_utf8(read_head(&mut stream)).unwrap().to_ascii_lowercase();
+                        let mut left: usize = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+                            .unwrap();
+                        let mut piece = [0; 1 << 16];
+                        while left > 0 {
+                            let read = stream.read(&mut piece[..left.min(1 << 16)]).unwrap();
+                            assert!(read > 0, "the body ended early");
+                            left -= read;
+                        }
+                        arrived.wait();
+                        write!(stream, "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    })
+                })
+                .collect();
+            for connection in connections {
+                connection.join().unwrap();
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        endpoint.configure(&mut gateway);
+        gateway.token = Some("fixture.write".into());
+        (gateway, endpoint, server)
     }
 
     fn test_listener() -> (TestListener, TestEndpoint) {
@@ -2085,6 +2114,36 @@ mod tests {
         let result = gateway.list("states/");
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn descriptor_reads_observe_replacements_in_the_same_client_and_clones() {
+        use std::io::{Read, Write};
+        let (listener, address) = test_listener();
+        let server = std::thread::spawn(move || {
+            for body in ["first", "second", "third", "fourth"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(request.starts_with(b"GET /v1/p/project/store.json "));
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project").unwrap();
+        address.configure(&mut gateway);
+        assert_eq!(gateway.get("store.json").unwrap().unwrap(), b"first");
+        assert_eq!(gateway.get("store.json").unwrap().unwrap(), b"second");
+        assert_eq!(gateway.clone().get("store.json").unwrap().unwrap(), b"third");
+        let mut fresh = Gateway::open("layr+https://localhost/project").unwrap();
+        address.configure(&mut fresh);
+        assert_eq!(fresh.get("store.json").unwrap().unwrap(), b"fourth");
+        server.join().unwrap();
     }
 
     #[test]
@@ -2656,8 +2715,12 @@ mod tests {
                 // A reply that names a signed URL has the CDN type, as layr-gateway `cdn.rs` sends it.
                 let kind =
                     if reply.starts_with("{\"url\"") { format!("Content-Type: {CDN_CONTENT_TYPE}\r\n") } else { String::new() };
-                write!(stream, "HTTP/1.1 {status}\r\n{kind}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len())
-                    .unwrap();
+                // A client that stops at its size bound closes before the reply is all sent: the write fails then.
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\n{kind}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
             }
         });
         (address, server)
@@ -2774,6 +2837,28 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_route_refused_after_it_worked_is_read_object_by_object() {
+        let identity = keys::generate_identity();
+        let batches = std::sync::atomic::AtomicUsize::new(0);
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), move |request, _| {
+            if !request.ends_with("/batch") {
+                ("200 OK", "x".into())
+            } else if batches.fetch_add(1, Ordering::SeqCst) == 0 {
+                let envelope = transport_tests::envelope(vec![(200, b"x".to_vec())]);
+                ("200 OK", String::from_utf8(envelope).unwrap())
+            } else {
+                // A rolling deploy: the next gateway refuses the route, also with a renewed proof.
+                ("401 Unauthorized", "no session".into())
+            }
+        });
+        let backend = super::super::backend::Backend::Gateway(proof_client(&address, &identity, 300_000));
+        assert_eq!(backend.get_many(&["states/ab".to_string()]).unwrap(), vec![Some(b"x".to_vec())]);
+        assert_eq!(backend.get_many(&["states/cd".to_string()]).unwrap(), vec![Some(b"x".to_vec())]);
+        let log = quit(&address, server);
+        assert_eq!(log.iter().filter(|line| line.contains("/objects/states/cd")).count(), 1, "{log:?}");
+    }
+
+    #[test]
     fn a_second_401_after_a_renewal_fails_clearly() {
         let identity = keys::generate_identity();
         let (address, server) =
@@ -2797,12 +2882,92 @@ mod tests {
         assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof cdn"], "a 404 does not renew the proof or send again");
     }
 
+    pub(crate) struct FileTransport {
+        endpoint: TestEndpoint,
+        server: Option<std::thread::JoinHandle<Vec<(String, serde_json::Value)>>>,
+    }
+    #[allow(clippy::expect_used)]
+    impl FileTransport {
+        pub(crate) fn finish(mut self) -> Vec<(String, serde_json::Value)> {
+            transport_tests::stop_transport(&self.endpoint, self.server.take().expect("test peer is running"))
+        }
+    }
+    impl Drop for FileTransport {
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                transport_tests::stop_transport(&self.endpoint, server);
+            }
+        }
+    }
+    /// Reuse the binary peer and TCP/Unix selection for reader and end-to-end tests.
     #[allow(clippy::unwrap_used)]
-    mod transport_tests {
+    pub(crate) fn file_transport(
+        files: crate::store_remote::backend::Backend,
+    ) -> (crate::store_remote::backend::Backend, FileTransport) {
+        let (mut gateway, endpoint, server) = transport_tests::transport_fixture(move |request, value, body| {
+            if let Some(key) = request.strip_prefix("put /v1/p/project/objects/") {
+                let created = files.put_new(key, body.to_vec()).unwrap();
+                return (if created { 201 } else { 412 }, Vec::new());
+            }
+            if request.ends_with("/batch") {
+                let items = value["keys"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|name| {
+                        let body = files.get(name.as_str().unwrap()).unwrap();
+                        body.map_or((404, vec![]), |body| (200, body))
+                    })
+                    .collect();
+                return (200, transport_tests::envelope(items));
+            }
+            let path = request.split_whitespace().nth(1).unwrap();
+            let path = path.strip_prefix("/v1/p/project/").unwrap();
+            let (action, query) = path.split_once('?').unwrap_or((path, ""));
+            if action == "objects" {
+                let prefix = reqwest::Url::parse(&format!("http://localhost/?{query}"))
+                    .unwrap()
+                    .query_pairs()
+                    .find(|(key, _)| key == "prefix")
+                    .map(|(_, value)| value.into_owned())
+                    .unwrap_or_default();
+                let objects = files
+                    .list(&prefix)
+                    .unwrap()
+                    .into_iter()
+                    .map(|o| serde_json::json!({"key":o.key,"modified":o.modified.saturating_mul(1000),"size":o.size}))
+                    .collect::<Vec<_>>();
+                return (200, serde_json::to_vec(&serde_json::json!({"objects":objects,"continuation":null})).unwrap());
+            }
+            if action == "cdn" {
+                return (404, b"unsupported".to_vec());
+            }
+            let name = action.strip_prefix("objects/").unwrap_or(action);
+            files.get(name).unwrap().map_or((404, vec![]), |body| (200, body))
+        });
+        gateway.token = Some("fixture.write".into());
+        (crate::store_remote::backend::Backend::Gateway(gateway), FileTransport { endpoint, server: Some(server) })
+    }
+
+    /// `file_transport` for a machine with a write grant and no read identity: it gets no read proof.
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn write_only_transport(
+        files: crate::store_remote::backend::Backend,
+    ) -> (crate::store_remote::backend::Backend, FileTransport) {
+        let (backend, transport) = file_transport(files);
+        if let crate::store_remote::backend::Backend::Gateway(gateway) = &backend {
+            *gateway.identity.lock().unwrap() = None;
+            *gateway.read.lock().unwrap() = None;
+        }
+        (backend, transport)
+    }
+
+    #[allow(clippy::unwrap_used)]
+    pub(super) mod transport_tests {
         use super::*;
         // Unlike proof_gateway this fixture accepts arbitrary binary bodies and logs decoded POST requests.
-        fn transport_fixture(
-            answer: impl Fn(&str, &serde_json::Value) -> (u16, Vec<u8>) + Send + 'static,
+        pub(super) fn transport_fixture(
+            answer: impl Fn(&str, &serde_json::Value, &[u8]) -> (u16, Vec<u8>) + Send + 'static,
         ) -> (Gateway, TestEndpoint, std::thread::JoinHandle<Vec<(String, serde_json::Value)>>) {
             use std::io::{Read, Write};
             let (listener, endpoint) = test_listener();
@@ -2824,7 +2989,7 @@ mod tests {
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).unwrap();
                     let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-                    let (status, reply) = answer(&request, &value);
+                    let (status, reply) = answer(&request, &value, &body);
                     requests.push((request, value));
                     write!(stream, "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len())
                         .unwrap();
@@ -2837,7 +3002,7 @@ mod tests {
 
         #[test]
         fn transport_public_reads_never_probe_authenticated_batch_routes() {
-            let (gateway, endpoint, server) = transport_fixture(|request, _| {
+            let (gateway, endpoint, server) = transport_fixture(|request, _, _| {
                 assert!(request.starts_with("get /p/project/records/"));
                 (200, b"public".to_vec())
             });
@@ -2845,7 +3010,10 @@ mod tests {
             let keys = (1..=8)
                 .map(|i| crate::store_remote::format::segment_name("01a12290-0000-7000-8000-000000000008", i, i))
                 .collect::<Vec<_>>();
-            assert_eq!(gateway.get_many(&keys).unwrap(), vec![Some(b"public".to_vec()); 8]);
+            assert_eq!(
+                crate::store_remote::backend::Backend::Gateway(gateway.clone()).get_many(&keys).unwrap(),
+                vec![Some(b"public".to_vec()); 8]
+            );
             let log = stop_transport(&endpoint, server);
             assert_eq!(log.len(), 8);
             assert_eq!(gateway.transfer_stats().downloaded, 48);
@@ -2853,7 +3021,7 @@ mod tests {
 
         #[test]
         fn transport_old_gateway_is_probed_once_across_multiple_batches_and_calls() {
-            let (gateway, endpoint, server) = transport_fixture(|request, _| {
+            let (gateway, endpoint, server) = transport_fixture(|request, _, _| {
                 if request.ends_with("/batch") {
                     (404, b"no such route".to_vec())
                 } else {
@@ -2861,8 +3029,11 @@ mod tests {
                 }
             });
             let keys = (0..257).map(|i| format!("states/{i}")).collect::<Vec<_>>();
-            assert_eq!(gateway.get_many(&keys).unwrap(), vec![Some(b"x".to_vec()); 257]);
-            gateway.get_many(&keys[..1]).unwrap();
+            assert_eq!(
+                crate::store_remote::backend::Backend::Gateway(gateway.clone()).get_many(&keys).unwrap(),
+                vec![Some(b"x".to_vec()); 257]
+            );
+            crate::store_remote::backend::Backend::Gateway(gateway.clone()).get_many(&keys[..1]).unwrap();
             let log = stop_transport(&endpoint, server);
             assert_eq!(log.len(), 259);
             assert_eq!(log.iter().filter(|(r, _)| r.ends_with("/batch")).count(), 1);
@@ -2872,7 +3043,7 @@ mod tests {
         fn transport_batch_item_errors_do_not_fall_back_to_reads_or_history() {
             use crate::store_remote::backend::{Backend, EpochBackend};
             for status in [403, 503] {
-                let (gateway, endpoint, server) = transport_fixture(move |request, _| {
+                let (gateway, endpoint, server) = transport_fixture(move |request, _, _| {
                     assert!(request.ends_with("/batch"));
                     (200, envelope(vec![(status, vec![])]))
                 });
@@ -2887,7 +3058,7 @@ mod tests {
             }
         }
 
-        fn stop_transport(
+        pub(super) fn stop_transport(
             endpoint: &TestEndpoint,
             server: std::thread::JoinHandle<Vec<(String, serde_json::Value)>>,
         ) -> Vec<(String, serde_json::Value)> {
@@ -2897,7 +3068,7 @@ mod tests {
             server.join().unwrap()
         }
 
-        fn envelope(items: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
+        pub(super) fn envelope(items: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
             let index = serde_json::json!({"objects":items.iter().map(|(status, body)| {
             serde_json::json!({"status":status,"length":body.len()})
         }).collect::<Vec<_>>()});
@@ -2915,7 +3086,7 @@ mod tests {
         #[test]
         fn transport_257_keys_batch_through_nested_prefix_and_epoch() {
             use crate::store_remote::backend::{Backend, EpochBackend};
-            let (gateway, endpoint, server) = transport_fixture(|request, value| {
+            let (gateway, endpoint, server) = transport_fixture(|request, value, _| {
                 if request.ends_with("/batch") {
                     assert_eq!(value["epoch"], "01a12290-0000-7000-8000-000000000008");
                     let names = value["keys"].as_array().unwrap();
@@ -2951,7 +3122,7 @@ mod tests {
         #[test]
         fn transport_epoch_partitions_root_objects_and_maps_current_claim_keys() {
             use crate::store_remote::backend::{Backend, EpochBackend};
-            let (gateway, endpoint, server) = transport_fixture(|request, value| {
+            let (gateway, endpoint, server) = transport_fixture(|request, value, _| {
                 assert!(request.ends_with("/batch"));
                 (
                     200,
@@ -2987,7 +3158,7 @@ mod tests {
             let current = keys::generate_identity();
             let sealed_old = keys::encrypt(&keys::recipient_of(&old).unwrap(), b"old").unwrap();
             let sealed_current = keys::encrypt(&keys::recipient_of(&current).unwrap(), b"current").unwrap();
-            let (gateway, endpoint, server) = transport_fixture(move |request, value| {
+            let (gateway, endpoint, server) = transport_fixture(move |request, value, _| {
                 assert!(request.ends_with("/batch"));
                 let root = value["epoch"] == "root";
                 let bodies = value["keys"]
@@ -3019,7 +3190,7 @@ mod tests {
 
         #[test]
         fn transport_overflow_falls_back_only_for_unresolved_objects_in_order() {
-            let (gateway, endpoint, server) = transport_fixture(|request, _| {
+            let (gateway, endpoint, server) = transport_fixture(|request, _, _| {
                 if request.ends_with("/batch") {
                     (200, envelope(vec![(200, b"a".to_vec()), (404, vec![]), (507, vec![]), (501, vec![])]))
                 } else if request.ends_with("/cdn") {
@@ -3028,7 +3199,9 @@ mod tests {
                     (200, request.as_bytes().last().unwrap().to_be_bytes().to_vec())
                 }
             });
-            let got = gateway.get_many(&["states/a".into(), "states/b".into(), "states/c".into(), "states/d".into()]).unwrap();
+            let got = crate::store_remote::backend::Backend::Gateway(gateway.clone())
+                .get_many(&["states/a".into(), "states/b".into(), "states/c".into(), "states/d".into()])
+                .unwrap();
             assert_eq!(got, vec![Some(b"a".to_vec()), None, Some(b"c".to_vec()), Some(b"d".to_vec())]);
             let stats = gateway.transfer_stats();
             let log = stop_transport(&endpoint, server);
@@ -3039,26 +3212,32 @@ mod tests {
 
         #[test]
         fn transport_known_sizes_batch_cdn_metadata_and_reject_oversized_bodies() {
-            let (gateway, endpoint, server) = transport_fixture(|request, value| {
+            let (gateway, endpoint, server) = transport_fixture(|request, value, _| {
                 if request.ends_with("/cdn") {
                     (200, serde_json::to_vec(&serde_json::json!({"objects":value["keys"].as_array().unwrap().iter().map(|_| serde_json::json!({"status":200,"url":"https://elsewhere.example/o/untrusted","bytes":1})).collect::<Vec<_>>()})).unwrap())
+                } else if request.ends_with("/batch") {
+                    // A gateway without the batch route: the reads go one at a time.
+                    (404, Vec::new())
                 } else {
                     (200, b"xx".to_vec())
                 }
             });
             let backend = crate::store_remote::backend::Backend::Gateway(gateway.clone());
             let mut bodies = vec![None; 3];
+            let keys = ["states/a".into(), "states/b".into(), "states/c".into()];
             backend
-                .download_many(&["states/a".into(), "states/b".into(), "states/c".into()], &[2, 2, 2], |i, body| {
-                    bodies[i] = body;
+                .visit_decrypted_many(&keys, &[Some(2); 3], keys::PLAIN, |i, body| {
+                    bodies[i] = Some(body);
                     Ok(())
                 })
                 .unwrap();
             assert_eq!(bodies, vec![Some(b"xx".to_vec()); 3]);
-            assert!(backend.download_many(&["states/d".into()], &[1], |_, _| Ok(())).is_err());
+            assert!(backend.visit_decrypted_many(&["states/d".into()], &[Some(1)], keys::PLAIN, |_, _| Ok(())).is_err());
             let stats = gateway.transfer_stats();
             let log = stop_transport(&endpoint, server);
-            assert_eq!(log.len(), 5); // One URL batch, three direct bodies, one size-bound rejection.
+            // One refused batch (sized reads batch too), one URL batch, three direct bodies, one size-bound rejection.
+            assert_eq!(log.len(), 6);
+            assert_eq!(log.iter().filter(|(r, _)| r.ends_with("/batch")).count(), 1);
             assert_eq!(log.iter().filter(|(r, _)| r.ends_with("/cdn")).count(), 1);
             assert_eq!(stats.downloaded, 6);
         }
@@ -3087,7 +3266,10 @@ mod tests {
             let gateway = proof_client(&endpoint, &identity, 300_000);
             gateway.batch_off.store(true, Ordering::SeqCst);
             let keys = (0..4).map(|i| format!("states/{i}")).collect::<Vec<_>>();
-            assert_eq!(gateway.get_many(&keys).unwrap(), vec![Some(b"x".to_vec()); 4]);
+            assert_eq!(
+                crate::store_remote::backend::Backend::Gateway(gateway.clone()).get_many(&keys).unwrap(),
+                vec![Some(b"x".to_vec()); 4]
+            );
             server.join().unwrap();
             assert_eq!(gateway.transfer_stats().requests, 4);
         }
@@ -3102,7 +3284,10 @@ mod tests {
             let gateway = proof_client(&endpoint, &identity, 30_000);
             gateway.batch_off.store(true, Ordering::SeqCst);
             let keys = (0..16).map(|i| format!("states/{i}")).collect::<Vec<_>>();
-            assert_eq!(gateway.get_many(&keys).unwrap(), vec![Some(b"x".to_vec()); 16]);
+            assert_eq!(
+                crate::store_remote::backend::Backend::Gateway(gateway.clone()).get_many(&keys).unwrap(),
+                vec![Some(b"x".to_vec()); 16]
+            );
             let log = quit(&endpoint, server);
             assert_eq!(log.iter().filter(|r| r.starts_with("GET /v1/p/project/challenge")).count(), 1);
             assert_eq!(log.iter().filter(|r| r.starts_with("POST /v1/p/project/token")).count(), 1);
@@ -3126,6 +3311,22 @@ mod tests {
         quit(&address, server);
     }
 
+    /// A read within a bound smaller than the gateway's ceiling (a chunk pack) stops at that bound.
+    #[test]
+    fn a_read_within_a_bound_takes_in_no_more_than_the_bound() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), move |request, _| {
+            assert!(request.starts_with("GET "), "{request}");
+            ("200 OK", "x".repeat(1 << 20))
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        let backend = crate::store_remote::backend::Backend::Gateway(gateway.clone());
+        assert!(backend.get_within("states/ab", Some(1 << 10)).is_err());
+        let downloaded = gateway.transfer_stats().downloaded;
+        assert!(downloaded <= (1 << 10) + 1, "{downloaded} bytes read");
+        quit(&address, server);
+    }
+
     #[test]
     fn get_many_reads_the_objects_in_one_batch_request() {
         let identity = keys::generate_identity();
@@ -3139,7 +3340,9 @@ mod tests {
             ("200 OK", reply)
         });
         let gateway = proof_client(&address, &identity, 300_000);
-        let got = gateway.get_many(&["states/ab".into(), "states/cd".into()]).unwrap();
+        let got = crate::store_remote::backend::Backend::Gateway(gateway.clone())
+            .get_many(&["states/ab".into(), "states/cd".into()])
+            .unwrap();
         assert_eq!(got, vec![Some(b"abc".to_vec()), None]);
         let log = quit(&address, server);
         assert_eq!(log, ["POST /v1/p/project/batch old.proof"], "one request for both objects");
@@ -3153,7 +3356,9 @@ mod tests {
             _ => ("200 OK", "x".into()),
         });
         let gateway = proof_client(&address, &identity, 300_000);
-        let got = gateway.get_many(&["states/ab".into(), "states/cd".into()]).unwrap();
+        let got = crate::store_remote::backend::Backend::Gateway(gateway.clone())
+            .get_many(&["states/ab".into(), "states/cd".into()])
+            .unwrap();
         assert_eq!(got, vec![Some(b"x".to_vec()), Some(b"x".to_vec())]);
         let log = quit(&address, server);
         assert_eq!(log[0], "POST /v1/p/project/batch old.proof");
@@ -3169,7 +3374,8 @@ mod tests {
             ("401 Unauthorized", r#"{"error":"no read grant"}"#.into())
         });
         let gateway = proof_client(&address, &identity, 300_000);
-        assert!(gateway.get_many(&["states/ab".into(), "states/cd".into()]).is_err());
+        let backend = super::super::backend::Backend::Gateway(gateway.clone());
+        assert!(backend.get_many(&["states/ab".into(), "states/cd".into()]).is_err());
         assert!(gateway.batch_off.load(Ordering::SeqCst));
         let log = quit(&address, server);
         assert!(log.iter().any(|r| r.starts_with("GET /v1/p/project/objects/")), "{log:?}");
@@ -3195,9 +3401,4 @@ mod tests {
         );
         assert!(gateway.cdn_off.load(Ordering::SeqCst), "later reads of the command skip the CDN");
     }
-}
-
-fn epoch_path(key: &str) -> Option<(&str, &str)> {
-    let (epoch, inner) = key.strip_prefix("project/epochs/")?.split_once('/')?;
-    super::format::is_uuid(epoch).then_some((epoch, inner))
 }

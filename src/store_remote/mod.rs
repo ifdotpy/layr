@@ -733,6 +733,25 @@ fn store_dir(repo: &Repo, url: &str) -> PathBuf {
     repo.p.meta_dir().join("remote-stores").join(hex::encode(ContentAddress::digest(url.as_bytes())))
 }
 
+/// The text that names the store at `url` whichever way the URL spells it: without a trailing slash, `.` or `..`, with
+/// the host in lower case and without a default port, and for a file store the canonical path when it exists.
+fn store_identity(url: &str) -> String {
+    if let Some(address) = url.strip_prefix("layr+https://") {
+        if let Ok(parsed) = reqwest::Url::parse(&format!("https://{address}")) {
+            return format!("layr+{}", parsed.as_str().trim_end_matches('/'));
+        }
+    } else if url.starts_with("file://") {
+        if let Some(path) = reqwest::Url::parse(url).ok().and_then(|parsed| parsed.to_file_path().ok()) {
+            let path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.components().collect());
+            return format!("file://{}", path.display());
+        }
+    } else if let Some(path) = url.strip_prefix("s3://") {
+        let (bucket, prefix) = path.split_once('/').unwrap_or((path, ""));
+        return format!("s3://{bucket}/{}", prefix.trim_matches('/'));
+    }
+    url.to_string()
+}
+
 /// Records that this machine read the store with its own key. `store_copies` counts a copy only
 /// for a store this machine can read.
 fn mark_read(dir: &std::path::Path) -> Result<()> {
@@ -784,6 +803,18 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
 }
 
 impl Store {
+    /// The folder whose lock lets one push or sweep of this store (or of a layer of it) run at a time on this machine:
+    /// `dir`, under the store's identity rather than its URL, so that two URLs of one store share it. The local state of
+    /// the store stays under its URL.
+    pub(super) fn lock_dir(&self) -> PathBuf {
+        let raw = hex::encode(ContentAddress::digest(self.url.as_bytes()));
+        let Some(top) = self.dir.ancestors().find(|dir| dir.file_name().is_some_and(|name| *name == *raw)) else {
+            return self.dir.clone();
+        };
+        let identity = hex::encode(ContentAddress::digest(store_identity(&self.url).as_bytes()));
+        top.with_file_name(identity).join(self.dir.strip_prefix(top).unwrap_or(std::path::Path::new("")))
+    }
+
     pub fn write_index(&mut self, ctx: &Ctx, repo: &Repo) -> Result<index::Report> {
         self.connect(ctx)?;
         repo.require(ctx, "sync")?;

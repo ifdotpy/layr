@@ -1,7 +1,7 @@
 //! Read, authenticate and restore immutable records and state attempts.
 
 use super::{
-    backend::Backend,
+    backend::{Backend, Undecodable},
     format::{self, Entry, Header, Tree},
     keys, zst, Options, Report, Store,
 };
@@ -11,6 +11,10 @@ use ed25519_dalek::VerifyingKey;
 use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+#[path = "fetch_plan.rs"]
+mod fetch_plan;
+use fetch_plan::{unchanged, Material};
 
 use crate::sync_local::fetch::publish_restored;
 #[cfg(test)]
@@ -73,22 +77,23 @@ pub(super) fn records_with_local(
         if let Some(bound) = local_digest().map(|digest| format!("{stamp} {digest}")).filter(|bound| known.contains(bound)) {
             checked.push(bound);
         } else {
-            wanted.push((object.key, machine, first, last, stamp));
+            wanted.push((object.key, machine, first, last, stamp, object.size));
         }
     }
     // A segment is one small object: a clone reads hundreds of them, so they come in batches (one request per
-    // 256 segments through a gateway, else 32 reads at a time).
-    let keys: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
-    let bodies: Vec<Result<Vec<u8>>> =
-        backend.get_many(&keys)?.into_iter().map(|body| body.context("record segment disappeared")).collect();
-    for ((key, machine, first, last, stamp), body) in wanted.into_iter().zip(bodies) {
-        let body = body?;
-        let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
+    // 256 segments through a gateway, else several reads at a time). Each is checked as it comes, while its read holds
+    // its reservation: the bodies of a long history are never all in memory.
+    let names: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
+    let sizes: Vec<Option<u64>> = wanted.iter().map(|(.., size)| *size).collect();
+    backend.visit_many(&names, &sizes, |i, body| {
+        let (key, machine, first, last, stamp, _) = &wanted[i];
+        let (first, last) = (*first, *last);
+        let body = String::from_utf8(keys::decrypt(identity, &body.context("record segment disappeared")?)?)?;
         let mut expected = first;
         let mut digest = ContentAddress::new();
         for line in body.lines() {
             let signed = oplog::parse_line(line)?;
-            if signed.record.machine != machine || signed.record.seq != expected || expected > last {
+            if &signed.record.machine != machine || signed.record.seq != expected || expected > last {
                 bail!("segment {} has an invalid sequence", key);
             }
             if signed.record.project != project {
@@ -113,7 +118,8 @@ pub(super) fn records_with_local(
             bail!("segment {} is incomplete", key);
         }
         checked.push(format!("{stamp} {}", hex::encode(digest.finalize())));
-    }
+        Ok(())
+    })?;
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
     for line in local {
         let record = oplog::parse_line(line)?.record;
@@ -178,6 +184,16 @@ pub(super) fn records_with_local(
     Ok(Records { lines, keys, overlaps, gaps })
 }
 
+/// The most parts of one prefetch window: one batch of the gateway.
+const WINDOW_KEYS: usize = 256;
+
+/// The parts of one prefetch window of full parts, the window when no listing gave the sizes of the parts: they stay
+/// in the operation cache until restore reads them, so a window takes at most half of it.
+#[cfg(test)]
+pub(super) fn window_parts() -> usize {
+    usize::try_from(fetch_plan::MATERIAL_BYTES / 2 / keys::ciphertext_len(format::PART_LIMIT) as u64).unwrap_or(1).max(1)
+}
+
 pub(super) struct Reader<'a> {
     backend: &'a Backend,
     identity: &'a str,
@@ -188,6 +204,13 @@ pub(super) struct Reader<'a> {
     part_bytes: usize,
     gets: std::cell::Cell<usize>,
     chunks: Option<super::chunked::Reader<'a>>,
+    material: Option<Material>,
+    part_order: Vec<String>,
+    // Object -> (plan position, remaining uses, large signed frame extent).
+    part_uses: BTreeMap<String, (usize, usize, bool)>,
+    /// Listed sizes of remote objects (`backend::Object::size`): they reserve the bytes of their reads.
+    pub(super) sizes: BTreeMap<String, u64>,
+    chunk_dir: Option<PathBuf>,
 }
 
 impl<'a> Reader<'a> {
@@ -202,14 +225,121 @@ impl<'a> Reader<'a> {
             part_bytes: 0,
             gets: std::cell::Cell::new(0),
             chunks: None,
+            material: None,
+            part_order: Vec::new(),
+            part_uses: BTreeMap::new(),
+            sizes: BTreeMap::new(),
+            chunk_dir: None,
         }
     }
     pub fn get_count(&self) -> usize {
         self.gets.get()
     }
-    fn decrypted(&self, key: &str) -> Result<Vec<u8>> {
+    /// Keep downloaded objects of this operation in an encrypted cache in `dir`, so that batched prefetches and
+    /// evicted trees are not read from the remote again. Without a usable folder, every read goes to the remote.
+    pub(super) fn cache_in(&mut self, dir: Option<PathBuf>) {
+        self.material = dir.and_then(Material::new);
+    }
+    fn decrypted(&mut self, key: &str) -> Result<Vec<u8>> {
+        if let Some(body) = self.material.as_mut().and_then(|m| m.get(key)) {
+            return Ok(body);
+        }
+        if let (Some(material), Some(&(position, _, large))) = (&mut self.material, self.part_uses.get(key)) {
+            // No retained part buffers overlap WP1's transport/decrypt workspace.
+            self.parts.clear();
+            self.part_bytes = 0;
+            // A window holds at most half of the operation cache: a part of unknown size counts as a full one.
+            let full = keys::ciphertext_len(format::PART_LIMIT) as u64;
+            let mut bytes = 0;
+            let names = self.part_order[position..]
+                .iter()
+                .take(if large { 1 } else { WINDOW_KEYS })
+                .take_while(|name| large || !self.part_uses[*name].2)
+                .take_while(|name| {
+                    bytes += self.sizes.get(*name).copied().unwrap_or(full);
+                    large || bytes <= fetch_plan::MATERIAL_BYTES / 2
+                })
+                .filter(|name| self.part_uses[*name].1 > 0 && !material.entries.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut wanted = None;
+            Self::download(self.backend, self.identity, &self.gets, &self.sizes, &names, large, |i, body| {
+                material.put(&names[i], &body);
+                if names[i] == key {
+                    wanted = Some(body);
+                }
+                Ok(())
+            })?;
+            if let Some(body) = wanted {
+                return Ok(body);
+            }
+        }
         self.gets.set(self.gets.get() + 1);
-        self.backend.decrypted(key, self.identity).with_context(|| format!("decrypt {key}"))
+        let body = self.backend.decrypted(key, self.identity).with_context(|| format!("decrypt {key}"))?;
+        if let Some(material) = &mut self.material {
+            material.put(key, &body);
+        }
+        Ok(body)
+    }
+
+    /// One dispatch point for prefetch, in batches of 256 objects: capped Gateway batches for parts; otherwise one
+    /// run of the transfer pool per batch (a File or S3 body without a listed size runs alone). An oversized part
+    /// comes in a window of its own (`decrypted`).
+    /// Reads `names` in batches. The listed size of each, or else the transport's read limit for `large` parts,
+    /// reserves the bytes of its read.
+    fn download(
+        backend: &Backend,
+        identity: &str,
+        gets: &std::cell::Cell<usize>,
+        sizes: &BTreeMap<String, u64>,
+        names: &[String],
+        large: bool,
+        mut visit: impl FnMut(usize, Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        let limit = backend.read_limit().filter(|_| large);
+        for (batch, window) in names.chunks(WINDOW_KEYS).enumerate() {
+            let offset = batch * WINDOW_KEYS;
+            gets.set(gets.get() + window.len());
+            let sizes: Vec<_> = window.iter().map(|name| sizes.get(name).copied().or(limit.map(|limit| limit as u64))).collect();
+            backend.visit_decrypted_many(window, &sizes, identity, |i, body| visit(offset + i, body))?;
+        }
+        Ok(())
+    }
+
+    /// Fetch encrypted tree material by dependency rounds, deduplicating attempts.
+    /// Headers only route reads; `tree` authenticates every canonical base before use.
+    pub(super) fn prefetch_trees(&mut self, roots: Vec<(String, String)>) -> Result<()> {
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let Some(material) = &mut self.material else { return Ok(()) };
+        let mut seen = BTreeSet::new();
+        let mut pending = roots;
+        for _ in 0..format::FULL_TREE_EVERY {
+            pending.retain(|at| seen.insert(at.clone()));
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let names: Vec<_> = pending.iter().map(|(s, a)| format::tree_name(s, a)).collect();
+            let mut next = Vec::new();
+            Self::download(self.backend, self.identity, &self.gets, &self.sizes, &names, false, |i, object| {
+                let (header, _) = format::split_tree(&object)?;
+                // Routing is speculative. `tree` checks format, identity, signature
+                // and canonical content before using any tree. Only safe names route reads.
+                if header.tree != "full" {
+                    if let Some(base) = &header.base {
+                        if format::parse_tree_name(&format::tree_name(&base.0, &base.1)).is_some() && !seen.contains(base) {
+                            next.push(base.clone());
+                        }
+                    }
+                }
+                material.put(&names[i], &object);
+                Ok(())
+            })?;
+            pending = next;
+        }
+        anyhow::ensure!(pending.iter().all(|at| seen.contains(at)), "tree chain exceeds 32 states");
+        Ok(())
     }
     pub fn tree(&mut self, state: &str, attempt: &str) -> Result<(Header, Vec<u8>, Tree)> {
         let wanted = (state.to_string(), attempt.to_string());
@@ -222,12 +352,14 @@ impl<'a> Reader<'a> {
         let mut seen = BTreeSet::new();
         let mut canonical;
         let mut depth = 0;
+        // Every failure but a failed read, a missing object and a signer without a key here is `Undecodable`: the tree
+        // never decodes.
         loop {
             if !seen.insert(at.clone()) {
-                bail!("tree chain has a loop");
+                bail!(Undecodable("tree chain has a loop".into()));
             }
             if seen.len() > format::FULL_TREE_EVERY {
-                bail!("tree chain exceeds 32 states");
+                bail!(Undecodable("tree chain exceeds 32 states".into()));
             }
             if let Some((_, bytes, _)) = self.trees.get(&at) {
                 canonical = bytes.clone();
@@ -235,12 +367,12 @@ impl<'a> Reader<'a> {
                 break;
             }
             let object = self.decrypted(&format::tree_name(&at.0, &at.1))?;
-            let (header, frame) = format::split_tree(&object)?;
+            let (header, frame) = format::split_tree(&object).map_err(Undecodable::of)?;
             if header.v != 2 {
-                bail!("unsupported tree format {}", header.v);
+                bail!(Undecodable(format!("unsupported tree format {}", header.v)));
             }
             if (header.state.as_str(), header.attempt.as_str()) != (at.0.as_str(), at.1.as_str()) {
-                bail!("tree identity differs from its object name");
+                bail!(Undecodable("tree identity differs from its object name".into()));
             }
             let full = header.tree == "full";
             let base = header.base.clone();
@@ -249,17 +381,23 @@ impl<'a> Reader<'a> {
                 canonical = Vec::new();
                 break;
             }
-            at = base.context("delta tree has no base")?;
+            at = base.ok_or_else(|| Undecodable("delta tree has no base".into()))?;
         }
         while let Some((header, frame)) = pending.pop() {
             depth = if header.tree == "full" { 0 } else { depth + 1 };
-            if depth >= format::FULL_TREE_EVERY {
-                bail!("tree chain exceeds 32 states");
-            }
-            canonical = zst::decompress(&frame, if header.tree == "full" { None } else { Some(&canonical) })?;
+            // A frame that does not decode is `Undecodable` whether or not its signer has a key here.
+            let next = (|| {
+                anyhow::ensure!(depth < format::FULL_TREE_EVERY, "tree chain exceeds 32 states");
+                zst::decompress(&frame, if header.tree == "full" { None } else { Some(&canonical) })
+            })()
+            .map_err(Undecodable::of)?;
             let key = self.keys.get(&header.machine).context("tree signer has no verified machine record")?;
-            header.verify(&canonical, key)?;
-            let tree = Tree::parse(&canonical)?;
+            let tree = (|| -> Result<Tree> {
+                header.verify(&next, key)?;
+                Ok(Tree::parse(&next)?)
+            })()
+            .map_err(Undecodable::of)?;
+            canonical = next;
             // At most two complete delta chains, rather than every tree in project history.
             if self.trees.len() >= format::FULL_TREE_EVERY * 2 {
                 self.trees.clear();
@@ -281,14 +419,16 @@ impl<'a> Reader<'a> {
             None => self.read(entry),
         }
     }
+    fn chunks(&mut self) -> &mut super::chunked::Reader<'a> {
+        self.chunks.get_or_insert_with(|| {
+            let mut chunks = super::chunked::Reader::new(self.backend, self.identity);
+            chunks.dir = self.chunk_dir.clone();
+            chunks
+        })
+    }
     /// A chunked file of a cache layer (`Tree::chunks`), checked against its tree entry.
     pub fn read_chunked(&mut self, entry: &Entry, ids: &[String]) -> Result<Vec<u8>> {
-        let (backend, identity) = (self.backend, self.identity);
-        let data = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity)).file(ids, entry.1)?;
-        if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
-            bail!("file size or SHA-256 does not match its tree");
-        }
-        Ok(data)
+        checked(entry, self.chunks().file(ids, entry.1)?)
     }
     pub fn read(&mut self, entry: &Entry) -> Result<Vec<u8>> {
         if entry.3.is_empty() {
@@ -306,17 +446,22 @@ impl<'a> Reader<'a> {
                 self.part_bytes += bytes.len();
                 self.parts.insert(key.clone(), bytes);
             }
-            let part = self.parts.get(&key).expect("part loaded");
+            let part = self.parts.get(&key).context("part was not loaded")?;
             let start = usize::try_from(link.3)?;
             let end = usize::try_from(link.3.checked_add(link.4).context("frame range overflow")?)?;
             let frame = part.get(start..end).context("frame is outside its part")?;
             let limit = if index == 0 { usize::try_from(entry.1)? } else { zst::LIMIT };
             data = zst::decompress_with_limit(frame, if link.5 == "delta" { Some(&data) } else { None }, limit)?;
+            if let Some((_, uses, _)) = self.part_uses.get_mut(&key) {
+                *uses = uses.saturating_sub(1);
+                if *uses == 0 {
+                    if let Some(material) = &mut self.material {
+                        material.remove(&key);
+                    }
+                }
+            }
         }
-        if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
-            bail!("file size or SHA-256 does not match its tree");
-        }
-        Ok(data)
+        checked(entry, data)
     }
     fn restore_over(&mut self, tree: &Tree, base: Option<&Tree>, root: &std::path::Path) -> Result<usize> {
         let _restore = crate::trace::span("store restore files");
@@ -329,36 +474,51 @@ impl<'a> Reader<'a> {
                 }
             }
         }
-        let mut written = 0;
-        let unchanged = |path: &String, entry: &Entry| {
-            base.and_then(|b| b.files.get(path))
-                .is_some_and(|old| (old.0.as_str(), old.1, old.2.as_str()) == (entry.0.as_str(), entry.1, entry.2.as_str()))
-                && base.and_then(|b| b.times.get(path)) == tree.times.get(path)
-        };
+        // The chunk reader leaves `self` while the loop below writes the files: the packs of its plan load on a pool
+        // of this scope during the whole loop.
+        self.chunks();
+        let mut chunks = self.chunks.take().context("chunk reader")?;
+        let written = std::thread::scope(|scope| self.write_files(tree, base, root, &target, &mut chunks, scope));
+        self.chunks = Some(chunks);
+        written
+    }
+
+    fn write_files<'scope, 'env>(
+        &mut self,
+        tree: &Tree,
+        base: Option<&Tree>,
+        root: &std::path::Path,
+        target: &crate::tree::Tree,
+        chunks: &mut super::chunked::Reader<'a>,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+    ) -> Result<usize>
+    where
+        'a: 'scope,
+    {
+        let mut planned = None;
         if !tree.chunks.is_empty() {
-            // The chunks of the files that the loop below writes, in its order, so their packs
-            // load ahead in the background.
+            // The chunks of the files that the loop below writes, in its order, so their packs load ahead.
             let ids: Vec<&String> = tree
                 .files
                 .iter()
-                .filter(|(path, entry)| !unchanged(path, entry))
+                .filter(|(path, entry)| !unchanged(tree, base, path, entry))
                 .filter_map(|(path, _)| tree.chunks.get(path))
                 .flatten()
                 .collect();
-            let (backend, identity) = (self.backend, self.identity);
-            let chunks = self.chunks.get_or_insert_with(|| super::chunked::Reader::new(backend, identity));
             // A chunk that no pack holds fails the restore before any file is read: the indexes are small, the files
             // are not.
             chunks.require(&ids)?;
-            chunks.plan(ids)?;
+            planned = Some(chunks.plan(scope, ids)?);
         }
+        let mut written = 0;
         for (path, entry) in &tree.files {
-            if unchanged(path, entry) {
+            if unchanged(tree, base, path, entry) {
                 continue;
             }
-            let data = match tree.chunks.get(path) {
-                Some(ids) => self.read_chunked(entry, ids)?,
-                None => self.read(entry)?,
+            let data = match (tree.chunks.get(path), planned.as_mut()) {
+                (Some(ids), Some(planned)) => checked(entry, planned.next_file(ids, entry.1)?)?,
+                (Some(_), None) => bail!("a chunked file outside the plan"),
+                (None, _) => self.read(entry)?,
             };
             target.mkdirs_for(path, None)?;
             if target.stat(path).is_some() {
@@ -380,6 +540,14 @@ impl<'a> Reader<'a> {
         }
         Ok(written)
     }
+}
+
+/// `data`, when it has the size and SHA-256 of its tree entry.
+fn checked(entry: &Entry, data: Vec<u8>) -> Result<Vec<u8>> {
+    if data.len() as u64 != entry.1 || hex::encode(ContentAddress::digest(&data)) != entry.2 {
+        bail!("file size or SHA-256 does not match its tree");
+    }
+    Ok(data)
 }
 
 /// The machines that a project's own signed history trusts: the creator (the signer of the `project` record), then
@@ -444,6 +612,9 @@ fn api_states(repo: &Repo) -> Result<BTreeMap<String, String>> {
 /// calls it once per state, so the list is kept for the process and read again only when a state
 /// that it must restore is not in it.
 fn restore_attempts(store: &Store, repo: &Repo, ids: &[String]) -> Result<BTreeMap<String, String>> {
+    if ids.iter().all(|id| repo.p.has_state(id)) {
+        return Ok(BTreeMap::new());
+    }
     static KNOWN: std::sync::Mutex<BTreeMap<std::path::PathBuf, BTreeMap<String, String>>> =
         std::sync::Mutex::new(BTreeMap::new());
     let wanted = |states: &BTreeMap<String, String>| ids.iter().all(|id| repo.p.has_state(id) || states.contains_key(id));
@@ -458,13 +629,18 @@ fn restore_attempts(store: &Store, repo: &Repo, ids: &[String]) -> Result<BTreeM
 }
 
 pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
+    Ok(attempts_of(&backend.list("states/")?))
+}
+
+/// The first complete attempt of each state in a listing of `states/`.
+fn attempts_of(objects: &[super::backend::Object]) -> BTreeMap<String, String> {
     let mut states = BTreeMap::new();
-    for object in backend.list("states/")? {
+    for object in objects {
         if let Some((state, attempt)) = format::parse_tree_name(&object.key) {
             states.entry(state).or_insert(attempt);
         }
     }
-    Ok(states)
+    states
 }
 
 /// Write one missing state of the store into the project and return the files written. The
@@ -677,6 +853,7 @@ fn fetch_legacy_api(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
 /// The v2 engine consumes only the local replica port. API object storage retains its named legacy path.
 pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>, opts: &Options) -> Result<Report> {
     let _fetch = crate::trace::span("store fetch");
+    let started = store.backend.transfer_stats();
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
     let mut records_local = Vec::new();
@@ -697,16 +874,35 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
         if pending.exists() { !serde_json::from_slice::<BTreeSet<String>>(&std::fs::read(pending)?)?.is_empty() } else { false };
     let mut report =
         Report { records: imported.count, overlaps: records.overlaps, gaps: records.gaps.clone(), ..Default::default() };
-    let states = attempts(&store.backend)?;
-    let plan =
-        local.fetch_selection(&records.lines, opts, &states.keys().cloned().collect::<Vec<_>>(), bootstrap || pending_clone)?;
+    let preflight = local.fetch_preflight(&records.lines, opts, bootstrap || pending_clone)?;
+    // Only previously confirmed remote omissions may be reused without a listing.
+    let confirmed = std::fs::read_to_string(super::states_left_file(&store.dir)).unwrap_or_default();
+    let mut listed = Vec::new();
+    let (states, plan) = match preflight.filter(|p| all_confirmed(&confirmed, &p.left)) {
+        Some(plan) => (BTreeMap::new(), plan),
+        None => {
+            listed = store.backend.list("states/")?;
+            let states = attempts_of(&listed);
+            let plan = local.fetch_selection(
+                &records.lines,
+                opts,
+                &states.keys().cloned().collect::<Vec<_>>(),
+                bootstrap || pending_clone,
+            )?;
+            (states, plan)
+        }
+    };
     report.git_packs = super::gitpack::fetch(store, local, &identity)?;
     report.clone_lines = plan.clone_lines;
     report.omitted = plan.omitted;
     let left = plan.left;
     let missing = plan.missing;
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
+    reader.chunk_dir = Some(store.dir.clone());
+    reader.cache_in(local.fetch_temp_dir());
+    reader.sizes = listed.into_iter().filter_map(|object| Some((object.key, object.size?))).collect();
     record_left(store, opts, left, &mut report)?;
+    let missing = super::writer::parents_first(missing)?;
     // Cache states that failed to restore, with the packs of the remote then (`<state> <packs>` lines): one is tried
     // again only when a push or a release changed the packs, so an idle fetch does not download it each time.
     let failed_path = store.dir.join("cache-restore-failed");
@@ -717,7 +913,8 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
         .collect();
     let failed_before = failed.clone();
     let mut packs_now: Option<String> = None;
-    for state in super::writer::parents_first(missing)? {
+    let mut pending_states = Vec::new();
+    for state in missing {
         let id = state.id.clone();
         let cache = local.is_overlay() && state.cache_of.is_some();
         if cache && failed.contains_key(&id) {
@@ -733,6 +930,60 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
                 continue;
             }
         }
+        pending_states.push(state);
+    }
+    let missing = pending_states;
+    if reader.material.is_some() && missing.iter().all(|state| state.cache_of.is_none()) {
+        let mut roots = Vec::new();
+        let mut bases = Vec::new();
+        let mut earlier = BTreeSet::new();
+        for state in &missing {
+            roots.push((state.id.clone(), states[&state.id].clone()));
+            // Earlier selected states will be present at this restore. Among
+            // those and the adapter's current base, only the first can be used.
+            let current = local.restore_base(state, &states);
+            let base = state
+                .parents
+                .iter()
+                .chain(&state.derived_from)
+                .find(|id| earlier.contains(*id) || current.as_ref() == Some(*id))
+                .cloned();
+            earlier.insert(state.id.clone());
+            roots.extend(base.iter().map(|id| (id.clone(), states[id].clone())));
+            bases.push(base);
+        }
+        reader.prefetch_trees(roots)?;
+        for (state, base) in missing.iter().zip(bases) {
+            let (_, _, tree) = reader.tree(&state.id, &states[&state.id])?;
+            let base = base.as_ref().map(|id| reader.tree(id, &states[id]).map(|(_, _, tree)| tree)).transpose()?;
+            for (path, entry) in &tree.files {
+                if tree.chunks.contains_key(path) || unchanged(&tree, base.as_ref(), path, entry) {
+                    continue;
+                }
+                for link in entry.3.iter().rev() {
+                    let key = link.object();
+                    let large = link.3.saturating_add(link.4) >= 16 << 20;
+                    if let Some((_, uses, was_large)) = reader.part_uses.get_mut(&key) {
+                        *uses += 1;
+                        *was_large |= large;
+                    } else {
+                        reader.part_uses.insert(key.clone(), (reader.part_order.len(), 1, large));
+                        reader.part_order.push(key);
+                    }
+                }
+            }
+        }
+    }
+    if missing.iter().any(|state| state.cache_of.is_some()) {
+        // Cache deletion races remain per-state omissions. A partially successful
+        // batch still leaves reusable material for the states that survived.
+        // Authentication/server errors are retried by demand reads and reported there.
+        let roots = missing.iter().map(|state| (state.id.clone(), states[&state.id].clone())).collect();
+        let _ = reader.prefetch_trees(roots);
+    }
+    for state in missing {
+        let id = state.id.clone();
+        let cache = local.is_overlay() && state.cache_of.is_some();
         let files = match restore_with_local(local, &mut reader, &states, &state) {
             Ok(files) => {
                 failed.remove(&id);
@@ -785,7 +1036,14 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
             let _ = enroll();
         }
     }
+    report.bytes = store.backend.transfer_stats().downloaded.saturating_sub(started.downloaded);
     Ok(report)
+}
+
+/// Whether every state of `left` is in `confirmed` (the lines of the `states-left` file).
+fn all_confirmed(confirmed: &str, left: &[String]) -> bool {
+    let confirmed: std::collections::HashSet<&str> = confirmed.lines().collect();
+    left.iter().all(|id| confirmed.contains(id.as_str()))
 }
 
 fn record_left(store: &Store, opts: &Options, left: Vec<String>, report: &mut Report) -> Result<()> {
@@ -813,11 +1071,16 @@ fn restore_with_local(
     }
     let parent = local.restore_base(state, states);
     let base = parent.as_ref().map(|id| reader.tree(id, &states[id]).map(|(_, _, tree)| tree)).transpose()?;
-    let stage = local.stage_state(parent.as_deref())?;
-    match reader.restore_over(&tree, base.as_ref(), &stage) {
-        Ok(files) => local.install_state(state, header.btrfs.as_ref().map_or(0, |identity| identity.transid), files),
-        Err(error) => Err(local.abort_state(error)),
-    }
+    let staged = |local: &mut super::Replica<'_>, reader: &mut Reader<'_>| {
+        let restored = local.stage_state(parent.as_deref()).and_then(|stage| reader.restore_over(&tree, base.as_ref(), &stage));
+        restored.map_err(|error| local.abort_state(error))
+    };
+    let restored = match staged(local, reader) {
+        // The operation cache shares the disk: it goes, and the state is staged and written once more without it.
+        Err(error) if crate::fs::is_storage_full(&error) && reader.material.take().is_some() => staged(local, reader),
+        restored => restored,
+    };
+    local.install_state(state, header.btrfs.as_ref().map_or(0, |identity| identity.transid), restored?)
 }
 
 pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {
@@ -868,6 +1131,21 @@ pub(super) fn log(store: &Store) -> Result<Vec<String>> {
     Ok(records(&store.backend, &identity, &descriptor.project)?.lines)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The clock of `gc` (unix seconds), and a step that runs after its scan of the trees: tests move the clock there.
+    pub(super) static GC_CLOCK: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    pub(super) static GC_AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn gc_now() -> i64 {
+    #[cfg(test)]
+    if let Some(now) = GC_CLOCK.with(std::cell::Cell::get) {
+        return now;
+    }
+    chrono::Utc::now().timestamp()
+}
+
 pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
     if store.is_api() {
         bail!("Layr Cloud collects garbage on the server; a client does not sweep");
@@ -879,6 +1157,9 @@ pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
     if !records.gaps.is_empty() {
         bail!("remote record gaps prevent collection");
     }
+    // A day before the listing: a writer publishes within 23 hours of its oldest unpublished part, so a part younger
+    // than that at the listing can be linked by a tree that the listing does not show, however long the scan takes.
+    let cutoff = gc_now() - 86400;
     let objects = store.backend.list("states/")?;
     let mut referenced = BTreeSet::new();
     let mut reader = Reader::new(&store.backend, &identity, &records.keys);
@@ -893,7 +1174,8 @@ pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
             }
         }
     }
-    let cutoff = chrono::Utc::now().timestamp() - 86400;
+    #[cfg(test)]
+    GC_AFTER_SCAN.with(|hook| hook.borrow_mut().as_mut().map(|hook| hook()));
     let mut deleted = Vec::new();
     // Temporary files of puts that stopped: no listing shows them.
     deleted.extend(store.backend.stale_temporaries(cutoff, dry_run)?);
@@ -940,10 +1222,40 @@ pub(super) fn gc(store: &Store, dry_run: bool) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
     const MACHINE: &str = "01a12290-0000-7000-8000-000000000001";
     const PROJECT: &str = "01a12290-0000-7000-8000-000000000002";
     const STATE: &str = "01a12290-0000-7000-8000-000000000003";
+
+    #[test]
+    fn restoring_local_states_skips_attempts_but_a_missing_state_still_lists() {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let local = crate::store::Store::open(&root.join("local")).unwrap();
+        let dir = local.project_dir("p").unwrap();
+        std::fs::create_dir_all(dir.join("meta/db")).unwrap();
+        let repo = Repo {
+            restore_from_remote: true,
+            p: crate::store::Project {
+                lease: Default::default(),
+                store: &local,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: PROJECT.into(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite")).unwrap(),
+            },
+            ctx: None,
+        };
+        let store = super::super::open(&format!("file://{}", root.join("remote").display()), &repo).unwrap();
+        let attempt = "deadbeef";
+        store.backend.put_new(&format::tree_name(STATE, attempt), vec![]).unwrap();
+        std::fs::create_dir_all(repo.p.state_path(STATE)).unwrap();
+        assert!(restore_attempts(&store, &repo, &[STATE.into()]).unwrap().is_empty());
+        std::fs::remove_dir(repo.p.state_path(STATE)).unwrap();
+        assert_eq!(restore_attempts(&store, &repo, &[STATE.into()]).unwrap(), BTreeMap::from([(STATE.into(), attempt.into())]));
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn shared_ancestry_is_read_once_and_includes_every_parent() {
@@ -994,6 +1306,295 @@ mod tests {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         (Backend::file(root.clone()), keys::generate_identity(), ed25519_dalek::SigningKey::from_bytes(&[9; 32]), root)
     }
+    fn state_id(n: usize) -> String {
+        format!("01a12290-0000-7000-8000-{n:012x}")
+    }
+    fn write_tree(
+        backend: &Backend,
+        key: &ed25519_dalek::SigningKey,
+        state: &str,
+        base: Option<(&str, &[u8])>,
+        tree: &Tree,
+    ) -> Vec<u8> {
+        let canonical = tree.canonical().unwrap();
+        let mut header = Header {
+            v: 2,
+            state: state.into(),
+            attempt: "0123abcd".into(),
+            tree: if base.is_some() { "delta" } else { "full" }.into(),
+            base: base.map(|(id, _)| (id.into(), "0123abcd".into())),
+            parts: 1,
+            machine: MACHINE.into(),
+            btrfs: None,
+            sig: String::new(),
+        };
+        header.sign(&canonical, key).unwrap();
+        let mut object = serde_json::to_vec(&header).unwrap();
+        object.push(b'\n');
+        object.extend(zst::compress(&canonical, base.map(|(_, bytes)| bytes)).unwrap());
+        backend.put_new(&format::tree_name(state, "0123abcd"), object).unwrap();
+        canonical
+    }
+
+    #[test]
+    fn pipeline_heads_only_closure_shares_32_level_bases_and_rejects_bad_data() {
+        let (files, _, key, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let keys = BTreeMap::from([(MACHINE.into(), key.verifying_key())]);
+        let tree = Tree::default();
+        let mut previous = Vec::new();
+        for n in 10..41 {
+            previous = write_tree(
+                &files,
+                &key,
+                &state_id(n),
+                (n > 10).then(|| (state_id(n - 1), previous.as_slice())).as_ref().map(|(id, bytes)| (id.as_str(), *bytes)),
+                &tree,
+            );
+        }
+        for n in 41..43 {
+            write_tree(&files, &key, &state_id(n), Some((&state_id(40), &previous)), &tree);
+        }
+        // An unrelated loose tree must stay outside heads-only closure.
+        write_tree(&files, &key, &state_id(99), None, &tree);
+        let (backend, _peer) = super::super::gateway::tests::file_transport(files.clone());
+        let before = backend.transfer_stats();
+        let mut reader = Reader::new(&backend, keys::PLAIN, &keys);
+        std::fs::create_dir_all(&root).unwrap();
+        reader.material = Material::new(root.join("material"));
+        reader.prefetch_trees(vec![(state_id(41), "0123abcd".into()), (state_id(42), "0123abcd".into())]).unwrap();
+        assert_eq!(reader.get_count(), 33);
+        assert_eq!(backend.transfer_stats().requests - before.requests, 32);
+        assert_eq!(reader.tree(&state_id(41), "0123abcd").unwrap().2, tree);
+        assert_eq!(reader.tree_depth(&state_id(41), "0123abcd").unwrap(), 31);
+        assert_eq!(reader.get_count(), 33);
+        let before = backend.transfer_stats();
+        let mut history = Reader::new(&backend, keys::PLAIN, &keys);
+        history.material = Material::new(root.join("history"));
+        history.prefetch_trees((10..43).map(|n| (state_id(n), "0123abcd".into())).collect()).unwrap();
+        assert_eq!(backend.transfer_stats().requests - before.requests, 1, "selected history collapses dependency rounds");
+        history.tree(&state_id(41), "0123abcd").unwrap();
+        history.tree(&state_id(42), "0123abcd").unwrap();
+        assert_eq!(history.get_count(), 33, "shared bases load once");
+        // Mutation of signed content still fails after the unauthenticated routing pass.
+        let mut bad = serde_json::to_vec(&Header {
+            v: 2,
+            state: state_id(98),
+            attempt: "0123abcd".into(),
+            tree: "full".into(),
+            base: None,
+            parts: 0,
+            machine: MACHINE.into(),
+            btrfs: None,
+            sig: "bad".into(),
+        })
+        .unwrap();
+        bad.push(b'\n');
+        bad.extend(zst::compress(&previous, None).unwrap());
+        files.put_new(&format::tree_name(&state_id(98), "0123abcd"), bad).unwrap();
+        reader.prefetch_trees(vec![(state_id(98), "0123abcd".into())]).unwrap();
+        assert!(reader.tree(&state_id(98), "0123abcd").is_err());
+        files.put_new(&format::tree_name(&state_id(97), "0123abcd"), b"bad header".to_vec()).unwrap();
+        assert!(reader.prefetch_trees(vec![(state_id(97), "0123abcd".into())]).is_err());
+    }
+    #[test]
+    fn pipeline_rejects_delta_cycles_and_bad_frames_before_publication() {
+        let (backend, _, key, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let keys = BTreeMap::from([(MACHINE.into(), key.verifying_key())]);
+        let bytes = Tree::default().canonical().unwrap();
+        write_tree(&backend, &key, &state_id(10), Some((&state_id(11), &bytes)), &Tree::default());
+        write_tree(&backend, &key, &state_id(11), Some((&state_id(10), &bytes)), &Tree::default());
+        let mut reader = Reader::new(&backend, keys::PLAIN, &keys);
+        std::fs::create_dir_all(&root).unwrap();
+        reader.material = Material::new(root.join("material"));
+        reader.prefetch_trees(vec![(state_id(10), "0123abcd".into())]).unwrap();
+        assert!(reader.tree(&state_id(10), "0123abcd").unwrap_err().to_string().contains("loop"));
+        let mut object = backend.get(&format::tree_name(&state_id(10), "0123abcd")).unwrap().unwrap();
+        let (mut header, _) = format::split_tree(&object).unwrap();
+        header.state = state_id(12);
+        header.tree = "full".into();
+        header.base = None;
+        header.sign(&bytes, &key).unwrap();
+        object = serde_json::to_vec(&header).unwrap();
+        object.push(b'\n');
+        object.extend_from_slice(b"invalid zstd frame");
+        backend.put_new(&format::tree_name(&state_id(12), "0123abcd"), object).unwrap();
+        reader.prefetch_trees(vec![(state_id(12), "0123abcd".into())]).unwrap();
+        assert!(reader.tree(&state_id(12), "0123abcd").is_err());
+    }
+
+    #[test]
+    fn pipeline_batches_only_uncached_chunk_indexes_and_checks_live_pairs() {
+        use layr_store::chunks;
+        let (files, _, _, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let cache = root.join("cache");
+        for n in 10..30 {
+            let id = state_id(n);
+            let mut builder = chunks::Builder::default();
+            let data = [u8::try_from(n).unwrap()];
+            builder.add(hex::encode(ContentAddress::digest(data)), &data);
+            let (body, index) = builder.finish().unwrap();
+            files.put_new(&chunks::pack_name(&id), body).unwrap();
+            files.put_new(&chunks::index_name(&id), index.encode()).unwrap();
+        }
+        let (backend, _peer) = super::super::gateway::tests::file_transport(files.clone());
+        let before = backend.transfer_stats();
+        let first = super::super::chunked::indexes(&backend, Some(&cache), keys::PLAIN).unwrap();
+        assert_eq!(first.len(), 20);
+        assert_eq!(backend.transfer_stats().requests - before.requests, 2, "one listing and one index batch");
+        let warm = backend.transfer_stats();
+        assert_eq!(super::super::chunked::indexes(&backend, Some(&cache), keys::PLAIN).unwrap(), first);
+        assert_eq!(backend.transfer_stats().requests - warm.requests, 1, "warm indexes need only the pair listing");
+        assert_eq!(backend.transfer_stats().downloaded, warm.downloaded);
+        std::fs::write(cache.join("chunk-indexes").join(state_id(10)), b"bad cache").unwrap();
+        let before = backend.transfer_stats();
+        assert_eq!(super::super::chunked::indexes(&backend, Some(&cache), keys::PLAIN).unwrap(), first);
+        assert_eq!(backend.transfer_stats().requests - before.requests, 2);
+        files.delete(&chunks::pack_name(&state_id(10))).unwrap();
+        let alive = super::super::chunked::indexes(&backend, Some(&cache), keys::PLAIN).unwrap();
+        assert_eq!(alive.len(), 19, "a cached index cannot make a deleted pack live");
+        assert!(!cache.join("chunk-indexes").join(state_id(10)).exists());
+        eprintln!("20 chunk indexes: 20 individual GETs -> 1 POST batch; warm -> 0 body requests");
+    }
+
+    /// A heads-only fetch of a long history checks its omitted states against the confirmed ones in one pass.
+    #[test]
+    fn confirmed_omissions_are_checked_in_linear_time() {
+        let left: Vec<String> = (0..50_000).map(state_id).collect();
+        let confirmed = format!("{}\n", left.iter().rev().cloned().collect::<Vec<_>>().join("\n"));
+        let started = std::time::Instant::now();
+        assert!(all_confirmed(&confirmed, &left));
+        assert!(!all_confirmed(&confirmed, &[state_id(50_000)]));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+
+    /// A window of small parts is one run of the transfer pool and holds at most half of the operation cache. With the
+    /// listed sizes of the parts it takes up to 256 small parts, read several at a time; without them, the parts that
+    /// would fit as full parts, read one at a time (a File or S3 body of unknown size has no ceiling).
+    #[test]
+    fn a_part_window_runs_once_on_the_pool_within_half_the_cache() {
+        let (backend, _, _, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let keys = BTreeMap::new();
+        let window = window_parts();
+        assert!(window as u64 * keys::ciphertext_len(format::PART_LIMIT) as u64 <= fetch_plan::MATERIAL_BYTES / 2);
+        let mut entries = Vec::new();
+        for n in 0..window + 10 {
+            let content = format!("part {n}\n").into_bytes();
+            let frame = zst::compress(&content, None).unwrap();
+            let id = state_id(n);
+            backend.put_new(&format::data_name(&id, "0123abcd", 0), frame.clone()).unwrap();
+            let link = format::Link(id, "0123abcd".into(), 0, 0, frame.len() as u64, "full".into());
+            entries.push(Entry("100644".into(), content.len() as u64, hex::encode(ContentAddress::digest(&content)), vec![link]));
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        // The parts whose size the listing lacks: none, the last one, all.
+        for unknown in [0, 1, entries.len()] {
+            let mut reader = Reader::new(&backend, keys::PLAIN, &keys);
+            reader.material = Material::new(root.join(format!("material-{unknown}")));
+            for entry in &entries {
+                reader.part_uses.insert(entry.3[0].object(), (reader.part_order.len(), 1, false));
+                reader.part_order.push(entry.3[0].object());
+            }
+            let listed = &reader.part_order[..entries.len() - unknown];
+            reader.sizes = backend
+                .list("states/")
+                .unwrap()
+                .into_iter()
+                .filter(|o| listed.contains(&o.key))
+                .map(|o| (o.key, o.size.unwrap()))
+                .collect();
+            let threads = || super::super::backend::FILE_THREADS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            threads().insert(root.clone(), Default::default());
+            reader.read(&entries[0]).unwrap();
+            let readers = threads().remove(&root).unwrap_or_default().len();
+            if unknown < entries.len() {
+                assert_eq!(reader.get_count(), entries.len(), "one window of every listed part and one full part");
+                // The part of unknown size reads alone; the others still share the pool.
+                assert!(readers > 1 && readers <= super::super::download::JOBS, "{unknown} unknown: {readers} reader threads");
+            } else {
+                assert_eq!(reader.get_count(), window, "one window of full parts");
+                assert_eq!(readers, 1, "reads of unknown size run alone");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for an_understated_size_fails_before_the_body_is_held"]
+    fn understated_size_process() {
+        use super::super::writer::tests::large_blocks;
+        use std::sync::atomic::Ordering::SeqCst;
+        if std::env::var_os("LAYR_TEST_PART_MEMORY").is_none() {
+            return;
+        }
+        let (backend, _, _, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        backend.put_new("states/x", vec![7; 32 << 20]).unwrap();
+        large_blocks::ON.store(true, SeqCst);
+        let read = backend.visit_many(&["states/x".into()], &[Some(1 << 20)], |_, _| Ok(()));
+        large_blocks::ON.store(false, SeqCst);
+        assert!(format!("{:#}", read.unwrap_err()).contains("exceeds"));
+        println!("part memory {}", large_blocks::MOST.load(SeqCst));
+    }
+
+    /// An object that its listing says is 1 MiB and that holds 32 MiB: the read fails without taking in more than the
+    /// listed size.
+    #[test]
+    fn an_understated_size_fails_before_the_body_is_held() {
+        let most = super::super::writer::tests::large_blocks_of("store_remote::reader::tests::understated_size_process").unwrap();
+        assert!(most <= 2 << 20, "{most} bytes held");
+    }
+
+    /// A body larger than its listed size fails its read.
+    #[test]
+    fn a_body_larger_than_its_listed_size_fails() {
+        let (backend, _, _, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        backend.put_new("states/x", b"ten bytes!".to_vec()).unwrap();
+        let read = |size| backend.visit_many(&["states/x".into()], &[Some(size)], |_, _| Ok(()));
+        assert!(read(10).is_ok());
+        assert!(read(5).unwrap_err().to_string().contains("exceeds its size bound"));
+    }
+
+    #[test]
+    fn pipeline_reuses_oversized_parts_after_memory_eviction() {
+        use rand::RngCore;
+        let (backend, _, _, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let keys = BTreeMap::new();
+        let mut reader = Reader::new(&backend, keys::PLAIN, &keys);
+        std::fs::create_dir_all(&root).unwrap();
+        reader.material = Material::new(root.join("material"));
+        let mut entries = Vec::new();
+        for n in 0..2 {
+            let mut content = vec![0; 80 << 20];
+            rand::thread_rng().fill_bytes(&mut content);
+            let frame = zst::compress(&content, None).unwrap();
+            let id = state_id(n);
+            backend.put_new(&format::data_name(&id, "0123abcd", 0), frame.clone()).unwrap();
+            let entry = Entry(
+                "100644".into(),
+                content.len() as u64,
+                hex::encode(ContentAddress::digest(&content)),
+                vec![format::Link(id, "0123abcd".into(), 0, 0, frame.len() as u64, "full".into())],
+            );
+            reader.part_uses.insert(entry.3[0].object(), (reader.part_order.len(), 2, true));
+            reader.part_order.push(entry.3[0].object());
+            entries.push(entry);
+        }
+        for (n, entry) in entries.iter().enumerate() {
+            reader.read(entry).unwrap();
+            assert_eq!(reader.get_count(), n + 1, "uncapped 80 MiB objects are read exclusively, one at a time");
+        }
+        for entry in entries {
+            reader.read(&entry).unwrap();
+        }
+        assert_eq!(reader.get_count(), 2, "160 MiB of unique parts must survive memory eviction");
+        assert_eq!(reader.material.as_ref().unwrap().bytes, 0, "last planned use reclaims disk bytes");
+    }
+
     fn line(seq: u64, key: &ed25519_dalek::SigningKey) -> String {
         let mut record = Record::untrusted_preview(if seq == 1 { "machine" } else { "config" });
         record.id = format!("01a12290-0000-7000-8000-{seq:012x}");
@@ -1015,6 +1616,50 @@ mod tests {
             )
             .unwrap());
     }
+    /// Segments of just over 1 MiB: 30 records with a 35 KiB value each.
+    const SEGMENTS: u64 = 26;
+    const SEGMENT_BYTES: u64 = 30 * (100 << 10);
+
+    #[test]
+    #[ignore = "subprocess helper for record_segments_are_checked_as_they_come"]
+    fn record_memory_process() {
+        use super::super::writer::tests::large_blocks;
+        use std::sync::atomic::Ordering::SeqCst;
+        if std::env::var_os("LAYR_TEST_PART_MEMORY").is_none() {
+            return;
+        }
+        let (backend, identity, key, root) = fixture();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        segment(&backend, &identity, 1, 1, &[line(1, &key)]);
+        for first in (0..SEGMENTS).map(|n| 2 + n * 30) {
+            let lines: Vec<String> = (first..first + 30)
+                .map(|seq| {
+                    let mut record = oplog::parse_line(&line(seq, &key)).unwrap().record;
+                    record.data = serde_json::json!({ "pad": "x".repeat(100 << 10) });
+                    oplog::sign_line(&record, &key).unwrap()
+                })
+                .collect();
+            segment(&backend, &identity, first, first + 29, &lines);
+        }
+        large_blocks::ON.store(true, SeqCst);
+        let records = records_with_local(&backend, &identity, PROJECT, &[], None);
+        large_blocks::ON.store(false, SeqCst);
+        assert_eq!(records.unwrap().lines.len() as u64, 1 + SEGMENTS * 30);
+        println!("part memory {}", large_blocks::MOST.load(SeqCst));
+    }
+
+    /// A clone checks each record segment as its read completes: the bodies of a long history are not all held.
+    #[test]
+    fn record_segments_are_checked_as_they_come() {
+        let most = super::super::writer::tests::large_blocks_of("store_remote::reader::tests::record_memory_process").unwrap();
+        eprintln!("{SEGMENTS} segments of 3 MiB: {} MiB of large blocks at most", most >> 20);
+        // The reads in flight hold their bodies within the read budget (their listed sizes), and the segment being
+        // checked its plaintext too. Before, every body stayed until the last one came.
+        let segment = keys::ciphertext_len(usize::try_from(SEGMENT_BYTES).unwrap_or(usize::MAX)) as u64 + (64 << 10);
+        assert!(SEGMENTS * segment > super::super::download::BYTE_BUDGET + 2 * segment, "all segments exceed the bound");
+        assert!(most <= super::super::download::BYTE_BUDGET + 2 * segment, "{most} bytes held");
+    }
+
     #[test]
     fn a_checked_segment_is_not_read_again_and_a_replaced_one_is() {
         let (backend, identity, key, root) = fixture();
