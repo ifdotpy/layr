@@ -140,6 +140,26 @@ fn merge_trees_at(
     Ok((work, out))
 }
 
+/// The paths a merge of `theirs` into the head of `line` would leave in conflict, without a state or a
+/// record. Merge commands (drivers, verify) do not run here: with one configured the answer is unknown (None).
+pub(crate) fn trial_conflicts(ctx: &Ctx, repo: &Repo, line: &Line, theirs: &str) -> Result<Option<Vec<String>>> {
+    let head = line.head.as_str();
+    if theirs == head || repo.is_ancestor(theirs, head)? || repo.is_ancestor(head, theirs)? {
+        return Ok(Some(Vec::new()));
+    }
+    let Some(base) = repo.merge_base(&repo.source_id(head)?, &repo.source_id(theirs)?)? else { return Ok(None) };
+    let (work, out) = match merge_trees(ctx, repo, line, &base, head, theirs, "queued", false) {
+        Ok(merged) => merged,
+        Err(error) if error.downcast_ref::<ChecksWaiting>().is_some() => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    drop(work);
+    let overlay = repo.p.is_overlay();
+    Ok(Some(
+        out.conflicts.iter().filter(|c| !(overlay && crate::overlay::is_meta_path(&c.path))).map(|c| c.path.clone()).collect(),
+    ))
+}
+
 /// A merge computed before the store lock: the states are immutable, so their merge
 /// needs no lock. Copying and merging the trees took minutes under the lock in a large project,
 /// and every other command of the project waited. Under the lock `merge_states` takes this
