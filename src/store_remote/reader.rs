@@ -12,6 +12,10 @@ use layr_hashers::{ContentAddress, Digest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::sync_local::fetch::publish_restored;
+#[cfg(test)]
+use crate::sync_local::fetch::walk_ancestry;
+
 #[derive(Debug)]
 pub(super) struct Records {
     pub lines: Vec<String>,
@@ -463,139 +467,6 @@ pub(super) fn attempts(backend: &Backend) -> Result<BTreeMap<String, String>> {
     Ok(states)
 }
 
-pub(super) fn deletion_dependencies(lines: &[String]) -> Result<BTreeSet<String>> {
-    let mut ids = BTreeSet::new();
-    for line in lines {
-        let record = oplog::parse_line(line)?.record;
-        if record.op != "line.delete" {
-            continue;
-        }
-        if let Some(state) = record.data["final_state"].as_str() {
-            ids.insert(state.to_string());
-        }
-        if let Some(state) = record.data["staged_state"].as_str() {
-            ids.insert(state.to_string());
-        }
-        for change in record.lines.values() {
-            if let Some(state) = &change.working_before {
-                ids.insert(state.clone());
-            }
-        }
-    }
-    Ok(ids)
-}
-
-pub(super) fn omitted_cache_refs(repo: &Repo, opts: &Options) -> Result<Vec<String>> {
-    let mut omitted = Vec::new();
-    if !opts.caches {
-        for reference in repo.p.db.refs("", crate::ids::now_ms())? {
-            if repo.state(&reference.target)?.kind == crate::model::StateKind::Cache {
-                omitted.push(format!(
-                    "cache state {} of ref {}: fetch --overlay <overlay> takes it",
-                    reference.target, reference.name
-                ));
-            }
-        }
-    }
-    Ok(omitted)
-}
-
-fn walk_ancestry(
-    tips: impl IntoIterator<Item = String>,
-    mut parents: impl FnMut(&str) -> Result<Vec<String>>,
-) -> Result<Vec<String>> {
-    let mut queue: std::collections::VecDeque<String> = tips.into_iter().collect();
-    let mut seen = BTreeSet::new();
-    let mut order = Vec::new();
-    while let Some(id) = queue.pop_front() {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        queue.extend(parents(&id)?);
-        order.push(id);
-    }
-    Ok(order)
-}
-
-pub(super) fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
-    walk_ancestry(tips, |id| {
-        Ok(repo.p.db.state(id)?.map(|state| state.parents.into_iter().chain(state.derived_from).collect()).unwrap_or_default())
-    })
-}
-
-pub(super) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
-    state_ancestries(repo, [id.to_string()])
-}
-
-pub(super) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
-    let mut required = deletion_dependencies(lines)?;
-    let mut tips: Vec<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
-    for reference in repo.p.db.refs("", crate::ids::now_ms())? {
-        let state = repo.state(&reference.target)?;
-        if state.kind == crate::model::StateKind::Cache && !opts.caches {
-            continue;
-        }
-        tips.push(reference.target);
-    }
-    required.extend(state_ancestries(repo, tips)?);
-    Ok(required)
-}
-
-/// The base states that `fetch --line` and `--overlay` take, or None for every state. Without `base` in `--overlay`
-/// no base state comes; with `--line`, the history of those lines (only their heads with `--heads`) and what an undo of
-/// a line delete needs.
-fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
-    if repo.p.is_overlay() {
-        return Ok(None);
-    }
-    let mut tips = Vec::new();
-    for name in &opts.lines {
-        let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
-        tips.push(line.head.clone());
-        // Every machine's head of the line: a server queue can move it ahead of this machine's head.
-        for (_, head) in repo.p.db.line_heads(&line.id)? {
-            tips.push(head);
-        }
-    }
-    if let Some(only) = &opts.overlays {
-        for name in only.iter().filter(|name| *name != super::BASE_LAYER) {
-            if repo.overlay_info(name)?.is_none() {
-                bail!("--overlay: no overlay '{name}' in project {}", repo.p.name);
-            }
-        }
-    }
-    if !opts.takes_layer(super::BASE_LAYER) {
-        return Ok(Some(BTreeSet::new()));
-    }
-    if opts.lines.is_empty() {
-        return Ok(None);
-    }
-    let mut keep: BTreeSet<String> =
-        if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
-    keep.extend(deletion_dependencies(records)?);
-    Ok(Some(keep))
-}
-
-/// The states that `push --line` and `--overlay` send, or None for every state: on the base as for a fetch, in an
-/// overlay the selection of its layer (`only_states`).
-pub(super) fn push_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
-    if repo.p.is_overlay() {
-        return Ok(opts.only_states.clone());
-    }
-    let mut base = opts.clone();
-    base.heads = false;
-    base_selection(repo, records, &base)
-}
-
-pub(super) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {
-    let kind = serde_json::to_value(state.kind).unwrap_or_default();
-    match kind.as_str() {
-        Some("auto") => opts.auto,
-        Some("cache") => opts.caches,
-        _ => true,
-    }
-}
-
 /// Write one missing state of the store into the project and return the files written. The
 /// publish step takes the project lock unless this process holds it already.
 fn restore_one(
@@ -641,32 +512,6 @@ fn restore_one(
     }
 }
 
-/// Freeze the restored folder `stage` into the state `state` under the project
-/// lock, with the identity of its signed state (`transid` names the btrfs send it came from, else 0). False
-/// when the state was there already (`stage` stays for the caller to delete).
-pub(super) fn publish_restored(repo: &Repo, state: &crate::model::StateRec, stage: &Path, transid: u64) -> Result<bool> {
-    let id = &state.id;
-    let _lock = repo.p.lock_or_borrow()?;
-    let destination = repo.p.state_path(id);
-    if destination.exists() {
-        repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true))?;
-        return Ok(false);
-    }
-    let captured = crate::fs::freeze_path_owned(stage, &destination, crate::fs::CapturePurpose::State)?;
-    // A tree built from git has no signed UUID and receives a fresh one here.
-    let received = if state.subvol.is_empty() { crate::ids::new_id() } else { state.subvol.clone() };
-    let owner = captured.received_identity(&received, transid)?;
-    match repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true)) {
-        Ok(()) => owner.release(),
-        Err(crate::db::CommitResolution::NotCommitted(error)) => return Err(owner.abort(error)),
-        Err(error) => {
-            owner.release();
-            return Err(error.into());
-        }
-    }
-    Ok(true)
-}
-
 /// Restore the listed states that are not on this machine, from the store's own trees. The
 /// machine keys come from this project's trusted records, so no record segment is read.
 pub(super) fn restore_states(store: &Store, repo: &Repo, ids: &[String]) -> Result<usize> {
@@ -708,28 +553,10 @@ pub(super) fn clone_lines(store: &Store, repo: &Repo) -> Result<Vec<crate::model
     if repo.p.is_overlay() {
         return repo.p.db.lines();
     }
-    let authorized = repo.p.authorized_records()?;
-    // These proof keys authorize canonical-main selection only. Reader and cache
-    // writer identities cannot act as merge executors or manifest authorities.
-    let trusted = authorized
-        .iter()
-        .filter(|r| {
-            r.scope()
-                .terms()
-                .is_none_or(|terms| matches!(terms.role, layr_store::trust::Role::Full | layr_store::trust::Role::Merge))
-        })
-        .map(|r| (r.record().machine.clone(), *r.signed().key()))
-        .collect();
-    let records = authorized.iter().map(|r| r.record().clone()).collect::<Vec<_>>();
-    let creator = layr_model::project_perspective(&repo.p.id, &records)?;
-    let mut model = layr_model::Project::from_authorized_records(&repo.p.id, authorized, &creator)?;
+    let lines = crate::sync_local::fetch::source_lines(repo, !store.is_api())?;
     let Some(api) = store.backend.api() else {
-        if model.config.contains_key("queue.merge-machine") {
-            layr_model::main_head::select(&mut model, &records, &trusted)?;
-        }
-        return Ok(model.line_list());
+        return Ok(lines);
     };
-    let lines = model.line_list();
     // V1 refs are the server's published positions, including a merge-job result.
     // The record snapshot must contain each target before a working copy can use it.
     let mut known: BTreeMap<_, _> = lines.into_iter().map(|line| (line.id.clone(), line)).collect();
@@ -757,6 +584,16 @@ pub(super) fn fetch_layer(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &
 }
 
 fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, parent: Option<&Repo>) -> Result<Report> {
+    if store.is_api() {
+        fetch_legacy_api(store, ctx, repo, opts, parent)
+    } else {
+        let mut local = crate::sync_local::Local::write(ctx, repo, parent);
+        fetch_with_local(store, &mut local, opts)
+    }
+}
+
+// Compatibility adapter for the separate Cloud API's object-store codec.
+fn fetch_legacy_api(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, parent: Option<&Repo>) -> Result<Report> {
     let _fetch = crate::trace::span("store fetch");
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
@@ -776,17 +613,8 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         // On the Layr Cloud API the server access list decides who writes, and it checked each signature against
         // the key that the writer registered; local machine trust is not asked and does not grow
         // (docs/cloud-rfc.md 7.0). Each writer key is pinned per remote on first sight.
-        if store.is_api() {
-            pin_writer_keys(&store.dir, &records.keys)?;
-        }
-        let trust = if store.is_api() {
-            crate::store::Trust::Server
-        } else if bootstrap {
-            crate::store::Trust::All
-        } else {
-            crate::store::Trust::Known
-        };
-        count = _lock.import_lines(&records.lines, trust)?;
+        pin_writer_keys(&store.dir, &records.keys)?;
+        count = _lock.import_lines(&records.lines, crate::store::Trust::Server)?;
     }
     if bootstrap {
         repo.p.reload_id()?;
@@ -795,169 +623,90 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     if repo.p.id != descriptor.project {
         bail!("the records do not belong to store.json's project");
     }
-    // Cache selection needs the imported overlay records, including on the first fetch.
-    let mut selected = opts.clone();
-    if let Some(parent) = parent {
-        if let Some(state) = opts.caches_of_state.as_deref() {
-            selected.only_caches = Some(super::overlays::caches_of_state(parent, repo, state)?);
-        } else if !opts.caches_of.is_empty() {
-            selected.only_caches = Some(super::overlays::caches_of_lines(parent, repo, &opts.caches_of)?);
-        } else if !opts.lines.is_empty() {
-            // `--line`: the caches that these lines start from, and the history of their own overlay lines.
-            selected.only_caches = Some(super::overlays::caches_of_lines(parent, repo, &opts.lines)?);
-        }
-        if !opts.lines.is_empty() {
-            selected.only_states = Some(super::overlays::states_of_lines(parent, repo, &opts.lines, opts.heads)?);
-        }
-    }
-    let opts = &selected;
     let pending = store.dir.join("pending-lines.json");
     let pending_clone =
         if pending.exists() { !serde_json::from_slice::<BTreeSet<String>>(&std::fs::read(pending)?)?.is_empty() } else { false };
     let clone_lines = if bootstrap || pending_clone { Some(clone_lines(store, repo)?) } else { None };
-    let mut report = Report {
+    let states = api_states(repo)?;
+    let plan = crate::sync_local::Local::write(ctx, repo, parent).select_fetch(
+        &records.lines,
+        opts,
+        &states.keys().cloned().collect::<Vec<_>>(),
         clone_lines,
+    )?;
+    let mut report = Report {
+        clone_lines: plan.clone_lines,
+        omitted: plan.omitted,
         records: count,
         overlaps: records.overlaps,
         gaps: records.gaps.clone(),
-        omitted: omitted_cache_refs(repo, opts)?,
         ..Default::default()
     };
-    report.git_packs = super::gitpack::fetch(store, repo, &identity)?;
-    let mut required = required_states(repo, &records.lines, opts)?;
-    if let Some(lines) = &report.clone_lines {
-        required.extend(state_ancestries(repo, lines.iter().map(|line| line.head.clone()))?);
-    }
-    // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
-    let lines_keep = base_selection(repo, &records.lines, opts)?;
-    let heads: Option<BTreeSet<String>> = opts
-        .heads
-        .then(|| -> Result<BTreeSet<String>> {
-            let lines = match &report.clone_lines {
-                Some(lines) => lines.clone(),
-                None => repo.p.db.lines()?,
-            };
-            if let Some(name) = opts.only_line.as_ref().filter(|_| !repo.p.is_overlay()) {
-                let line =
-                    lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
-                return Ok(BTreeSet::from([line.head.clone()]));
-            }
-            let mut keep: BTreeSet<String> = lines.into_iter().map(|l| l.head).collect();
-            keep.extend(deletion_dependencies(&records.lines)?);
-            Ok(keep)
-        })
-        .transpose()?;
-    // `--line` and `--overlay` on the base: the other states stay on the remote, as with `--heads`.
-    let heads = lines_keep.or(heads);
-    let mut left = Vec::new();
-    let api = store.backend.api();
-    let states = if api.is_some() { api_states(repo)? } else { attempts(&store.backend)? };
-    let mut reader = Reader::new(&store.backend, &identity, &records.keys);
+    report.git_packs = super::gitpack::fetch(store, &crate::sync_local::Local::read(ctx, repo), &identity)?;
+    let api = store.backend.api().context("API session missing")?;
+    let scope = store.api_scope();
+    api.learn_states(&scope, &plan.missing.iter().map(|s| s.id.clone()).collect::<Vec<_>>())?;
     let mut missing = Vec::new();
-    let mut asked = Vec::new();
-    // A plain fetch of a cache overlay: its states stay on the remote, counted.
-    let plain_cache = opts.plain_cache_fetch && repo.p.is_overlay();
-    let mut stay = 0;
-    for id in states.keys() {
-        // A tree whose record this fetch did not read: a push published both after this fetch read the records
-        // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
-        // here yet. The next fetch takes it; nothing is imported without its record.
-        let state = match repo.p.db.state(id)? {
-            Some(state) => state,
-            None => {
-                report.omitted.push(format!("state {}: its record is not taken here yet", crate::ids::short(id)));
+    for state in plan.missing {
+        if api.state_held(&scope, &state.id)? {
+            missing.push(state);
+        } else if !plan.restricted {
+            report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(&state.id)));
+        }
+    }
+    super::cloud_objects::fetch_states(store, repo, missing, &mut report)?;
+    record_left(store, opts, plan.left, &mut report)?;
+    // Trust the chosen store's machines only during the initial clone, as peer bootstrap does. A Layr Cloud clone
+    // trusts only the project's own trust chain (`project_trust_chain`): the server access list is not local trust.
+    if bootstrap {
+        let chain = project_trust_chain(&records.lines, &records.keys)?;
+        for (machine, key) in &records.keys {
+            if !chain.contains(machine) {
                 continue;
             }
-        };
-        if !wanted(&state, opts) && !required.contains(id) {
-            continue;
-        }
-        if heads.as_ref().is_some_and(|keep| !repo.p.is_overlay() && !keep.contains(id)) {
-            if !repo.p.has_state(id) {
-                left.push(id.clone());
-            }
-            continue;
-        }
-        // A cache overlay state of another platform stays on the remote (docs/cache-overlays.md).
-        if repo.p.is_overlay() && crate::cache_overlay::other_platform(state.cache_platform.as_deref()) {
-            report.omitted.push(format!(
-                "cache state {}: platform {}",
-                crate::ids::short(id),
-                state.cache_platform.as_deref().unwrap_or("")
-            ));
-            continue;
-        }
-        // `--caches-of`: only the caches that a new line from those lines takes.
-        // A cache state is the head of its overlay line, so `required` names it, but a cache that is not here is only
-        // a cache that no line takes here: nothing else needs its files.
-        if repo.p.is_overlay() && state.cache_of.is_some() && opts.only_caches.as_ref().is_some_and(|only| !only.contains(id)) {
-            if plain_cache {
-                stay += usize::from(!repo.p.has_state(id));
-            } else {
-                report.omitted.push(format!("cache state {}: not for --line", crate::ids::short(id)));
-            }
-            continue;
-        }
-        // `--line`: a state of an overlay that no chosen line shows stays on the remote.
-        if repo.p.is_overlay()
-            && state.cache_of.is_none()
-            && opts.only_states.as_ref().is_some_and(|only| !only.contains(id))
-            && !repo.p.has_state(id)
-        {
-            if plain_cache {
-                stay += 1;
-            } else {
-                report.omitted.push(format!("state {}: not for --line", crate::ids::short(id)));
-            }
-            continue;
-        }
-        // A cache of another user's unprotected line is never taken here (`usable_cache`): its data stays on the
-        // remote, so a clone downloads only the caches that its lines can start from.
-        if repo.p.is_overlay()
-            && state.cache_of.is_some()
-            && !(ctx.caller.is_root() || state.cache_shared || state.cache_by == Some(ctx.caller.uid))
-        {
-            report.omitted.push(format!("cache state {}: of another user's line", crate::ids::short(id)));
-            continue;
-        }
-        if repo.p.has_state(id) {
-            repo.p.lock_or_borrow()?.write(|tx| tx.set_present(id, true))?;
-        } else if api.is_some() {
-            // One `POST /states/missing` after the loop tells which of these the server holds.
-            asked.push(state);
-        } else {
-            missing.push(state);
-        }
-    }
-    if stay > 0 {
-        let name = repo.p.name.rsplit_once('%').map_or(repo.p.name.as_str(), |(_, name)| name);
-        report.omitted.push(format!(
-            "{stay} state(s) stay on the remote; a new line fetches the cache it starts from, fetch --overlay {name} takes them all"
-        ));
-    }
-    if let Some(api) = api {
-        // The scope of a plain overlay layer is its key prefix (`overlays/<name>/`).
-        let scope = store.api_scope();
-        api.learn_states(&scope, &asked.iter().map(|s| s.id.clone()).collect::<Vec<_>>())?;
-        for state in asked {
-            if api.state_held(&scope, &state.id)? {
-                missing.push(state);
-            } else if heads.is_none() {
-                report.omitted.push(format!("state {}: not on Layr Cloud", crate::ids::short(&state.id)));
+            if repo.p.db.trusted(machine)?.is_none() {
+                let mut record = crate::model::DraftRecord::new("machine.trust");
+                record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});
+                repo.commit_record(&repo.p.lock_maintenance()?, ctx, record)?;
             }
         }
-        // The states come as trees, times tables and packs (docs/objects.md) through the local object store.
-        super::cloud_objects::fetch_states(store, repo, std::mem::take(&mut missing), &mut report)?;
     }
-    if !left.is_empty() {
-        // A read of such a state restores it from this remote (`restore_state`).
-        let path = super::states_left_file(&store.dir);
-        let mut all: BTreeSet<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_owned).collect();
-        all.extend(left.iter().cloned());
-        crate::fsutil::atomic_write(&path, format!("{}\n", all.into_iter().collect::<Vec<_>>().join("\n")).as_bytes(), 0o600)?;
-        let why = if opts.lines.is_empty() && opts.overlays.is_none() { "--heads" } else { "--line, --overlay" };
-        report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read ({why})", left.len()));
+    Ok(report)
+}
+
+/// The v2 engine consumes only the local replica port. API object storage retains its named legacy path.
+pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>, opts: &Options) -> Result<Report> {
+    let _fetch = crate::trace::span("store fetch");
+    let descriptor = store.descriptor()?;
+    let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
+    let mut records_local = Vec::new();
+    local.visit_records(None, &mut |line| {
+        records_local.push(line.to_owned());
+        Ok(())
+    })?;
+    let records =
+        records_with_local(&store.backend, &identity, &descriptor.project, &records_local, Some(&seen_file(&store.dir)))?;
+    let imported = local.import_records(&records.lines, &records.keys)?;
+    store.project = imported.project;
+    if store.project != descriptor.project {
+        bail!("the records do not belong to store.json's project");
     }
+    let bootstrap = imported.bootstrap;
+    let pending = store.dir.join("pending-lines.json");
+    let pending_clone =
+        if pending.exists() { !serde_json::from_slice::<BTreeSet<String>>(&std::fs::read(pending)?)?.is_empty() } else { false };
+    let mut report =
+        Report { records: imported.count, overlaps: records.overlaps, gaps: records.gaps.clone(), ..Default::default() };
+    let states = attempts(&store.backend)?;
+    let plan =
+        local.fetch_selection(&records.lines, opts, &states.keys().cloned().collect::<Vec<_>>(), bootstrap || pending_clone)?;
+    report.git_packs = super::gitpack::fetch(store, local, &identity)?;
+    report.clone_lines = plan.clone_lines;
+    report.omitted = plan.omitted;
+    let left = plan.left;
+    let missing = plan.missing;
+    let mut reader = Reader::new(&store.backend, &identity, &records.keys);
+    record_left(store, opts, left, &mut report)?;
     // Cache states that failed to restore, with the packs of the remote then (`<state> <packs>` lines): one is tried
     // again only when a push or a release changed the packs, so an idle fetch does not download it each time.
     let failed_path = store.dir.join("cache-restore-failed");
@@ -970,7 +719,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     let mut packs_now: Option<String> = None;
     for state in super::writer::parents_first(missing)? {
         let id = state.id.clone();
-        let cache = repo.p.is_overlay() && state.cache_of.is_some();
+        let cache = local.is_overlay() && state.cache_of.is_some();
         if cache && failed.contains_key(&id) {
             let now = match &packs_now {
                 Some(now) => now.clone(),
@@ -984,7 +733,7 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
                 continue;
             }
         }
-        let files = match restore_one(repo, &mut reader, &states, &state) {
+        let files = match restore_with_local(local, &mut reader, &states, &state) {
             Ok(files) => {
                 failed.remove(&id);
                 files
@@ -1013,24 +762,14 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
     // Trust the chosen store's machines only during the initial clone, as peer bootstrap does. A Layr Cloud clone
     // trusts only the project's own trust chain (`project_trust_chain`): the server access list is not local trust.
     if bootstrap {
-        let chain = if store.is_api() { Some(project_trust_chain(&records.lines, &records.keys)?) } else { None };
-        for (machine, key) in &records.keys {
-            if chain.as_ref().is_some_and(|chain| !chain.contains(machine)) {
-                continue;
-            }
-            if repo.p.db.trusted(machine)?.is_none() {
-                let mut record = crate::model::DraftRecord::new("machine.trust");
-                record.data = serde_json::json!({"machine":machine,"public_key":hex::encode(key.to_bytes())});
-                repo.commit_record(&repo.p.lock_maintenance()?, ctx, record)?;
-            }
-        }
+        local.finish_import(&records.keys)?;
         // A Private or Public store has no vault key, so there is nothing to seal in a slot.
         if store.layer.is_none() && !store.is_public_reader() && descriptor.mode.is_secret() {
             let slot = keys::machine_slot(&identity, &store.key.verifying_key())?;
             // Optional enrollment keeps key metadata outside shared history: it supplies
             // a public key for resealing this existing reader slot, never writer trust.
             let enroll = || -> Result<()> {
-                if let Some(line) = repo.p.db.record_line(&store.machine, 1)? {
+                if let Some(line) = local.record_line(&store.machine, 1)? {
                     let record = oplog::parse_line(&line)?.record;
                     if record.op != "machine" {
                         bail!("local machine announcement missing");
@@ -1047,6 +786,38 @@ fn fetch_inner(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Options, pa
         }
     }
     Ok(report)
+}
+
+fn record_left(store: &Store, opts: &Options, left: Vec<String>, report: &mut Report) -> Result<()> {
+    if !left.is_empty() {
+        // A read of such a state restores it from this remote (`restore_state`).
+        let path = super::states_left_file(&store.dir);
+        let mut all: BTreeSet<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().map(str::to_owned).collect();
+        all.extend(left.iter().cloned());
+        crate::fsutil::atomic_write(&path, format!("{}\n", all.into_iter().collect::<Vec<_>>().join("\n")).as_bytes(), 0o600)?;
+        let why = if opts.lines.is_empty() && opts.overlays.is_none() { "--heads" } else { "--line, --overlay" };
+        report.omitted.push(format!("{} state(s) of the history: on the remote, restored on first read ({why})", left.len()));
+    }
+    Ok(())
+}
+
+fn restore_with_local(
+    local: &mut super::Replica<'_>,
+    reader: &mut Reader<'_>,
+    states: &BTreeMap<String, String>,
+    state: &crate::model::StateRec,
+) -> Result<usize> {
+    let (header, _, tree) = reader.tree(&state.id, &states[&state.id])?;
+    if header.btrfs.as_ref().is_some_and(|identity| identity.uuid != state.subvol) {
+        bail!("tree btrfs identity differs from the signed state");
+    }
+    let parent = local.restore_base(state, states);
+    let base = parent.as_ref().map(|id| reader.tree(id, &states[id]).map(|(_, _, tree)| tree)).transpose()?;
+    let stage = local.stage_state(parent.as_deref())?;
+    match reader.restore_over(&tree, base.as_ref(), &stage) {
+        Ok(files) => local.install_state(state, header.btrfs.as_ref().map_or(0, |identity| identity.transid), files),
+        Err(error) => Err(local.abort_state(error)),
+    }
 }
 
 pub(super) fn verify(store: &Store, files: bool) -> Result<Report> {

@@ -108,6 +108,7 @@ mod store_remote;
 mod store_remove;
 mod store_version;
 mod stream;
+mod sync_local;
 #[allow(unsafe_code)]
 mod sys;
 #[cfg(target_os = "macos")]

@@ -13,9 +13,8 @@
 //! before packs had no `git/` objects: its imported states read only as built trees, and the next
 //! push from a machine with the Git objects sends the pack.
 
+use super::Replica;
 use super::{keys, Options, Report, Store};
-use crate::gitbridge;
-use crate::repo::Repo;
 use anyhow::{bail, Context, Result};
 use layr_hashers::{ContentAddress, Digest};
 use std::collections::BTreeSet;
@@ -43,13 +42,13 @@ fn decode(identity: &str, body: &[u8]) -> Result<CommitList> {
 }
 
 /// Send the Git objects of the imported commits that the remote does not list yet.
-pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+pub(super) fn push(store: &Store, local: &Replica<'_>, opts: &Options, report: &mut Report) -> Result<()> {
     // A writer that cannot read the store cannot tell which commits it lists. Layr Cloud mirrors Public and
     // Private projects to GitHub itself and has no Git pack route yet.
-    if !store.backend.can_read() || !gitbridge::has_store(repo) || store.is_api() {
+    if !store.backend.can_read() || !local.git_has_store() || store.is_api() {
         return Ok(());
     }
-    let imported = repo.p.db.import_commits()?;
+    let imported = local.git_imported()?;
     if imported.is_empty() {
         return Ok(());
     }
@@ -66,7 +65,7 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Repo
     if wanted.is_empty() {
         return Ok(());
     }
-    let have = gitbridge::has_commits(repo, &wanted)?;
+    let have = local.git_has_commits(&wanted)?;
     let mut new = Vec::new();
     for (commit, present) in wanted.into_iter().zip(have) {
         if present {
@@ -82,16 +81,16 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Repo
     let covered: Vec<String> = listed_here
         .iter()
         .cloned()
-        .zip(gitbridge::has_commits(repo, &listed_here)?)
+        .zip(local.git_has_commits(&listed_here)?)
         .filter_map(|(c, present)| present.then_some(c))
         .collect();
     // The list names only the commits that the pack holds: a commit that a covered commit reaches is in that
     // commit's pack already (an older history that a later import added).
-    let new = gitbridge::commits_outside(repo, &new, &covered)?;
+    let new = local.git_outside(&new, &covered)?;
     if new.is_empty() {
         return Ok(());
     }
-    let pack = gitbridge::pack_commits(repo, &new, &covered)?;
+    let pack = local.git_pack(&new, &covered)?;
     let name = hex::encode(ContentAddress::digest(&pack));
     store.backend.put_new(&format!("git/{name}{PACK}"), keys::encrypt(&descriptor.recipient, &pack)?)?;
     let list = serde_json::to_vec(&serde_json::json!({"format": 1, "commits": new}))?;
@@ -101,15 +100,15 @@ pub(super) fn push(store: &Store, repo: &Repo, opts: &Options, report: &mut Repo
 }
 
 /// Install the Git packs whose commits the local Git store lacks. Returns the number installed.
-pub(super) fn fetch(store: &Store, repo: &Repo, identity: &str) -> Result<usize> {
+pub(super) fn fetch(store: &Store, local: &Replica<'_>, identity: &str) -> Result<usize> {
     let mut installed = 0;
     let mut named: Vec<(String, Vec<String>)> = Vec::new();
     for object in store.backend.list("git/")? {
         let Some(stem) = object.key.strip_suffix(COMMITS) else { continue };
         let body = store.backend.get(&object.key)?.with_context(|| format!("{} disappeared", object.key))?;
         let list = decode(identity, &body)?;
-        gitbridge::init_store(repo)?;
-        if gitbridge::has_commits(repo, &list.commits)?.iter().all(|present| *present) {
+        local.git_init()?;
+        if local.git_has_commits(&list.commits)?.iter().all(|present| *present) {
             continue;
         }
         let pack_key = format!("{stem}{PACK}");
@@ -119,7 +118,7 @@ pub(super) fn fetch(store: &Store, repo: &Repo, identity: &str) -> Result<usize>
         if hex::encode(ContentAddress::digest(&pack)) != name {
             bail!("Git pack {pack_key} does not match its name");
         }
-        gitbridge::install_pack(repo, &pack)?;
+        local.git_install(&pack)?;
         named.push((pack_key, list.commits));
         installed += 1;
     }
@@ -127,7 +126,7 @@ pub(super) fn fetch(store: &Store, repo: &Repo, identity: &str) -> Result<usize>
     // history exclusion left out): the commits are checked after all packs are in. A commit that no pack holds
     // stays missing: an imported state of it cannot be read here, and the rest of the fetch goes on.
     for (pack_key, commits) in named {
-        let missing = commits.iter().zip(gitbridge::has_commits(repo, &commits)?).filter(|(_, present)| !present).count();
+        let missing = commits.iter().zip(local.git_has_commits(&commits)?).filter(|(_, present)| !present).count();
         if missing > 0 {
             eprintln!("layr: Git pack {pack_key} names {missing} commit(s) that no Git pack of the remote holds");
         }

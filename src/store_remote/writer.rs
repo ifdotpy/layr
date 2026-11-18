@@ -357,106 +357,20 @@ pub(super) fn push_folder_lock(dir: &Path) -> Result<std::fs::File> {
 }
 
 pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options) -> Result<Report> {
-    let _push = crate::trace::span("store push");
-    if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
-        bail!("store --caches is not available until cache states exist");
-    }
-    super::epochs::check_current(store)?;
-    store.private_dir()?;
-    let descriptor = store.descriptor()?;
-    let blind_layer = store.layer.is_some() && !store.backend.can_read();
-    let mut report = Report { omitted: reader::omitted_cache_refs(repo, opts)?, ..Default::default() };
-    repo.p.verify_records()?;
-    // A list is enough for a writer without permission to read encrypted objects.
-    let stage = crate::trace::span("store records");
-    // A reader checks that the remote history of this machine is the local one. Another store
-    // with the same machine identity writes other records under the same numbers; a push from it
-    // must fail, not skip or drop its records.
-    // `own-records` names the newest segment of this machine that this store wrote or checked.
-    let own_file = store.dir.join("own-records");
-    // A root key epoch keeps this folder and can reuse segment names: the epoch is in the name.
-    let scope = store.epoch.as_ref().map_or("root", |e| e.key.epoch.as_str()).to_string();
-    let known = std::fs::read_to_string(&own_file).unwrap_or_default();
-    let seen = |key: &str| known.trim() == format!("{scope} {key}");
-    let identity = if blind_layer { None } else { store.identity(&descriptor, None).ok() };
-    let own_history = |key: &str, seq: u64| -> Result<()> {
-        let Some(identity) = &identity else { return Ok(()) };
-        if seen(key) {
-            return Ok(());
-        }
-        let body = store.backend.get(key)?.context("record segment disappeared")?;
-        let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
-        let remote = body.lines().last().unwrap_or_default();
-        if repo.p.db.record_line(&store.machine, seq)?.as_deref() != Some(remote) {
-            bail!(
-                "the remote has other records of this machine ({}, record {seq}): another store uses this machine identity; run one writer per identity",
-                store.machine
-            );
-        }
-        Ok(())
-    };
-    // Layr Cloud API v1: the token belongs to this machine, so only its own segments go up, signed by the key
-    // that the server knows for it.
-    let api = store.backend.api();
-    if let Some(api) = api {
-        register_machine(store, api)?;
-    }
-    for machine in repo.p.db.record_machines()? {
-        if api.is_some() && machine != store.machine {
-            continue;
-        }
-        let mut last = 0;
-        let mut last_key = None;
-        for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
-            let (m, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
-            if m != machine {
-                bail!("segment is outside its machine prefix");
-            }
-            if end > last {
-                last = end;
-                last_key = Some(object.key);
-            }
-        }
-        if let Some(key) = last_key.as_deref().filter(|_| machine == store.machine) {
-            own_history(key, last)?;
-            if !seen(key) {
-                std::fs::write(&own_file, format!("{scope} {key}"))?;
-            }
-        }
-        let lines = repo.p.db.lines_after(&machine, last)?;
-        if lines.is_empty() {
-            continue;
-        }
-        let mut start = 0;
-        while start < lines.len() {
-            let mut end = start;
-            let mut size = 0;
-            while end < lines.len() && (end == start || size + lines[end].len() + 1 <= RECORD_SEGMENT_BYTES) {
-                size += lines[end].len() + 1;
-                end += 1;
-            }
-            let first = oplog::parse_line(&lines[start])?.record.seq;
-            let last = oplog::parse_line(&lines[end - 1])?.record.seq;
-            let mut bytes = lines[start..end].join("\n").into_bytes();
-            bytes.push(b'\n');
-            // Publish ordered, bounded segments. A retry resumes after the last complete segment.
-            let name = format::segment_name(&machine, first, last);
-            if !store.backend.put_new(&name, keys::encrypt(&descriptor.recipient, &bytes)?)? && machine == store.machine {
-                own_history(&name, last)?;
-            }
-            if machine == store.machine {
-                std::fs::write(&own_file, format!("{scope} {name}"))?;
-            }
-            report.records += end - start;
-            start = end;
-        }
-    }
-    drop(stage);
-    // Layr Cloud keeps states as trees, times tables and packs (docs/objects.md), not as store v2 trees.
+    let mut local = crate::sync_local::Local::read(ctx, repo);
     if store.is_api() {
+        let _push = crate::trace::span("store push");
+        // Compatibility path: the separate API object codec is migrated after the v2 fast path.
+        let (_, _, mut report) = prepare_push(store, &local, opts)?;
         super::cloud_objects::push_states(store, ctx, repo, opts, &mut report)?;
         return Ok(report);
     }
+    push_with_local(store, &mut local, opts)
+}
+
+pub(crate) fn push_with_local(store: &Store, local: &mut super::Replica<'_>, opts: &Options) -> Result<Report> {
+    let _push = crate::trace::span("store push");
+    let (descriptor, blind_layer, mut report) = prepare_push(store, local, opts)?;
     let stage = crate::trace::span("store load index");
     let mut index = load_index(&store.dir)?;
     let mut journal = super::push_journal::Journal::open(&store.dir)?;
@@ -480,8 +394,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     if !blind_layer {
         // A completed upload can be missing from a partial replica. Recheck advertised tips
         // without scanning historical states, so a later push can complete that replica.
-        let mut tips: std::collections::BTreeSet<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
-        tips.extend(repo.p.db.refs("", crate::ids::now_ms())?.into_iter().map(|reference| reference.target));
+        let tips = local.tips()?;
         let checks: Vec<(String, String)> = tips
             .into_iter()
             .filter_map(|tip| index.get(&tip).map(|cached| (format::tree_name(&tip, &cached.attempt), tip)))
@@ -516,32 +429,16 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     let mut remote_records = None;
     drop(stage);
     let stage = crate::trace::span("store select history");
-    let record_lines = repo.p.export_jsonl()?.lines().map(str::to_string).collect::<Vec<_>>();
-    let required = reader::required_states(repo, &record_lines, opts)?;
-    let selection = reader::push_selection(repo, &record_lines, opts)?;
+    let mut record_lines = Vec::new();
+    local.visit_records(None, &mut |line| {
+        record_lines.push(line.to_owned());
+        Ok(())
+    })?;
     let mut states = Vec::new();
     let mut recovered = Vec::new();
-    // A state that is here only as objects (its native copy retired after `layr migrate`) goes too: reading its tree
-    // builds the copy again for this command (`objstore::build_state`). Before, such a state never left this store,
-    // and a remote line could name a head whose tree no remote had.
-    let mut candidates = repo.p.db.present_states()?;
-    for id in repo.p.db.object_only_states()? {
-        if !present.contains_key(&id) && crate::objstore::verified(&repo.p, &id)?.is_some() {
-            candidates.push((id, false));
-        }
-    }
-    for (id, deleted) in candidates {
-        if deleted || present.contains_key(&id) {
-            continue;
-        }
-        let state = repo.state(&id)?;
-        if !reader::wanted(&state, opts) && !required.contains(&id) {
-            report.omitted.push(format!("{} {}", id, serde_json::to_value(state.kind)?));
-            continue;
-        }
-        if selection.as_ref().is_some_and(|keep| !keep.contains(&id)) {
-            continue;
-        }
+    let candidates = local.push_candidates(&record_lines, opts, &present.keys().cloned().collect(), &mut report.omitted)?;
+    for state in candidates {
+        let id = state.id.clone();
         if !blind_layer {
             let prefix = format!("states/{id}/");
             let mut complete = BTreeMap::new();
@@ -569,8 +466,8 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         // Pinned before the trees are read: gc keeps the state until this command ends. A state that a free step
         // already queued (no owner keeps it; a deleted line's state that a thin layer still uses as its base) is
         // not sent: nothing on the remote needs it.
-        match repo.pin(&[id.as_str()]) {
-            Ok(pin) => repo.hold(pin),
+        match local.pin_state(&id) {
+            Ok(()) => {}
             Err(e) => {
                 report.omitted.push(format!("{} {}: {e:#}", id, serde_json::to_value(state.kind)?));
                 continue;
@@ -582,7 +479,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     drop(stage);
     let stage = crate::trace::span("store secret checks");
     // Check changed files against one current secret source index before uploading any state.
-    crate::secrets::check_states(ctx, repo, states.iter().map(|state| state.id.as_str()))?;
+    local.check_secrets(&states.iter().map(|state| state.id.clone()).collect::<Vec<_>>())?;
     drop(stage);
     let stage = crate::trace::span("store collect hashes");
     let mut hashes = ContentHashes { entries: journal.hashes()?, ..Default::default() };
@@ -650,7 +547,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let base_id = if direct.is_some() || index.is_empty() {
             direct
         } else {
-            reader::state_ancestry(repo, &state.id)?.into_iter().skip(1).find(|id| index.contains_key(id))
+            local.ancestry(&state.id)?.into_iter().skip(1).find(|id| index.contains_key(id))
         };
         let base = match base_id {
             Some(id) if latest.as_ref().is_some_and(|(last, _)| last == &id) => latest.take(),
@@ -711,29 +608,28 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         };
         drop(stage);
         let stage = crate::trace::span("store upload state");
-        let root = repo.state_root(&state.id)?;
+        let source = local.open_state(&state.id)?;
+        let root = source.legacy_root();
         // A base that a history limit deleted here (docs/cache-overlays.md) cannot be compared:
         // the state goes up as a complete tree.
         // Pin first, then look: eviction can take a tree that is not pinned (`cmd::admin::evict_caches`), and a pin
         // after its reservation is refused.
-        let base = base.filter(|(id, _)| match repo.pin(&[id.as_str()]) {
-            Ok(pin) => {
-                repo.hold(pin);
-                repo.p.has_state(id)
-            }
+        let base = base.filter(|(id, _)| match local.pin_state(id) {
+            Ok(()) => local.has_state(id),
             Err(_) => false,
         });
-        let base_root = base.as_ref().map(|(id, _)| repo.state_root(id)).transpose()?;
+        let base_source = base.as_ref().map(|(id, _)| local.open_state(id)).transpose()?;
+        let base_root = base_source.as_ref().map(|source| source.legacy_root());
         let (pushed, files, bytes) = upload_state_journal(
             store,
             &descriptor,
             &state.id,
-            &root,
+            root,
             base.as_ref(),
             &mut hashes,
             &mut chunk_hashes,
-            base_root.as_deref(),
-            btrfs_identity(&root, &state.subvol),
+            base_root,
+            btrfs_identity(root, &state.subvol),
             Some(&mut journal),
         )?;
         drop(stage);
@@ -765,8 +661,110 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
     if std::env::var_os("LAYR_TRACE").is_some() {
         eprintln!("trace push-journal {}", serde_json::to_string(&stats)?);
     }
-    super::gitpack::push(store, repo, opts, &mut report)?;
+    super::gitpack::push(store, local, opts, &mut report)?;
     Ok(report)
+}
+
+fn prepare_push(store: &Store, local: &super::Replica<'_>, opts: &Options) -> Result<(Descriptor, bool, Report)> {
+    if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
+        bail!("store --caches is not available until cache states exist");
+    }
+    super::epochs::check_current(store)?;
+    store.private_dir()?;
+    let descriptor = store.descriptor()?;
+    let blind_layer = store.layer.is_some() && !store.backend.can_read();
+    let mut report = Report { omitted: local.omitted_cache_refs(opts)?, ..Default::default() };
+    local.verify_records()?;
+    // A list is enough for a writer without permission to read encrypted objects.
+    let stage = crate::trace::span("store records");
+    // A reader checks that the remote history of this machine is the local one. Another store
+    // with the same machine identity writes other records under the same numbers; a push from it
+    // must fail, not skip or drop its records.
+    // `own-records` names the newest segment of this machine that this store wrote or checked.
+    let own_file = store.dir.join("own-records");
+    // A root key epoch keeps this folder and can reuse segment names: the epoch is in the name.
+    let scope = store.epoch.as_ref().map_or("root", |e| e.key.epoch.as_str()).to_string();
+    let known = std::fs::read_to_string(&own_file).unwrap_or_default();
+    let seen = |key: &str| known.trim() == format!("{scope} {key}");
+    let identity = if blind_layer { None } else { store.identity(&descriptor, None).ok() };
+    let own_history = |key: &str, seq: u64| -> Result<()> {
+        let Some(identity) = &identity else { return Ok(()) };
+        if seen(key) {
+            return Ok(());
+        }
+        let body = store.backend.get(key)?.context("record segment disappeared")?;
+        let body = String::from_utf8(keys::decrypt(identity, &body)?)?;
+        let remote = body.lines().last().unwrap_or_default();
+        if local.record_line(&store.machine, seq)?.as_deref() != Some(remote) {
+            bail!(
+                "the remote has other records of this machine ({}, record {seq}): another store uses this machine identity; run one writer per identity",
+                store.machine
+            );
+        }
+        Ok(())
+    };
+    // Layr Cloud API v1: the token belongs to this machine, so only its own segments go up, signed by the key
+    // that the server knows for it.
+    let api = store.backend.api();
+    if let Some(api) = api {
+        register_machine(store, api)?;
+    }
+    for machine in local.record_machines()? {
+        if api.is_some() && machine != store.machine {
+            continue;
+        }
+        let mut last = 0;
+        let mut last_key = None;
+        for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
+            let (m, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
+            if m != machine {
+                bail!("segment is outside its machine prefix");
+            }
+            if end > last {
+                last = end;
+                last_key = Some(object.key);
+            }
+        }
+        if let Some(key) = last_key.as_deref().filter(|_| machine == store.machine) {
+            own_history(key, last)?;
+            if !seen(key) {
+                std::fs::write(&own_file, format!("{scope} {key}"))?;
+            }
+        }
+        let mut lines = Vec::new();
+        local.visit_records(Some((&machine, last)), &mut |line| {
+            lines.push(line.to_owned());
+            Ok(())
+        })?;
+        if lines.is_empty() {
+            continue;
+        }
+        let mut start = 0;
+        while start < lines.len() {
+            let mut end = start;
+            let mut size = 0;
+            while end < lines.len() && (end == start || size + lines[end].len() + 1 <= RECORD_SEGMENT_BYTES) {
+                size += lines[end].len() + 1;
+                end += 1;
+            }
+            let first = oplog::parse_line(&lines[start])?.record.seq;
+            let last = oplog::parse_line(&lines[end - 1])?.record.seq;
+            let mut bytes = lines[start..end].join("\n").into_bytes();
+            bytes.push(b'\n');
+            // Publish ordered, bounded segments. A retry resumes after the last complete segment.
+            let name = format::segment_name(&machine, first, last);
+            if !store.backend.put_new(&name, keys::encrypt(&descriptor.recipient, &bytes)?)? && machine == store.machine {
+                own_history(&name, last)?;
+            }
+            if machine == store.machine {
+                std::fs::write(&own_file, format!("{scope} {name}"))?;
+            }
+            report.records += end - start;
+            start = end;
+        }
+    }
+    drop(stage);
+    Ok((descriptor, blind_layer, report))
 }
 
 fn content(root: &Path, path: &str, mode: &str) -> Result<Vec<u8>> {
@@ -1216,13 +1214,13 @@ fn file_time(root: &Path, path: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::ctx::{Caller, Ctx};
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
 
-    fn context(root: &Path) -> Ctx {
+    pub(in crate::store_remote) fn context(root: &Path) -> Ctx {
         Ctx {
             store: crate::store::Store::open(&root.join("local")).unwrap(),
             caller: Caller::from_uid(rustix::process::geteuid().as_raw()),
@@ -1233,7 +1231,7 @@ mod tests {
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         }
     }
-    fn remote(root: &Path, ctx: &Ctx) -> Store {
+    pub(in crate::store_remote) fn remote(root: &Path, ctx: &Ctx) -> Store {
         Store {
             backend: super::super::backend::Backend::file(root.join("remote")),
             url: format!("file://{}", root.join("remote").display()),
@@ -1354,6 +1352,37 @@ mod tests {
         store.verify(true).unwrap();
         drop(repo);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_read_view_keeps_the_command_pin() -> Result<()> {
+        use layr_store::sync::LocalReplica;
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir(&root)?;
+        let cleanup = crate::repo::Temp::plain(root.clone());
+        let ctx = context(&root);
+        let store = remote(&root, &ctx);
+        let repo = branch_fixture(&ctx, &store);
+        let state = repo.p.db.present_states()?.remove(0).0;
+        let mut keep = crate::model::DraftRecord::new("ref.set");
+        keep.data = serde_json::json!({"ref_change":{"name":"pins/wp0b","before":null,
+            "after":{"name":"pins/wp0b","target":state}}});
+        repo.p.lock_maintenance()?.append(keep, &ctx.actor())?;
+        let local = crate::sync_local::Local::read(&ctx, &repo);
+        local.pin_state(&state)?;
+        assert!(repo.p.db.is_pinned(&state)?, "fixture must own a real command pin");
+        let first = local.open_state(&state)?;
+        let second = local.open_state(&state)?;
+        drop(first);
+        assert!(
+            repo.p.db.reserve_trees(std::slice::from_ref(&state), "wp0b-reader")?.is_empty(),
+            "a live command/read view lost its pin"
+        );
+        drop(second);
+        assert!(repo.p.db.reserve_trees(&[state], "wp0b-reader")?.is_empty(), "the command pin must outlive every view");
+        crate::free::finish(&ctx);
+        drop(repo);
+        cleanup.discard()
     }
 
     fn branch_fixture<'a>(ctx: &'a Ctx, store: &Store) -> Repo<'a> {

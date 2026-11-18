@@ -1,5 +1,6 @@
 //! Overlay epochs reuse the immutable v2 writer and reader with separate age identities.
 use super::{backend::Backend, keys, reader, writer, Options, Report, Store};
+use crate::sync_local::fetch::{caches_of_lines, states_of_lines};
 use crate::{ctx::Ctx, model::Record, oplog, repo::Repo, store::Project};
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::VerifyingKey;
@@ -80,165 +81,6 @@ fn fetch_selection(repo: &Repo, name: &str, opts: &Options) -> Result<Options> {
         selected.only_states = Some(BTreeSet::new());
     }
     Ok(selected)
-}
-
-/// The states of the overlay `orepo` that the project lines `lines` show: the history of each line on the overlay
-/// (the same name and id, or a name of layr before 0.44: `line-<line id>`, with any platform suffix) and of the
-/// shared lines (`user-<uid>`), only the heads with `heads`. It adds the part that each line shows and the parts
-/// that the states of the line name, with the history of each part.
-pub(super) fn states_of_lines(repo: &Repo, orepo: &Repo, lines: &[String], heads: bool) -> Result<BTreeSet<String>> {
-    let overlay = orepo.p.name.rsplit_once('%').map(|(_, g)| g.to_string());
-    let mut ids = Vec::new();
-    let mut line_ids = Vec::new();
-    let mut parts = Vec::new();
-    for name in lines {
-        let line = repo.p.db.line_by_name(name)?.with_context(|| format!("--line: line '{name}' is not in the store"))?;
-        // The line on the overlay: its own name, or a name of layr before 0.44 (`line-<id>`, `line-<id>.<platform>`).
-        line_ids.push(line.id.clone());
-        ids.push(line.name.clone());
-        ids.push(format!("line-{}", line.id));
-        let Some(overlay) = &overlay else { continue };
-        // Every machine's head of the line (a remote moves the line ahead of this machine).
-        let mut tips = vec![line.head.clone()];
-        parts.extend(repo.layers(&line).unwrap_or_default().into_iter().filter(|l| &l.overlay == overlay).map(|l| l.state));
-        for (_machine, head) in repo.p.db.line_heads(&line.id)? {
-            tips.push(head);
-        }
-        let states = if heads { tips } else { reader::state_ancestries(repo, tips)? };
-        for id in states {
-            if let Some(part) = repo.p.db.state(&id)?.and_then(|st| st.parts.get(overlay).cloned()) {
-                parts.push(part);
-            }
-        }
-    }
-    let tips: Vec<String> = orepo
-        .p
-        .db
-        .lines()?
-        .into_iter()
-        .filter(|l| {
-            l.name.starts_with("user-")
-                || line_ids.contains(&l.id)
-                || ids.iter().any(|id| l.name == *id || (id.starts_with("line-") && l.name.starts_with(&format!("{id}."))))
-        })
-        .map(|l| l.head)
-        .chain(parts)
-        .collect();
-    if heads {
-        return Ok(tips.into_iter().collect());
-    }
-    Ok(reader::state_ancestries(orepo, tips)?.into_iter().collect())
-}
-
-/// The cache states of the cache overlay `orepo` that `line new X <line>` takes for each of `lines`, from the records
-/// alone (the states are not here yet): the newest cache of the line's own overlay line, and the newest cache of this
-/// platform saved with its head or else with its nearest ancestor that has one (`cache_source`).
-pub(super) fn caches_of_lines(repo: &Repo, orepo: &Repo, lines: &[String]) -> Result<BTreeSet<String>> {
-    caches_of_lines_for(repo, orepo, lines, None)
-}
-
-/// `caches_of_lines`, with `uid`: only the caches that a line of that user can take (`usable_cache`).
-pub(super) fn caches_of_lines_for(repo: &Repo, orepo: &Repo, lines: &[String], uid: Option<u32>) -> Result<BTreeSet<String>> {
-    let saved_with = saved_with(repo, orepo, uid)?;
-    let mut out = BTreeSet::new();
-    for name in lines {
-        let line = repo.line(name).with_context(|| format!("--line: no line {name}"))?;
-        // The line on the overlay: its own name or id, or a name of layr before 0.44 (`line-<id>.<platform>`).
-        if let Some(own) = crate::overlay::find_follow_line(&orepo.p.db, &line)? {
-            if !orepo.p.db.state(&own.head)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref()))
-                && usable_by(repo, orepo, &own.head, uid)?
-            {
-                out.insert(own.head);
-            }
-        }
-        // Every machine's head of the line: a check runner's own main can be an old head while a server
-        // queue moved main on its merge machine, and the runner checks states made from that newer head.
-        let mut heads = vec![line.head.clone()];
-        for (_, head) in repo.p.db.line_heads(&line.id)? {
-            if !heads.contains(&head) {
-                heads.push(head);
-            }
-        }
-        for head in heads {
-            out.extend(nearest_cache(repo, &saved_with, head)?);
-        }
-    }
-    Ok(out)
-}
-
-/// The cache state of the cache overlay `orepo` that `line new X <state>` takes for a line of `uid`, from the records
-/// alone: the newest usable cache of this platform saved with `state` or else with its nearest ancestor that has one
-/// (`cache_source`).
-pub(super) fn caches_from_state(repo: &Repo, orepo: &Repo, state: &str, uid: u32) -> Result<BTreeSet<String>> {
-    Ok(nearest_cache(repo, &saved_with(repo, orepo, Some(uid))?, state.to_string())?.into_iter().collect())
-}
-
-/// Whether a line of `uid` may take the cache state `id` (`Repo::usable_cache` without the key, which needs the
-/// working folder): made by `uid`, shared, or the overlay takes caches of other users (`trust=readers`). None: any.
-fn usable_by(repo: &Repo, orepo: &Repo, id: &str, uid: Option<u32>) -> Result<bool> {
-    let Some(uid) = uid else { return Ok(true) };
-    let Some(st) = orepo.p.db.state(id)? else { return Ok(false) };
-    let name = orepo.p.name.rsplit_once('%').map_or(orepo.p.name.as_str(), |(_, name)| name);
-    Ok(uid == 0 || st.cache_shared || st.cache_by == Some(uid) || !repo.trust_protected(name)?)
-}
-
-/// The newest cache state of this platform saved with each project state, from the records of `orepo`; with `uid`,
-/// only the caches that a line of that user can take, as `cache_source` filters them before it picks the newest.
-fn saved_with(repo: &Repo, orepo: &Repo, uid: Option<u32>) -> Result<BTreeMap<String, String>> {
-    let mut saved_with: BTreeMap<String, String> = BTreeMap::new();
-    for (id, of) in orepo.p.db.cache_states_known()? {
-        // A cache of another platform stays on the remote: a newer one (an x86 runner's after an arm runner's) must
-        // not hide this platform's cache of the same state.
-        if orepo.p.db.state(&id)?.is_some_and(|st| crate::cache_overlay::other_platform(st.cache_platform.as_deref())) {
-            continue;
-        }
-        if !usable_by(repo, orepo, &id, uid)? {
-            continue;
-        }
-        // A save with no named change saves with an automatic state over the head: it counts for the head.
-        if let Some(st) = repo.p.db.state(&of)? {
-            if st.kind == crate::model::StateKind::Auto {
-                if let Some(parent) = st.parents.first() {
-                    saved_with.entry(parent.clone()).or_insert_with(|| id.clone());
-                }
-            }
-        }
-        saved_with.entry(of).or_insert(id);
-    }
-    Ok(saved_with)
-}
-
-/// The cache saved with `head` or else with its nearest ancestor that has one (at most 200 states back).
-fn nearest_cache(repo: &Repo, saved_with: &BTreeMap<String, String>, head: String) -> Result<Option<String>> {
-    let mut seen = BTreeSet::new();
-    let mut queue = std::collections::VecDeque::from([head]);
-    while let Some(id) = queue.pop_front() {
-        if seen.len() >= 200 || !seen.insert(id.clone()) {
-            continue;
-        }
-        if let Some(cache) = saved_with.get(&id) {
-            return Ok(Some(cache.clone()));
-        }
-        if let Some(state) = repo.p.db.state(&id)? {
-            queue.extend(state.parents);
-        }
-    }
-    Ok(None)
-}
-
-pub(super) fn caches_of_state(repo: &Repo, orepo: &Repo, state: &str) -> Result<BTreeSet<String>> {
-    let mut out = BTreeSet::new();
-    for (id, of) in orepo.p.db.cache_states_known()? {
-        let auto_of_state = repo
-            .p
-            .db
-            .state(&of)?
-            .is_some_and(|s| s.kind == crate::model::StateKind::Auto && s.parents.first().is_some_and(|p| p == state));
-        if of == state || auto_of_state {
-            out.insert(id);
-        }
-    }
-    Ok(out)
 }
 
 /// The signers of `keys` that `trusted` does not name yet. A signer that it names with another key is an error.
@@ -853,7 +695,7 @@ pub(crate) fn settled_epoch(orepo: &Repo, store: &str) -> Result<Option<Option<S
 
 /// Restore the state `id` of the overlay `orepo` (overlay `name` of `parent`) from the store remote `remote` of the
 /// project: from the layer that the store publishes now. A read of an evicted cache state (`Repo::check_state`)
-/// comes here; it works under the overlay's lock (`reader::publish_restored`).
+/// comes here; it works under the overlay's lock (`sync_local::fetch::publish_restored`).
 pub(crate) fn restore_overlay_state(ctx: &Ctx, parent: &Repo, orepo: &Repo, name: &str, remote: &str, id: &str) -> Result<()> {
     let mut store = super::open_named(remote, parent)?;
     store.configure(ctx, &super::ConfigureOptions::default())?;

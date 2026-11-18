@@ -26,3 +26,5 @@ pub mod trust;
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub mod reader;
 pub mod record;
+
+pub mod sync;

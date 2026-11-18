@@ -19,18 +19,26 @@ mod push_journal;
 pub(crate) mod reader;
 mod release;
 pub(crate) mod sweep;
+#[cfg(test)]
+mod sync_tests;
 mod writer;
 
 pub(crate) use layr_store::{canonical, format, keys, s3, zst};
 
 use crate::ctx::Ctx;
 use crate::repo::Repo;
+use crate::sync_local::fetch;
 use anyhow::{bail, Context, Result};
 use backend::Backend;
 use format::{Descriptor, Mode};
 use layr_hashers::{ContentAddress, Digest};
+use layr_store::sync::RemoteSync;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+// Only metadata and the portable port cross into a main-layer transfer engine.
+pub(crate) type Replica<'a> =
+    dyn layr_store::sync::LocalReplica<State = crate::model::StateRec, Line = crate::model::Line, Selection = Options> + 'a;
+
 #[derive(Clone, Default)]
 pub struct Options {
     pub public: bool,
@@ -60,9 +68,6 @@ pub struct Options {
     /// count of the states that stay on the remote (`takes_cache_states`).
     pub(crate) plain_cache_fetch: bool,
 }
-
-/// The name of the bottom layer in `fetch --overlay` (`main`, owner decision 2026-11-15).
-pub const BASE_LAYER: &str = crate::overlay::MAIN;
 
 impl Options {
     /// Whether `fetch --overlay` takes the layer `name`.
@@ -344,7 +349,7 @@ pub fn restore_git_objects(ctx: &Ctx, repo: &Repo) -> Result<usize> {
         store.connect(ctx)?;
         let descriptor = store.descriptor()?;
         let identity = store.identity(&descriptor, None)?;
-        installed += gitpack::fetch(&store, repo, &identity)?;
+        installed += gitpack::fetch(&store, &crate::sync_local::Local::read(ctx, repo), &identity)?;
     }
     Ok(installed)
 }
@@ -469,8 +474,8 @@ fn fetch_caches_inner(ctx: &Ctx, repo: &Repo, start: &str, source: Option<&crate
     for (name, _folder) in repo.folder_overlays()? {
         let Ok(orepo) = repo.overlay_repo(&name) else { continue };
         let ids = match source {
-            Some(line) => overlays::caches_of_lines_for(repo, &orepo, std::slice::from_ref(&line.name), Some(ctx.caller.uid))?,
-            None => overlays::caches_from_state(repo, &orepo, start, ctx.caller.uid)?,
+            Some(line) => fetch::caches_of_lines_for(repo, &orepo, std::slice::from_ref(&line.name), Some(ctx.caller.uid))?,
+            None => fetch::caches_from_state(repo, &orepo, start, ctx.caller.uid)?,
         };
         for id in ids {
             if absent_here(&orepo, &id)? {
@@ -1268,101 +1273,18 @@ impl Store {
         Ok(())
     }
 
-    pub fn push(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
-        repo.require(ctx, "sync")?;
-        repo.require(ctx, "records")?;
-        self.connect(ctx)?;
-        if repo.p.is_overlay() {
-            bail!("private overlay projects cannot be pushed to a store");
-        }
-        // Recheck the descriptor pin before discovery or any write-related request.
-        let descriptor = self.descriptor()?;
-        // Check before the writer can publish any object, even when the caller is local root.
-        let public_manifest = self.backend.get("public.json")?;
-        let public = public_manifest.is_some();
-        if let Some(bytes) = public_manifest {
-            let manifest = layr_store::public::Manifest::parse(&bytes, &descriptor)?;
-            let identity = self.identity(&descriptor, opts.paper_key.as_deref())?;
-            self.require_private_access()?;
-            // The segments that an earlier fetch or push read and checked are not read again (`seen-records`): a
-            // runner that pushes after each check reads only the new segments, not the whole log each time.
-            let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-            let records = reader::records_with_local(
-                &self.backend,
-                &identity,
-                &descriptor.project,
-                &local,
-                Some(&reader::seen_file(&self.dir)),
-            )?;
-            manifest.verify_signer(&layr_store::public::trusted_writers_checked(&descriptor.project, &records.lines)?)?;
-        } else if self.force_public {
-            self.require_private_access()?;
-        }
-        // Private gateway listings require the machine read proof, including before
-        // the writer's first discovery request when there is no public manifest.
-        if let Backend::Gateway(gateway) = &self.backend {
-            if !gateway.has_read_identity() {
-                self.identity(&descriptor, opts.paper_key.as_deref())?;
-            }
-        }
-        let mode = if public {
-            layr_store::epochs::Mode::Public
-        } else if self.backend.get("slots/service.age")?.is_some() {
-            layr_store::epochs::Mode::Service
-        } else {
-            layr_store::epochs::Mode::Private
-        };
-        for name in repo.visible_overlay_names(ctx)? {
-            if let Ok(overlay) = repo.overlay_repo(&name) {
-                if epochs::overlay_mode(&overlay)? > mode {
-                    bail!(
-                        "overlay {name} is more open than remote project mode {}; change the remote mode before pushing",
-                        mode.name()
-                    );
-                }
-            }
-        }
-        if self.is_api() {
-            self.private_dir()?;
-            let mut report = writer::push(self, ctx, repo, opts)?;
-            push_refs(self, repo, &mut report)?;
-            overlays::api_push(self, ctx, repo, opts, &mut report)?;
-            return Ok(report);
-        }
-        let mut report = writer::push(self, ctx, repo, opts)?;
-        overlays::push(self, ctx, repo, opts, &mut report)?;
-        Ok(report)
-    }
-
-    pub fn fetch(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
-        if !repo.p.id.is_empty() {
+    // Fetch/clone share one orchestration body, preserving their distinct preconditions and final selections.
+    fn fetch_into(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options, clone: bool) -> Result<Report> {
+        if clone {
+            self.force_public = opts.public;
+        } else if !repo.p.id.is_empty() {
             repo.require(ctx, if self.public_clone { "read" } else { "sync" })?;
             if !self.public_clone {
                 repo.require(ctx, "records")?;
             }
         }
         self.connect(ctx)?;
-        let mut report = reader::fetch(self, ctx, repo, opts)?;
-        if self.is_api() {
-            self.private_dir()?;
-            fetch_refs(self, repo, &mut report)?;
-            overlays::api_fetch(self, ctx, repo, opts, &mut report)?;
-        } else {
-            overlays::fetch(self, ctx, repo, opts, &mut report)?;
-        }
-        let pending = self.dir.join("pending-lines.json");
-        if pending.exists() {
-            let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
-            let lines = report.clone_lines.take();
-            report.missing_lines = self.materialize_clone_lines(ctx, repo, Some(&ids), lines.as_deref(), opts.heads)?;
-        }
-        Ok(report)
-    }
-
-    pub fn clone_into(&mut self, ctx: &Ctx, repo: &mut Repo, opts: &Options) -> Result<Report> {
-        self.force_public = opts.public;
-        self.connect(ctx)?;
-        if !repo.p.id.is_empty() {
+        if clone && !repo.p.id.is_empty() {
             bail!("clone needs an empty project");
         }
         let mut report = reader::fetch(self, ctx, repo, opts)?;
@@ -1373,89 +1295,26 @@ impl Store {
         } else {
             overlays::fetch(self, ctx, repo, opts, &mut report)?;
         }
-        let lines = report.clone_lines.take().unwrap_or(repo.p.db.lines()?);
-        let only = if let Some(name) = &opts.only_line {
-            let line =
-                lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
-            Some(std::collections::BTreeSet::from([line.id.clone()]))
+        let pending = self.dir.join("pending-lines.json");
+        let (only, lines) = if clone {
+            let lines = report.clone_lines.take().unwrap_or(repo.p.db.lines()?);
+            let only = if let Some(name) = &opts.only_line {
+                let line =
+                    lines.iter().find(|line| line.name == *name).with_context(|| format!("line '{name}' is not in the store"))?;
+                Some(std::collections::BTreeSet::from([line.id.clone()]))
+            } else {
+                None
+            };
+            (only, Some(lines))
+        } else if pending.exists() {
+            let ids: std::collections::BTreeSet<String> = serde_json::from_slice(&std::fs::read(pending)?)?;
+            (Some(ids), report.clone_lines.take())
         } else {
-            None
+            return Ok(report);
         };
-        report.missing_lines = self.materialize_clone_lines(ctx, repo, only.as_ref(), Some(&lines), opts.heads)?;
-        Ok(report)
-    }
-
-    fn materialize_clone_lines(
-        &self,
-        ctx: &Ctx,
-        repo: &mut Repo,
-        only: Option<&std::collections::BTreeSet<String>>,
-        source_lines: Option<&[crate::model::Line]>,
-        heads: bool,
-    ) -> Result<Vec<String>> {
         self.private_dir()?;
-        // The working folders are written with no project lock: each under its line's lock, with the
-        // head pinned. Only the adopt record is written under the project lock, after the folder.
-        let lines = match source_lines {
-            Some(lines) => lines.to_vec(),
-            None => repo.p.db.lines()?,
-        };
-        let mut pending = Vec::new();
-        let mut missing = Vec::new();
-        for line in lines {
-            if only.is_some_and(|ids| !ids.contains(&line.id)) {
-                continue;
-            }
-            let local = crate::model::Line { machine: repo.p.store.machine.id.clone(), owner: ctx.caller.uid, ..line.clone() };
-            if repo.working(&local).exists() {
-                continue;
-            }
-            if !repo.p.has_state(&line.head) {
-                pending.push(line.id.clone());
-                missing.push(format!(
-                    "line {}: head state {} is not in the store yet; run `layr fetch <remote>` later",
-                    line.name, line.head
-                ));
-                continue;
-            }
-            repo.hold(repo.pin(&[line.head.as_str()])?);
-            let mut created = false;
-            {
-                let _line = repo.line_lock(&local)?;
-                if !repo.working(&local).exists() {
-                    // Git export walks ancestors: a heads-only fetch must leave their trees
-                    // on the remote. Restore the normal read policy even on failure.
-                    let restore = repo.restore_from_remote;
-                    repo.restore_from_remote = restore && !heads;
-                    let result = repo.materialize(&local, &local.head, &repo.working(&local));
-                    repo.restore_from_remote = restore;
-                    result?;
-                    created = true;
-                }
-            }
-            if created {
-                let _lock = repo.p.lock_maintenance()?;
-                let mut record = crate::model::DraftRecord::new("line.adopt");
-                record.lines.insert(
-                    local.id.clone(),
-                    crate::model::LineChange {
-                        transition: crate::model::LineTransition::from_endpoints(
-                            repo.p.db.line_by_id(&line.id)?.map(|before| repo.line_state(&before, &before.head)),
-                            Some(repo.line_state(&local, &local.head)),
-                        ),
-                        working_before: None,
-                        working_after: None,
-                    },
-                );
-                let shown = repo.readable_layers(&local)?;
-                record.data = serde_json::json!({
-                    "folder_view": repo.public_view_data(&local.id, &shown)?,
-                });
-                repo.commit_record(&_lock, ctx, record)?;
-            }
-        }
-        crate::fsutil::atomic_write(&self.dir.join("pending-lines.json"), &serde_json::to_vec(&pending)?, 0o600)?;
-        Ok(missing)
+        report.missing_lines = fetch::materialize_clone_lines(ctx, repo, only.as_ref(), lines.as_deref(), &self.dir, opts.heads)?;
+        Ok(report)
     }
 
     pub fn verify(&self, files: bool) -> Result<Report> {
@@ -1555,6 +1414,82 @@ impl Store {
         // The signed trust path binds this machine id to one key. A retry keeps its slot.
         self.backend.put_new(&name, slot)?;
         Ok(())
+    }
+}
+
+impl<'a> RemoteSync<Ctx, Repo<'a>, Options> for Store {
+    type Report = Report;
+    fn push(&mut self, ctx: &Ctx, repo: &mut Repo<'a>, opts: &Options) -> Result<Report> {
+        repo.require(ctx, "sync")?;
+        repo.require(ctx, "records")?;
+        self.connect(ctx)?;
+        if repo.p.is_overlay() {
+            bail!("private overlay projects cannot be pushed to a store");
+        }
+        // Recheck the descriptor pin before discovery or any write-related request.
+        let descriptor = self.descriptor()?;
+        // Check before the writer can publish any object, even when the caller is local root.
+        let public_manifest = self.backend.get("public.json")?;
+        let public = public_manifest.is_some();
+        if let Some(bytes) = public_manifest {
+            let manifest = layr_store::public::Manifest::parse(&bytes, &descriptor)?;
+            let identity = self.identity(&descriptor, opts.paper_key.as_deref())?;
+            self.require_private_access()?;
+            // The segments that an earlier fetch or push read and checked are not read again (`seen-records`): a
+            // runner that pushes after each check reads only the new segments, not the whole log each time.
+            let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
+            let records = reader::records_with_local(
+                &self.backend,
+                &identity,
+                &descriptor.project,
+                &local,
+                Some(&reader::seen_file(&self.dir)),
+            )?;
+            manifest.verify_signer(&layr_store::public::trusted_writers_checked(&descriptor.project, &records.lines)?)?;
+        } else if self.force_public {
+            self.require_private_access()?;
+        }
+        // Private gateway listings require the machine read proof, including before
+        // the writer's first discovery request when there is no public manifest.
+        if let Backend::Gateway(gateway) = &self.backend {
+            if !gateway.has_read_identity() {
+                self.identity(&descriptor, opts.paper_key.as_deref())?;
+            }
+        }
+        let mode = if public {
+            layr_store::epochs::Mode::Public
+        } else if self.backend.get("slots/service.age")?.is_some() {
+            layr_store::epochs::Mode::Service
+        } else {
+            layr_store::epochs::Mode::Private
+        };
+        for name in repo.visible_overlay_names(ctx)? {
+            if let Ok(overlay) = repo.overlay_repo(&name) {
+                if epochs::overlay_mode(&overlay)? > mode {
+                    bail!(
+                        "overlay {name} is more open than remote project mode {}; change the remote mode before pushing",
+                        mode.name()
+                    );
+                }
+            }
+        }
+        if self.is_api() {
+            self.private_dir()?;
+            let mut report = writer::push(self, ctx, repo, opts)?;
+            push_refs(self, repo, &mut report)?;
+            overlays::api_push(self, ctx, repo, opts, &mut report)?;
+            return Ok(report);
+        }
+        let mut report = writer::push(self, ctx, repo, opts)?;
+        overlays::push(self, ctx, repo, opts, &mut report)?;
+        Ok(report)
+    }
+
+    fn fetch(&mut self, ctx: &Ctx, repo: &mut Repo<'a>, opts: &Options) -> Result<Report> {
+        self.fetch_into(ctx, repo, opts, false)
+    }
+    fn clone_into(&mut self, ctx: &Ctx, repo: &mut Repo<'a>, opts: &Options) -> Result<Report> {
+        self.fetch_into(ctx, repo, opts, true)
     }
 }
 
@@ -1914,7 +1849,7 @@ fn push_refs(store: &Store, repo: &Repo, report: &mut Report) -> Result<()> {
         // Like a Git push without force: the new head must contain what the server had, or a move of another
         // writer would be lost. The person merges it first.
         if let (Some(expect), Some(target)) = (&expect, &head) {
-            if !reader::state_ancestry(repo, target)?.contains(expect) {
+            if !fetch::state_ancestry(repo, target)?.contains(expect) {
                 bail!(
                     "Layr Cloud: {name} is at {} there, and head {} here does not contain it; merge it into the line, then push",
                     crate::ids::short(expect),
@@ -2137,7 +2072,8 @@ mod clone_head_tests {
         std::fs::write(states_left_file(&remote.dir), format!("{base}\n{omitted}\n"))?;
         let line = repo.p.db.line_by_id(&line_id)?.unwrap();
         REMOTE_STATE_RESTORES.with(|count| count.set(0));
-        assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(std::slice::from_ref(&line)), true)?.is_empty());
+        assert!(fetch::materialize_clone_lines(&ctx, &mut repo, None, Some(std::slice::from_ref(&line)), &remote.dir, true)?
+            .is_empty());
         assert_eq!(REMOTE_STATE_RESTORES.with(|count| count.get()), 0, "Git must not try remote restoration");
         assert!(!repo.p.has_state(&omitted));
         assert!(repo.working(&line).join("head-file").is_file());
@@ -2366,7 +2302,8 @@ mod clone_head_tests {
             captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(Vec::<u8>::new())),
         };
-        assert!(remote.materialize_clone_lines(&ctx, &mut repo, None, Some(&selected), false)?.is_empty());
+        remote.private_dir()?;
+        assert!(fetch::materialize_clone_lines(&ctx, &mut repo, None, Some(&selected), &remote.dir, false)?.is_empty());
         assert_eq!(repo.p.db.line_by_id(&line)?.unwrap().head, local_head);
         assert_eq!(std::fs::read_to_string(working.join("keep"))?, "local work");
         drop(repo);
