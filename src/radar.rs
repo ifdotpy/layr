@@ -13,6 +13,7 @@ use crate::ctx::Ctx;
 use crate::fsutil::{self, Src};
 use crate::ignore_rules::Rules;
 use crate::model::Line;
+use crate::overlay::Layer;
 use crate::repo::{skip_path, Repo, Snap};
 use anyhow::{anyhow, Result};
 use layr_hashers::{Digest, GitCompatible};
@@ -421,13 +422,13 @@ impl Repo<'_> {
         Ok(removed)
     }
 
-    fn radar_hidden(&self, ctx: &Ctx, line: &Line) -> Result<BTreeSet<String>> {
+    /// The paths of `line` that the caller must not see: its private paths when one of its `layers` is an
+    /// overlay that the caller cannot read, and its pending moves to such overlays.
+    fn radar_hidden(&self, ctx: &Ctx, line: &Line, layers: &[Layer], private: &BTreeSet<String>) -> BTreeSet<String> {
         let mut hidden = BTreeSet::new();
-        for layer in self.layers(line)? {
-            if !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
-                // Include earlier and newer private paths, so deletions cannot expose names.
-                hidden.extend(self.private_paths(line)?);
-            }
+        if layers.iter().any(|layer| !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)) {
+            // Include earlier and newer private paths, so deletions cannot expose names.
+            hidden.extend(private.iter().cloned());
         }
         for (path, overlay) in self.pending_moves(line) {
             // A move to `main` is a move to the public layer: its reader is every reader of the project.
@@ -435,7 +436,7 @@ impl Repo<'_> {
                 hidden.insert(path);
             }
         }
-        Ok(hidden)
+        hidden
     }
 
     /// The tree of our working folder to compare. APFS compares the live folder, as status does:
@@ -525,8 +526,11 @@ impl Repo<'_> {
         // Taking the working folder tree is costly; do it only when another line needs it.
         let mut ours: Option<(Option<crate::repo::Temp>, PathBuf)> = None;
         let ignored = Rules::new(&self.working(line));
-        let our_hidden = self.radar_hidden(ctx, line)?;
-        let our_private = self.private_paths(line)?;
+        // The hidden overlays are read once for all lines: reading them reads every overlay setting.
+        let hidden_overlays = self.hidden_overlays()?;
+        let our_layers = self.layers_in(line, &hidden_overlays)?;
+        let our_private = self.private_paths_in(line, &our_layers, &hidden_overlays)?;
+        let our_hidden = self.radar_hidden(ctx, line, &our_layers, &our_private);
         let mut work = Work::default();
         let mut plans: Vec<OtherPlan> = Vec::new();
         // The merge bases of all lines come from one read of the history.
@@ -555,11 +559,12 @@ impl Repo<'_> {
             let head = self.state(&other.head)?;
             let state = self.last_auto(&other)?.filter(|s| s.time >= head.time).unwrap_or(head);
             let theirs = self.state_src(&state.id)?;
-            let hidden = self.radar_hidden(ctx, &other)?;
-            let their_private = self.private_paths(&other)?;
+            let their_layers = self.layers_in(&other, &hidden_overlays)?;
+            let their_private = self.private_paths_in(&other, &their_layers, &hidden_overlays)?;
+            let hidden = self.radar_hidden(ctx, &other, &their_layers, &their_private);
             let job = work.jobs.len();
             work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root.clone(), theirs));
-            let layers = self.overlay_plans(ctx, line, &other, ours_root, &mut work)?;
+            let layers = self.overlay_plans(ctx, &our_layers, &their_layers, ours_root, &mut work)?;
             plans.push(OtherPlan {
                 name: other.name.clone(),
                 owner: other.owner,
@@ -646,10 +651,16 @@ impl Repo<'_> {
 
     /// The overlay layers that both lines hold: the state compares as jobs, and our overlay head
     /// compared with the live folder once per overlay.
-    fn overlay_plans(&self, ctx: &Ctx, line: &Line, other: &Line, ours: &Path, work: &mut Work) -> Result<Vec<LayerPlan>> {
+    fn overlay_plans(
+        &self,
+        ctx: &Ctx,
+        our_layers: &[Layer],
+        their_layers: &[Layer],
+        ours: &Path,
+        work: &mut Work,
+    ) -> Result<Vec<LayerPlan>> {
         let mut plans = Vec::new();
-        let their_layers = self.layers(other)?;
-        for layer in self.layers(line)? {
+        for layer in our_layers {
             if !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
                 continue;
             }
