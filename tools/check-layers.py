@@ -53,6 +53,9 @@ for name in ["repo.rs", "lineops.rs", "overlay.rs", "cache_overlay.rs", "changes
     source = (root / "src" / name).read_text()
     if re.search(r"crate::(?:apfs|btrfs|btrfs_driver|overlayfs|storage)::|(?<![:\w])storage::", source):
         errors.append(f"src/{name}: shared algorithms must use filesystem contracts")
+# The sync seam starts inside the application; keep its temporary import allowlist enforceable in CI.
+subprocess.run([sys.executable, str(root / "tools/check-sync-boundary.py")], check=True)
+subprocess.run([sys.executable, str(root / "tools/test-sync-boundary.py")], check=True)
 if errors:
     print('\n'.join(errors), file=sys.stderr)
     sys.exit(1)

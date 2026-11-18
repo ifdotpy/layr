@@ -6,7 +6,8 @@
 //! fetch reads the state bodies, downloads the packs that hold the missing trees, times tables and
 //! blobs, and checks each state out of the object store.
 
-use super::{reader, writer, Options, Report, Store};
+use super::{writer, Options, Report, Store};
+use crate::sync_local::fetch::{publish_restored, push_selection, required_states, wanted};
 use crate::{ctx::Ctx, model::StateRec, repo::Repo};
 use anyhow::{bail, Context, Result};
 use layr_objects::{transfer, Id, Keying, Kind, StateRef, Store as Objects, Temperature, WriteOptions};
@@ -82,8 +83,8 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     let scope = store.api_scope();
     let lines: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-    let required = reader::required_states(repo, &lines, opts)?;
-    let selection = reader::push_selection(repo, &lines, opts)?;
+    let required = required_states(repo, &lines, opts)?;
+    let selection = push_selection(repo, &lines, opts)?;
     // Open once: loading pack indexes once per migrated state makes a large history expensive to push.
     let objects = crate::objstore::exists(&repo.p).then(|| open(repo)).transpose()?;
     let mut candidates = Vec::new();
@@ -96,7 +97,7 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
         if !present && objects.as_ref().map(|store| recorded(store, &state)).transpose()?.flatten().is_none() {
             continue;
         }
-        if !reader::wanted(&state, opts) && !required.contains(&id) {
+        if !wanted(&state, opts) && !required.contains(&id) {
             report.omitted.push(format!("{} {}", id, serde_json::to_value(state.kind)?));
             continue;
         }
@@ -244,7 +245,7 @@ pub(super) fn fetch_states(store: &Store, repo: &Repo, states: Vec<StateRec>, re
         let temporary = crate::repo::Temp::empty(stage.clone())?;
         let result = (|| -> Result<u64> {
             let made = layr_objects::checkout_with(&objects, &local.tree, Some(&local.times), &stage)?;
-            reader::publish_restored(repo, &state, &stage, 0)?;
+            publish_restored(repo, &state, &stage, 0)?;
             Ok(made.files)
         })();
         let made = match result {

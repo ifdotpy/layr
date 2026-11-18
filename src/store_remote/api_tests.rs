@@ -7,6 +7,7 @@ use crate::ctx::{Caller, Ctx};
 use crate::model::{LineChange, LineState, Record, StateRec};
 use crate::repo::Repo;
 use layr_objects::Kind;
+use layr_store::sync::RemoteSync;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -847,7 +848,7 @@ fn a_fetch_of_the_base_layer_skips_the_other_overlays() {
     let fake = Fake::start(Some(PROJECT));
     let store = api_store(&root, &ctx, &fake);
     let (repo, _, _) = project(&ctx);
-    let opts = Options { overlays: Some([super::BASE_LAYER.to_string()].into()), heads: true, ..Default::default() };
+    let opts = Options { overlays: Some([crate::overlay::MAIN.to_string()].into()), heads: true, ..Default::default() };
     check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, None);
     assert_eq!(fake.count("GET /api/v1/projects/p/objects/"), 0, "no object pack");
     crate::free::finish(&ctx);
@@ -863,7 +864,7 @@ fn a_fetch_of_other_overlays_skips_the_cache_overlay() {
     let fake = Fake::start(Some(PROJECT));
     let store = api_store(&root, &ctx, &fake);
     let (repo, _, _) = project(&ctx);
-    let opts = Options { overlays: Some([super::BASE_LAYER.to_string()].into()), heads: true, ..Default::default() };
+    let opts = Options { overlays: Some([crate::overlay::MAIN.to_string()].into()), heads: true, ..Default::default() };
     let before = fake.count("GET /api/v1/projects/p/");
     check_first_cache_fetch(&root, &ctx, &repo, &store, "cache.target", &opts, None);
     assert_eq!(fake.count("GET /api/v1/projects/p/objects/"), 0, "no object pack");
@@ -2232,4 +2233,32 @@ fn a_new_clone_uses_published_server_refs_and_refuses_missing_target_records() {
     assert!(super::reader::clone_lines(&store, &repo).unwrap().is_empty(), "unpublished record heads are not server refs");
     drop(repo);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn overlay_clone_lines_ignore_server_refs_ahead_of_records() -> anyhow::Result<()> {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir(&root)?;
+    let cleanup = crate::repo::Temp::plain(root.clone());
+    let ctx = context(&root);
+    let fake = Fake::start(Some(PROJECT));
+    let mut store = api_store(&root, &ctx, &fake);
+    let (mut repo, _, line) = project(&ctx);
+    repo.p.name = "p%target.test".into();
+    store.backend = Backend::Prefix(Box::new(store.backend), "overlays/target.test/".into());
+    fake.state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("fake lock poisoned"))?
+        .refs
+        .insert(("overlays/target.test/".into(), format!("lines/{line}")), (crate::ids::new_id(), 1));
+    let before = fake.state.lock().map_err(|_| anyhow::anyhow!("fake lock poisoned"))?.log.len();
+    let expected = repo.p.db.lines()?;
+    assert_eq!(super::reader::clone_lines(&store, &repo)?, expected);
+    assert_eq!(
+        fake.state.lock().map_err(|_| anyhow::anyhow!("fake lock poisoned"))?.log.len(),
+        before,
+        "overlay selection must issue zero refs requests"
+    );
+    drop(repo);
+    cleanup.discard()
 }

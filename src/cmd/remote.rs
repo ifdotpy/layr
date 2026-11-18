@@ -1,5 +1,7 @@
 //! Named remotes and the Git bridge.
 
+use layr_store::sync::RemoteSync;
+
 pub use crate::remote_config::{kind, remote_url, Kind};
 
 pub mod git {

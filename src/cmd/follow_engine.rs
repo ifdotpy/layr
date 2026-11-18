@@ -2,6 +2,8 @@
 //! one pass, its result record and the daemon tick. Merges, fetches and cache saves are the
 //! commands' own functions.
 
+use layr_store::sync::RemoteSync;
+
 use crate::cache_overlay::Source;
 use crate::cmd::{admin, mergecmd, remote};
 use crate::ctx::{Caller, Ctx};
