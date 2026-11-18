@@ -25,8 +25,11 @@ pub(crate) fn make_overlay(
     folder: Option<&str>,
     key_files: Option<&serde_json::Value>,
     parent: Option<&str>,
+    empty: Option<&crate::repo::PreparedEmptyTree>,
 ) -> Result<()> {
     locked.check(&repo.p)?;
+    #[cfg(feature = "overlayfs")]
+    let _backend = crate::overlayfs::try_publication(&repo.p.dir)?.ok_or(crate::cmd::overlaycmd::OverlayRetirementBusy)?;
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
     let dir = ctx.store.project_dir(&pname)?;
@@ -34,7 +37,31 @@ pub(crate) fn make_overlay(
     // overlay replaces that folder (its states are not kept by any line).
     let removed = repo.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some();
     if removed && dir.exists() {
-        crate::fs::remove(&dir)?;
+        let Some(old) = Project::open_maintenance(&ctx.store, &pname)? else {
+            return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into());
+        };
+        let Some(_old_lock) = old.try_reserve()? else { return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into()) };
+        let Some(_lease) = crate::objstore::try_preparation_exclusive(&old)? else {
+            return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into());
+        };
+        let root = repo
+            .p
+            .db
+            .overlay_config(&format!("overlay.{name}.removed"))?
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .ok_or_else(|| anyhow::anyhow!("removed overlay has no root identity"))?;
+        let identity = old.db.overlay_config("overlay")?;
+        anyhow::ensure!(
+            identity.is_some_and(|v| v["project"] == repo.p.id && v["name"] == name) && old.db.state(&root)?.is_some(),
+            "removed overlay '{name}' has a different identity"
+        );
+        if !old.db.pin_holders()?.is_empty() {
+            return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into());
+        }
+        let trash = repo.p.trash_dir()?;
+        std::fs::create_dir_all(&trash)?;
+        crate::fs::move_tree(&dir, &trash.join(crate::store::temp_name()))?;
+        // The parent lock's drop reclaims the retired tree outside that lock.
     }
     // Only a folder this call made is removed below, so the creation stays outside the cleanup.
     let config = serde_json::json!({
@@ -48,8 +75,17 @@ pub(crate) fn make_overlay(
         // The first state of every overlay line: an empty tree.
         let id = ids::new_id();
         let dst = orepo.p.state_path(&id);
-        let empty = crate::repo::Temp::empty(orepo.p.work_dir().join(crate::store::temp_name()))?;
-        let captured = crate::fs::freeze_path_owned(&empty.path, &dst, crate::fs::CapturePurpose::State)?;
+        let captured = if let Some(empty) = empty {
+            empty.publish(&dst)?;
+            crate::repo::TemporaryResource::Existing(crate::fs::retain_owned(&dst)?)
+        } else {
+            let empty = crate::repo::Temp::empty(orepo.p.work_dir().join(crate::store::temp_name()))?;
+            crate::repo::TemporaryResource::Capture(crate::fs::freeze_path_owned(
+                &empty.path,
+                &dst,
+                crate::fs::CapturePurpose::State,
+            )?)
+        };
         let info = match crate::fs::host().namespace.info(&dst) {
             Ok(info) => info,
             Err(error) => return Err(captured.abort(error).into()),

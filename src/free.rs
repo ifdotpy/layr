@@ -43,13 +43,14 @@ pub fn line_deleted(id: &str) {
     }
 }
 
-/// Final states of deleted lines that get a complete tree after the command (`keyframe_later`).
+/// Final states whose old layers can retire after their prepared complete view is published.
+#[cfg(target_os = "macos")]
 static FINALS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-/// The thin final state of a deleted line gets a complete tree in the background after this
-/// command (`layr __keyframe ... final`), not in the delete: its copy of the whole tree and the
-/// seal of every entry took seconds under the project lock. `layr gc` makes the ones that a stopped
-/// process left.
+/// A final state already has its complete tree. Its background worker only waits for readers
+/// and retires the old layer; it never copies content under the project lock. GC can finish
+/// retirement if a worker stopped or the complete view was evicted.
+#[cfg(target_os = "macos")]
 pub fn keyframe_later(state: &str) {
     if let Ok(mut finals) = FINALS.lock() {
         finals.insert(state.to_string());
@@ -98,6 +99,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     let left: BTreeSet<String> = LEFT.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     let deleted: BTreeSet<String> = DELETED_LINES.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    #[cfg(target_os = "macos")]
     let finals: BTreeSet<String> = FINALS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
         if store.project_dir(&name).is_ok_and(|dir| dir.join("meta/object-native").is_dir()) {
@@ -199,8 +201,8 @@ fn spawn_keyframe(root: &std::path::Path, name: &str, id: &str, final_state: boo
 /// long chain gets a complete tree. A command that opened the layers of the state before reads them without the
 /// lock, so the layer stays for `thin.view_seconds`, as a view that a command used. Then the layer goes and the
 /// free step moves the bases that nothing uses now. One process per project makes complete trees at a time; another
-/// one finds the work done or leaves it to the next save. The final state of a deleted line (`final_state`) gets its
-/// complete tree whatever its chain, and waits for a process of another state.
+/// one finds the work done or leaves it to the next save. For a deleted line (`final_state`), preparation already
+/// published the complete tree: this worker only retires its layer and defers if that view is gone.
 #[cfg(target_os = "macos")]
 pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_state: bool) -> Result<()> {
     let store = Store::open(root)?;
@@ -220,7 +222,14 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_stat
         if !p.delta_path(id).is_dir() || (!final_state && crate::thin::chain_len(&p, id) <= max) {
             return Ok(());
         }
-        crate::thin::complete_tree(&p, id)?;
+        // Final saves prepare their complete tree outside the project lock. If native
+        // retirement removed that view meanwhile, GC can compact it later; never rebuild here.
+        if final_state && !p.state_path(id).exists() {
+            return Ok(());
+        }
+        if !final_state {
+            crate::thin::complete_tree(&p, id)?;
+        }
     }
     // The wait holds no lock: the keyframe of a newer head must not wait for it.
     drop(lock);
@@ -238,10 +247,12 @@ pub fn keyframe_process(root: &std::path::Path, name: &str, id: &str, final_stat
     {
         let _lock = p.lock_maintenance()?;
         // A command can remove the view in the wait: then the state stays thin and the next save tries again.
-        // A save prepares outside the project lock and reads the layers of the head it pinned: a pinned state
-        // keeps its layer, and the next save tries again.
         if p.state_path(id).is_dir() && p.delta_path(id).is_dir() && !preparing_state(&p, id).unwrap_or(true) {
-            crate::thin::make_keyframe(&p, id)?;
+            if final_state {
+                crate::thin::retire_final_layer(&p, id)?;
+            } else {
+                crate::thin::make_keyframe(&p, id)?;
+            }
         }
     }
     finish_project(&p)?;
@@ -554,19 +565,23 @@ pub(crate) struct Pin<D: ReleasePins = PathBuf> {
     db: D,
     holder: String,
     states: Vec<String>,
+    path: PathBuf,
 }
 
 /// Pin states until the command ends. Held guards keep paths, never database connections.
 pub fn pin(p: &Project, states: &[&str]) -> Result<Pin> {
-    pin_using(&p.db, crate::store::db_file(&p.dir), states)
+    pin_using(p, crate::store::db_file(&p.dir), states)
 }
 
 /// Protect an unpublished state with the same process lease as immutable readers.
 /// Repair keeps this pin across catalog rebuilds, and a crash releases it normally.
 pub fn prepare_state(p: &Project, state: &str) -> Result<Pin> {
     let holder = self_holder();
+    let path = crate::store::db_file(&p.dir);
+    let mut counts = PIN_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
     p.db.pin_preparation(state, &holder)?;
-    Ok(Pin { db: crate::store::db_file(&p.dir), holder, states: vec![state.to_string()] })
+    *counts.entry((path.clone(), state.to_string())).or_default() += 1;
+    Ok(Pin { db: path.clone(), holder, states: vec![state.to_string()], path })
 }
 
 /// Called after observing an unrecorded snapshot, so a concurrently started
@@ -578,13 +593,24 @@ pub fn preparing_state(p: &Project, state: &str) -> Result<bool> {
 /// Pin a scoped read. The borrow keeps the reader's database open through release, avoiding
 /// a checkpoint between the read and unpinning. An early error releases through the same guard.
 pub fn pin_borrowed<'a>(p: &'a Project<'_>, states: &[&str]) -> Result<Pin<&'a crate::db::Db>> {
-    pin_using(&p.db, &p.db, states)
+    pin_using(p, &p.db, states)
 }
 
-fn pin_using<D: ReleasePins>(db: &crate::db::Db, release: D, states: &[&str]) -> Result<Pin<D>> {
+// Older binaries must recognize the holder as a live process. Guards share its
+// durable row; serialize add/release and count local readers across connections.
+static PIN_COUNTS: Mutex<BTreeMap<(PathBuf, String), usize>> = Mutex::new(BTreeMap::new());
+
+fn pin_using<D: ReleasePins>(p: &Project, release: D, states: &[&str]) -> Result<Pin<D>> {
     let holder = self_holder();
-    let pinned = db.pins_add(states, &holder)?;
-    let guard = Pin { db: release, holder, states: pinned };
+    let path = crate::store::db_file(&p.dir);
+    let guard = {
+        let mut counts = PIN_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let pinned: Vec<String> = p.db.pins_add(states, &holder)?.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+        for state in &pinned {
+            *counts.entry((path.clone(), state.clone())).or_default() += 1;
+        }
+        Pin { db: release, holder, states: pinned, path }
+    };
     hold_for_tests();
     Ok(guard)
 }
@@ -620,9 +646,30 @@ impl<D: ReleasePins> Drop for Pin<D> {
         if self.states.is_empty() {
             return;
         }
-        let released = self.db.release(&self.states, &self.holder);
-        if let Err(e) = released {
+        let mut counts = PIN_COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+        let last: Vec<String> =
+            self.states.iter().filter(|state| counts.get(&(self.path.clone(), (*state).clone())) == Some(&1)).cloned().collect();
+        let released = if last.is_empty() {
+            true
+        } else if let Err(e) = self.db.release(&last, &self.holder) {
             eprintln!("layr: cannot release the pins of this command: {e:#}");
+            false
+        } else {
+            true
+        };
+        for state in &self.states {
+            // A failed last release stays counted, but other guards must still drop
+            // their references so their eventual last release can remove the row.
+            if !released && last.contains(state) {
+                continue;
+            }
+            let key = (self.path.clone(), state.clone());
+            if let Some(count) = counts.get_mut(&key) {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(&key);
+                }
+            }
         }
     }
 }
@@ -710,6 +757,51 @@ mod inspection_tests {
 mod pin_tests {
     use super::*;
 
+    struct TestRelease<'a> {
+        calls: &'a std::cell::Cell<usize>,
+        fail: bool,
+    }
+
+    impl ReleasePins for TestRelease<'_> {
+        fn release(&self, states: &[String], _: &str) -> Result<()> {
+            assert!(!states.is_empty(), "nested guards must not open a database or write");
+            self.calls.set(self.calls.get() + 1);
+            anyhow::ensure!(!self.fail, "injected release failure");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn nested_drop_skips_io_and_failed_release_still_drops_shared_references() {
+        let path = std::env::temp_dir().join(format!("layr-pin-release-{}", crate::ids::new_id()));
+        let calls = std::cell::Cell::new(0);
+        let guard = |states: &[&str], fail| Pin {
+            db: TestRelease { calls: &calls, fail },
+            holder: self_holder(),
+            states: states.iter().map(|state| (*state).to_string()).collect(),
+            path: path.clone(),
+        };
+        {
+            let mut counts = PIN_COUNTS.lock().unwrap();
+            counts.insert((path.clone(), "shared".into()), 3);
+            counts.insert((path.clone(), "last".into()), 1);
+        }
+        drop(guard(&["shared"], false));
+        assert_eq!(calls.get(), 0);
+        drop(guard(&["shared", "last"], true));
+        assert_eq!(calls.get(), 1);
+        {
+            let counts = PIN_COUNTS.lock().unwrap();
+            assert_eq!(counts.get(&(path.clone(), "shared".into())), Some(&1));
+            assert_eq!(counts.get(&(path.clone(), "last".into())), Some(&1), "failed last release stays protected");
+        }
+        drop(guard(&["shared"], false));
+        assert_eq!(calls.get(), 2, "the remaining guard must release the shared row");
+        drop(guard(&["last"], false));
+        assert_eq!(calls.get(), 3);
+        assert!(!PIN_COUNTS.lock().unwrap().keys().any(|(db, _)| db == &path));
+    }
+
     #[test]
     fn pins_survive_the_reader_connection_and_release_at_command_end() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-pin-guard-{}", crate::ids::new_id()));
@@ -739,6 +831,41 @@ mod pin_tests {
     }
 
     #[test]
+    fn overlapping_guards_survive_nested_drops_and_retries() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-pin-nested-{}", crate::ids::new_id()));
+        let store = Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let path = crate::store::db_file(&dir);
+        let db = crate::db::Db::open(&path)?;
+        let state = crate::ids::new_id();
+        db.test_connection().execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", [&state])?;
+        let project = Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
+        let inputs = pin(&project, &[&state])?;
+        for _ in 0..3 {
+            let prepared = pin_borrowed(&project, &[&state, &state])?;
+            assert_eq!(inputs.holder, prepared.holder);
+            assert_eq!(prepared.holder, self_holder(), "old binaries must see the original process holder");
+            let (pid, _) = prepared.holder.split_once(':').unwrap();
+            assert_eq!(pid, std::process::id().to_string());
+            assert!(holder_alive(&prepared.holder));
+            drop(prepared);
+            assert!(project.db.is_pinned(&state)?, "a stale preparation must keep undo's input pinned");
+            assert!(project.db.reserve_trees(&[state.clone()], "gc")?.is_empty());
+        }
+        let remaining = pin_borrowed(&project, &[&state])?;
+        drop(inputs);
+        assert!(project.db.is_pinned(&state)?, "either drop order must keep the remaining guard pinned");
+        drop(remaining);
+        assert!(!project.db.is_pinned(&state)?);
+        assert_eq!(project.db.reserve_trees(&[state], "gc")?.len(), 1);
+        drop(project);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn borrowed_pins_release_through_the_reader_database_on_early_error() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-pin-borrow-{}", crate::ids::new_id()));
         let store = Store::open(&root)?;
@@ -750,6 +877,11 @@ mod pin_tests {
         db.test_connection().execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'head','line')", [&state])?;
         let project = Project { lease: Default::default(), store: &store, name: "p".into(), dir, id: crate::ids::new_id(), db };
         let observer = crate::db::Db::open(&path)?;
+        let inputs = pin(&project, &[&state])?;
+        let refused = crate::ids::new_id();
+        observer.test_connection().execute("INSERT INTO owners(state, kind, holder) VALUES(?1,'drop','gc')", [&refused])?;
+        assert!(pin_borrowed(&project, &[&state, &refused]).is_err());
+        assert_eq!(observer.pin_holders()?, vec![inputs.holder.clone()], "a failed batch leaves only the outer pin");
         let read = || -> Result<()> {
             let guard = pin_borrowed(&project, &[&state])?;
             assert!(std::ptr::eq(guard.db, &project.db));
@@ -757,6 +889,8 @@ mod pin_tests {
             anyhow::bail!("test read failed");
         };
         assert_eq!(read().unwrap_err().to_string(), "test read failed");
+        assert_eq!(observer.pin_holders()?, vec![inputs.holder.clone()], "an early error releases only its guard");
+        drop(inputs);
         assert!(!observer.is_pinned(&state)?);
         assert!(observer.is_owned(&state)?);
         drop(observer);

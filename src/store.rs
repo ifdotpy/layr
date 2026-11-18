@@ -357,15 +357,20 @@ impl LineLeaseSet {
 
     pub(crate) fn require_line(&self, project: &Project, id: &str) -> Result<()> {
         self.check(project)?;
-        anyhow::ensure!(self._locks.iter().any(|lease| lease.key.1 == id), "line {id} has no held lease");
+        anyhow::ensure!(
+            self._locks.iter().any(|lease| lease.key.1 == id
+                && lease.f.as_ref().is_some_and(|file| same_lock_file(file, &self.meta.join("line-locks").join(id)))),
+            "line {id} has no held lease"
+        );
         Ok(())
     }
 
-    pub fn lock<'p>(&'p self, project: &'p Project<'p>) -> Result<LockedProject<'p>> {
+    pub fn lock<'p>(&self, project: &'p Project<'p>) -> Result<LockedProject<'p>> {
         self.check(project)?;
         project.lock_with_lines(self._locks.clone())
     }
 
+    #[cfg(test)]
     pub fn into_locked<'p>(self, project: &'p Project<'p>) -> Result<LockedProject<'p>> {
         self.check(project)?;
         project.lock_with_lines(self._locks)
@@ -403,8 +408,88 @@ pub enum LockAttempt<T> {
     Busy,
 }
 
+fn same_lock_file(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().ok().zip(fs::symlink_metadata(path).ok()).is_some_and(|(a, b)| (a.dev(), a.ino()) == (b.dev(), b.ino()))
+}
+impl Lock {
+    pub(crate) fn protects(&self, project: &Project) -> bool {
+        self.meta == project.meta_dir() && self.f.as_ref().is_some_and(|file| same_lock_file(file, &self.meta.join("lock")))
+    }
+}
+// Save preparation must not acquire its parent lock, including through native rebuild helpers.
+// Missing Git inputs live in this scope, never in the published states directory.
+struct SaveInputs {
+    meta: PathBuf,
+    sources: std::collections::HashMap<String, (crate::repo::Snap, crate::repo::Temp)>,
+}
+thread_local! {
+    static SAVE_PREPARATIONS: std::cell::RefCell<Vec<SaveInputs>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+pub(crate) struct SavePreparation(std::marker::PhantomData<std::rc::Rc<()>>);
+impl SavePreparation {
+    pub(crate) fn new(project: &Project) -> Self {
+        SAVE_PREPARATIONS
+            .with(|inputs| inputs.borrow_mut().push(SaveInputs { meta: project.meta_dir(), sources: Default::default() }));
+        Self(Default::default())
+    }
+}
+pub(crate) fn save_preparing(project: &Project) -> bool {
+    SAVE_PREPARATIONS.with(|inputs| inputs.borrow().iter().any(|input| input.meta == project.meta_dir()))
+}
+pub(crate) fn save_source(project: &Project, id: &str) -> Option<crate::repo::Snap> {
+    SAVE_PREPARATIONS.with(|inputs| {
+        inputs
+            .borrow()
+            .iter()
+            .rev()
+            .find(|input| input.meta == project.meta_dir())
+            .and_then(|input| input.sources.get(id))
+            .map(|(source, _)| source.clone())
+    })
+}
+pub(crate) fn hold_save_source(project: &Project, id: &str, source: crate::repo::Snap, temp: crate::repo::Temp) {
+    SAVE_PREPARATIONS.with(|inputs| {
+        inputs
+            .borrow_mut()
+            .iter_mut()
+            .rev()
+            .find(|input| input.meta == project.meta_dir())
+            .expect("save input scope")
+            .sources
+            .insert(id.into(), (source, temp));
+    });
+}
+pub(crate) fn take_save_inputs(project: &Project) -> Vec<crate::repo::Temp> {
+    SAVE_PREPARATIONS.with(|inputs| {
+        inputs
+            .borrow_mut()
+            .iter_mut()
+            .rev()
+            .find(|input| input.meta == project.meta_dir())
+            .map(|input| input.sources.drain().map(|(_, (_, temp))| temp).collect())
+            .unwrap_or_default()
+    })
+}
+impl Drop for SavePreparation {
+    fn drop(&mut self) {
+        // Drop temporary sources after releasing the TLS borrow (their backend may use TLS).
+        let inputs = SAVE_PREPARATIONS.with(|inputs| inputs.borrow_mut().pop());
+        drop(inputs);
+    }
+}
+
 /// The store locks this process holds. The trash is emptied when the last one goes.
 static HELD_LOCKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+thread_local! {
+    static LOCAL_LOCKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "overlayfs")]
+pub(crate) fn holds_project_lock() -> bool {
+    LOCAL_LOCKS.get() > 0
+}
 
 /// The meta folders of the projects whose lock this process holds. The runtime line-before-project check also
 /// catches attempts through a separately opened handle. Publication uses typed leases.
@@ -444,6 +529,7 @@ pub fn set_holder_command(argv: &[String]) {
 enum Wait {
     Block,
     Try,
+    Reserve,
 }
 
 impl Wait {
@@ -458,7 +544,7 @@ impl Wait {
                 }
                 Ok(true)
             }
-            Self::Try => match rustix::fs::flock(f, FlockOperation::NonBlockingLockExclusive) {
+            Self::Try | Self::Reserve => match rustix::fs::flock(f, FlockOperation::NonBlockingLockExclusive) {
                 Ok(()) => Ok(true),
                 Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
                 Err(e) => Err(e.into()),
@@ -550,6 +636,7 @@ impl Drop for Lock {
                 held.remove(i);
             }
         }
+        LOCAL_LOCKS.set(LOCAL_LOCKS.get() - 1);
         if HELD_LOCKS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
             // Deleting build output takes minutes: it runs after the last lock, so other
             // commands do not wait for it, and in a process of its own, so this command does
@@ -864,6 +951,15 @@ impl<'a> Project<'a> {
     /// the last lock. A tree that cannot move, and any tree on the other file systems (whose
     /// snapshots delete at once), is deleted in place.
     pub fn trash(&self, path: &Path) -> Result<()> {
+        self.trash_with(path, HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0)
+    }
+
+    /// Queue build output without holding the project lock during its removal.
+    pub fn trash_background(&self, path: &Path) -> Result<()> {
+        self.trash_with(path, true)
+    }
+
+    fn trash_with(&self, path: &Path, background: bool) -> Result<()> {
         let _t = crate::trace::span(format!("trash {}", path.display()));
         if !crate::fs::host().namespace.managed_or_present(path)? {
             return Ok(());
@@ -874,7 +970,7 @@ impl<'a> Project<'a> {
         if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 && destroy_known(path) {
             return Ok(());
         }
-        if HELD_LOCKS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        if background {
             let dir = self.trash_dir()?;
             let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
             let to = dir.join(format!("{name}.{}", crate::ids::new_id()));
@@ -1287,7 +1383,13 @@ impl<'a> Project<'a> {
         Ok(self.locked_token(lock))
     }
 
-    fn locked_token(&self, lock: Lock) -> LockedProject<'_> {
+    pub(crate) fn borrow_reserved(&self, lock: &std::rc::Rc<Lock>) -> LockedProject<'_> {
+        assert!(lock.protects(self));
+        *self.lease.0.borrow_mut() = std::rc::Rc::downgrade(lock);
+        LockedProject { project: self, _lock: lock.clone() }
+    }
+
+    pub(crate) fn locked_token(&self, lock: Lock) -> LockedProject<'_> {
         let lock = std::rc::Rc::new(lock);
         *self.lease.0.borrow_mut() = std::rc::Rc::downgrade(&lock);
         LockedProject { project: self, _lock: lock }
@@ -1304,10 +1406,28 @@ impl<'a> Project<'a> {
         })
     }
 
+    pub(crate) fn try_reserve(&self) -> Result<Option<Lock>> {
+        self.lock_wait(Wait::Reserve, Vec::new())
+    }
+
     fn lock_wait(&self, wait: Wait, lines: Vec<std::rc::Rc<LineLock>>) -> Result<Option<Lock>> {
+        let preparing = save_preparing(self);
+        assert!(
+            !preparing || std::env::var_os("LAYR_TEST_SAVE_ASSERT_NO_PROJECT_LOCK").is_none(),
+            "project lock acquired during save preparation"
+        );
+        anyhow::ensure!(!preparing, "project lock acquired during save preparation");
+        #[cfg(feature = "overlayfs")]
+        crate::repo::save_barrier("project_lock")?;
         let Some(lock) = lock_catalog(self.store, &self.name, &self.meta_dir(), wait, lines)? else { return Ok(None) };
         #[cfg(target_os = "macos")]
-        crate::apfs_commit::recover(self)?;
+        if matches!(wait, Wait::Reserve) {
+            if crate::apfs_commit::pending(self)? {
+                return Ok(None);
+            }
+        } else {
+            crate::apfs_commit::recover(self)?;
+        }
         Ok(Some(lock))
     }
 
@@ -1765,6 +1885,16 @@ mod tests {
 
     #[test]
     fn try_locks_keep_bookkeeping_and_line_order() -> Result<()> {
+        // Concurrent tests fork and can retain a copy of a lock descriptor after its guard
+        // drops. Check immediate release in isolation, as with the preparation-lease test.
+        if std::env::var_os("LAYR_TEST_TRY_LOCKS_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "store::tests::try_locks_keep_bookkeeping_and_line_order", "--nocapture"])
+                .env("LAYR_TEST_TRY_LOCKS_CHILD", "1")
+                .status()?;
+            anyhow::ensure!(status.success(), "isolated try-lock test failed");
+            return Ok(());
+        }
         let base = std::env::temp_dir().join(format!("layr-try-locks-{}", ids::new_id()));
         let store = Store::open(&base.join("store"))?;
         let dir = store.project_dir("p")?;
@@ -1792,6 +1922,12 @@ mod tests {
         drop(lock);
         assert!(!p.holds_lock());
         assert!(!p.meta_dir().join(LOCK_HOLDER).exists());
+        let raw = p.try_reserve()?.expect("free publication reservation");
+        let reservation = p.locked_token(raw);
+        assert!(reservation.check(&p).is_ok());
+        assert!(p.holds_lock());
+        drop(reservation);
+        assert!(!p.holds_lock());
         drop(line);
         let held = fs::OpenOptions::new().write(true).open(p.meta_dir().join("line-locks/line"))?;
         rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)?;
@@ -1843,18 +1979,22 @@ mod tests {
         assert!(rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err());
         assert!(matches!(p.try_lock()?, LockAttempt::Busy));
         drop(nested);
-        // A test that forks (cache_hook's hard kill) can hold an inherited copy of this descriptor
-        // for a moment: wait for it rather than fail.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while let Err(error) = rustix::fs::flock(&line, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            anyhow::ensure!(error == rustix::io::Errno::WOULDBLOCK && std::time::Instant::now() < deadline, error);
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        // A test that forks (cache_hook's hard kill) can hold an inherited copy of a lock
+        // descriptor for a moment: wait for it rather than fail.
+        let lock_when_free = |file: &fs::File| -> Result<()> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while let Err(error) = rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                anyhow::ensure!(error == rustix::io::Errno::WOULDBLOCK && std::time::Instant::now() < deadline, error);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(())
+        };
+        lock_when_free(&line)?;
         drop(line);
         let upper = p.line_leases([("z".into(), "z".into())])?;
         assert!(p.line_leases([("a".into(), "lower".into()), ("z".into(), "z".into())]).is_err());
         let lower = fs::OpenOptions::new().write(true).open(p.meta_dir().join("line-locks/a"))?;
-        rustix::fs::flock(&lower, rustix::fs::FlockOperation::NonBlockingLockExclusive)?;
+        lock_when_free(&lower)?;
         drop(lower);
         drop(upper);
         let phases =
@@ -2232,6 +2372,7 @@ fn lock_catalog(store: &Store, name: &str, meta: &Path, wait: Wait, lines: Vec<s
             bail!("project '{}' moved or was deleted while this command waited; run the command again", name);
         }
     }
+    LOCAL_LOCKS.set(LOCAL_LOCKS.get() + 1);
     HELD_LOCKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut held) = HELD_PROJECTS.lock() {
         held.push(meta.to_path_buf());

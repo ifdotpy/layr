@@ -963,12 +963,6 @@ impl Store {
         Ok(&self.backend)
     }
 
-    /// Current project vault recipient, pinned by the same descriptor as sync.
-    pub fn request_recipient(&mut self, ctx: &Ctx) -> Result<String> {
-        self.connect(ctx)?;
-        Ok(self.descriptor()?.recipient)
-    }
-
     /// Project vault identity for opening person requests on the trusted executor.
     pub fn request_identity(&mut self, ctx: &Ctx) -> Result<String> {
         self.connect(ctx)?;

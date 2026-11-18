@@ -44,15 +44,18 @@ impl<'a> From<&'a layr_api::Peer> for CommandPeer<'a> {
     }
 }
 
-pub(crate) fn command_frame(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, peer: &layr_api::Peer) -> Result<Vec<u8>> {
+pub(crate) fn command_frame(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    peer: &layr_api::Peer,
+) -> Result<Vec<u8>> {
     let mut data = vec![0; std::mem::size_of::<u32>()];
     serde_json::to_writer(&mut data, &CommandRequest { argv, cwd, env, version: peer.into() })?;
     let len = (data.len() - std::mem::size_of::<u32>()) as u32;
     data[..std::mem::size_of::<u32>()].copy_from_slice(&len.to_be_bytes());
     Ok(data)
 }
-
-
 
 pub(crate) fn send_with_fds(sock: &UnixStream, data: &[u8], fds: &[BorrowedFd]) -> Result<()> {
     use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags};
@@ -251,4 +254,3 @@ pub(crate) fn connect_error(path: &Path, e: &std::io::Error) -> anyhow::Error {
         _ => anyhow!("cannot reach the layr service at {at} ({e}). Start it as root with 'layr daemon', or run layr as root."),
     }
 }
-

@@ -28,8 +28,8 @@ ok "undo of the delete" l undo
 eq "undo brings the unsaved change back" "unsaved" "$(cat "$P/topic/tracked.txt")"
 eq "undo brings the new files back" "300" "$(ls "$P/topic/bulk" | wc -l | tr -d ' ')"
 
-# A folder that changes after the prepare step (a build writes into it) is not prepared again: the
-# prepared state stays as an automatic state, and the state under the lock adds only the change.
+# A folder that changes after preparation is prepared again outside the project lock.
+# The first capture is never published as the final state.
 cd "$P/main" || exit 1
 l line new -q busy
 cd "$P/busy" || exit 1
@@ -42,7 +42,7 @@ printf 'late\n' > "$P/busy/late.txt"
 printf 'changed\n' > "$P/busy/bulk/f1"
 wait $pid
 eq "the busy line is deleted" 0 "$?"
-eq "the save is prepared once" 1 "$(grep -c "prepare save" "$T/busy.trace")"
+eq "the changed folder is prepared again" 2 "$(grep -c "prepare save" "$T/busy.trace")"
 ok "undo of the busy delete" l undo
 eq "undo brings the file written after the prepare back" late "$(cat "$P/busy/late.txt")"
 eq "undo brings the change made after the prepare back" changed "$(cat "$P/busy/bulk/f1")"

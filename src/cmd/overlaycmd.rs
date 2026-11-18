@@ -159,7 +159,20 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let key_files = a.get("--key-files").map(key_files_value).transpose()?;
-    make_overlay(&_lock, ctx, repo, &name, &readers, mode, hidden, &props, folder.as_deref(), key_files.as_ref(), parent.as_deref())?;
+    make_overlay(
+        &_lock,
+        ctx,
+        repo,
+        &name,
+        &readers,
+        mode,
+        hidden,
+        &props,
+        folder.as_deref(),
+        key_files.as_ref(),
+        parent.as_deref(),
+        None,
+    )?;
     if !a.has("-q") {
         let mut who: Vec<String> = vec![ctx.caller.user.clone()];
         who.extend(readers.iter().map(|r| show_principal(r)));
@@ -174,6 +187,14 @@ fn create(ctx: &Ctx, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+#[derive(Debug)]
+pub(crate) struct OverlayRetirementBusy;
+impl std::fmt::Display for OverlayRetirementBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("removed overlay is busy; retry its setup")
+    }
+}
+impl std::error::Error for OverlayRetirementBusy {}
 
 /// A folder overlay is not part of the file stack: `save -m`, `line new` and `merge` move it (docs/cache-overlays.md, section 3).
 fn refuse_folder(repo: &Repo, name: &str) -> Result<()> {
@@ -593,7 +614,8 @@ fn repair(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .ok_or_else(|| exit(128, format!("fatal: overlay '{name}' is no folder overlay")))?;
     let l = h.line()?.clone();
     repo.authorize_line(ctx, &l, crate::repo::LineOp::Save)?;
-    let _lock = repo.p.lock_maintenance()?;
+    let _line_lock = repo.line_lock(&l)?;
+    let _lock = _line_lock.lock(&repo.p)?;
     let l = repo.line(&l.id)?;
     let (u, g) = repo.owner_ids(&l);
     crate::repo::recover_cache_replacements(&repo.working(&l))?;

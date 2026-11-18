@@ -35,6 +35,7 @@ use crate::repo::{skip_path, Repo, Temp};
 use crate::store::Project;
 use crate::tree::Tree;
 use anyhow::{anyhow, bail, Context, Result};
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -1000,9 +1001,6 @@ pub fn split(
         Owner::Shared => has_file(shared, p),
         Owner::Overlay(i) => has_file(&roots[i], p),
     };
-    let all = |p: &str| -> Vec<Owner> {
-        std::iter::once(Owner::Shared).chain((0..roots.len()).map(Owner::Overlay)).filter(|o| holds(*o, p)).collect()
-    };
     // The layers at and above an owner: the target and the layers that would hide its file.
     let at_or_above = |o: Owner| -> Vec<Owner> {
         let from = match o {
@@ -1463,18 +1461,6 @@ impl<'a> Repo<'a> {
         self.point_overlay_lines(ctx, line, &view.layers, "view")
     }
 
-    pub fn create_line_view(
-        &self,
-        locked: &crate::store::LockedProject<'_>,
-        ctx: &Ctx,
-        name: &str,
-        view: &View,
-        owner: u32,
-    ) -> Result<Line> {
-        locked.check(&self.p)?;
-        Ok(self.create_named_lines(locked, ctx, vec![name.to_string()], &view.shared, owner, None, Some(view))?.remove(0))
-    }
-
     pub fn materialize_view(&self, ctx: &Ctx, line: &Line, view: &View, dst: &Path) -> Result<()> {
         self.check_view_read(ctx, view)?;
         let assembled = self.assemble(line, &view.shared, &view.layers)?;
@@ -1518,11 +1504,11 @@ impl<'a> Repo<'a> {
         Ok(self.open_overlay_info_with(name, |name| self.overlay_project(name).map(Some))?.expect("blocking overlay open"))
     }
 
-    fn open_overlay_info_with(
+    fn open_overlay_info_with<P: Borrow<Project<'a>>>(
         &self,
         name: &str,
-        open: impl FnOnce(&str) -> Result<Option<Project<'a>>>,
-    ) -> Result<Option<(Option<Info>, Option<Project<'a>>)>> {
+        open: impl FnOnce(&str) -> Result<Option<P>>,
+    ) -> Result<Option<(Option<Info>, Option<P>)>> {
         if crate::store::check_name("overlay", name).is_err() {
             return Ok(Some((None, None)));
         }
@@ -1542,6 +1528,7 @@ impl<'a> Repo<'a> {
                 Err(_) => None,
             };
             if let Some(op) = &project {
+                let op = op.borrow();
                 if op.db.overlay_config("overlay")?.is_some_and(|v| v["project"] == self.p.id && v["name"] == name) {
                     value = op.db.overlay_config(&format!("overlay.{name}"))?;
                     platform = op.db.overlay_config(&platform_key)?;
@@ -1611,8 +1598,11 @@ impl<'a> Repo<'a> {
         line: &Line,
         start: &str,
     ) -> Result<Line> {
-        locked.check(&orepo.p)?;
-        if !self.per_platform_lines(name)? {
+        // Hidden settings belong to the already locked overlay. Reopening it could wait
+        // for this same lock when a concurrent APFS preparation has a pending journal.
+        let db = if info.hidden { &orepo.p.db } else { &self.p.db };
+        let folder = db.overlay_config(&format!("overlay.{name}.folder"))?.is_some_and(|v| !v.is_null());
+        if !folder || info.platform.is_some() {
             return orepo.ensure_overlay_line(locked, ctx, info, line, start);
         }
         let own = cache_line_name(&line.id);
@@ -1635,6 +1625,13 @@ impl<'a> Repo<'a> {
         self.overlay_info(name)?.ok_or_else(|| {
             crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name))
         })
+    }
+
+    /// Read publication metadata from the overlay whose lock the caller already reserved.
+    pub(crate) fn reserved_overlay_info(&self, name: &str, project: &Project<'a>) -> Result<Info> {
+        self.open_overlay_info_with(name, |_| Ok(Some(project)))?
+            .and_then(|(info, _)| info)
+            .ok_or_else(|| crate::cmd::exit(1, format!("error: no overlay '{name}' in project {}", self.p.name)))
     }
 
     /// The setting `overlay.<name>.<suffix>`: in the project's records, or for a hidden overlay
@@ -1700,7 +1697,7 @@ impl<'a> Repo<'a> {
         Ok(self.overlay_candidates()?.into_iter().filter(|n| self.overlay_info(n).ok().flatten().is_some()).collect())
     }
 
-    fn overlay_candidates(&self) -> Result<Vec<String>> {
+    pub(crate) fn overlay_candidates(&self) -> Result<Vec<String>> {
         if self.p.is_overlay() {
             return Ok(Vec::new());
         }
@@ -1967,10 +1964,13 @@ impl<'a> Repo<'a> {
             }
             let state = match find_overlay_line(&op.db, info, line)? {
                 Some(ol) => ol.head,
-                None => match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned)) {
-                    Some(part) => part,
-                    None => return Ok(None),
-                },
+                None => {
+                    match op.db.overlay_config(&format!("hidden.part.{}", line.head))?.and_then(|v| v.as_str().map(str::to_owned))
+                    {
+                        Some(part) => part,
+                        None => return Ok(None),
+                    }
+                }
             };
             Ok(Some(Layer { overlay: name.to_string(), state }))
         };
@@ -2009,7 +2009,9 @@ impl<'a> Repo<'a> {
             }
             let layer = match hidden_overlays.iter().find(|(n, _, _)| *n == name) {
                 Some((n, info, op)) => hidden_layer(n, info, op)?,
-                None if self.overlay_info(&name)?.is_some_and(|i| !i.hidden) => self.overlay_layer(Some(line), &line.head, &name)?,
+                None if self.overlay_info(&name)?.is_some_and(|i| !i.hidden) => {
+                    self.overlay_layer(Some(line), &line.head, &name)?
+                }
                 None => None,
             };
             out.extend(layer);
@@ -3018,7 +3020,10 @@ impl<'a> Repo<'a> {
         let mut dead = Vec::new();
         for (key, value) in orepo.p.db.config_all()? {
             let Some(state) = key.strip_prefix("auto.") else { continue };
-            let Some(id) = serde_json::from_str::<serde_json::Value>(&value).ok().and_then(|v| v.as_str().map(str::to_owned)) else { continue };
+            let Some(id) = serde_json::from_str::<serde_json::Value>(&value).ok().and_then(|v| v.as_str().map(str::to_owned))
+            else {
+                continue;
+            };
             let gone = self.p.db.state_flags(state)?.is_none_or(|(_, deleted)| deleted);
             if gone {
                 dead.push((key, id));
@@ -3203,6 +3208,39 @@ impl<'a> Repo<'a> {
                 eprintln!("warning: overlay '{name}': old states stay until the next gc: {e:#}");
             }
         }
+    }
+
+    /// The cache cleanup after line deletion is planned without a parent lock. Its publication
+    /// validates both databases and tries every overlay lock before changing anything.
+    pub(crate) fn finish_line_delete_caches(&self, ctx: &Ctx) -> Result<()> {
+        anyhow::ensure!(!self.p.holds_lock(), "cache deletion cleanup must be planned outside the project lock");
+        let mark = self.p.db.records_mark()?;
+        let plan = self.overlay_plan()?;
+        if plan.overlays.is_empty() {
+            return Ok(());
+        }
+        let crate::store::LockAttempt::Acquired(_parent) = self.p.try_lock()? else { anyhow::bail!("cache cleanup is busy") };
+        if self.p.db.records_mark()? != mark {
+            anyhow::bail!("cache cleanup inputs changed or are busy");
+        }
+        let mut opened = Vec::new();
+        for clean in &plan.overlays {
+            let Some(p) = Project::open_maintenance(self.p.store, &format!("{}%{}", self.p.name, clean.name))? else {
+                anyhow::bail!("cache cleanup inputs changed or are busy");
+            };
+            let Some(lock) = p.try_reserve()? else { anyhow::bail!("cache cleanup is busy") };
+            if p.db.records_mark()? != clean.mark {
+                anyhow::bail!("cache cleanup inputs changed or are busy");
+            }
+            opened.push((Repo { restore_from_remote: self.restore_from_remote, p, ctx: self.ctx }, std::rc::Rc::new(lock)));
+        }
+        for (clean, (orepo, _lock)) in plan.overlays.iter().zip(&opened) {
+            self.drop_overlay_lines(&orepo.p.borrow_reserved(_lock), ctx, orepo, &clean.name, &clean.orphans)?;
+            if let Some(keep_n) = clean.keep_n {
+                Self::delete_excess(&orepo.p.borrow_reserved(_lock), ctx, orepo, keep_n, clean.excess.clone())?;
+            }
+        }
+        Ok(())
     }
 
     fn commit_overlay_clean(
@@ -4443,6 +4481,80 @@ mod read_open_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.ctx.store.root.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn build_line_uses_reserved_hidden_metadata_without_reopening() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let repo = Repo::open(&fixture.ctx, "p")?;
+        let orepo = repo.overlay_repo("private")?;
+        let line = repo.line("main")?;
+        let _parent = repo.p.lock_maintenance()?;
+        let _overlay = orepo.p.lock_maintenance()?;
+        let mut config = crate::model::DraftRecord::new("config");
+        config.data = json!({"config":{"overlay.private.folder":"target"}});
+        _overlay.append(config, &fixture.ctx.actor())?;
+        let before = crate::store::project_open_count();
+        let mut info = repo.reserved_overlay_info("private", &orepo.p)?;
+        assert_eq!(crate::store::project_open_count(), before);
+        for platform in [None, Some(crate::model::cache_platform())] {
+            info.platform = platform;
+            let before = crate::store::project_open_count();
+            let made = repo.ensure_build_line(&_overlay, &fixture.ctx, &orepo, "private", &info, &line, &info.root)?;
+            let expected = if info.platform.is_some() { overlay_line_name(&info, &line) } else { cache_line_name(&line.id) };
+            assert_eq!(made.name, expected);
+            assert_eq!(crate::store::project_open_count(), before, "the reserved overlay must not be reopened");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(not(feature = "overlayfs"))]
+    fn removed_overlay_retirement_defers_preparations_readers_and_wrong_roots() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let repo = Repo::open(&fixture.ctx, "p")?;
+        let old = repo.overlay_project("private")?;
+        let lock = repo.p.lock_maintenance()?;
+        let mark_removed = |root: &str| -> Result<()> {
+            let mut record = crate::model::DraftRecord::new("config");
+            record.data = json!({"config":{"overlay.private.removed":root}});
+            lock.append(record, &fixture.ctx.actor())?;
+            Ok(())
+        };
+        mark_removed(&fixture.head)?;
+        let make = || {
+            create::make_overlay(
+                &lock,
+                &fixture.ctx,
+                &repo,
+                "private",
+                &[],
+                Mode::Follow,
+                false,
+                &Props::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let lease = crate::objstore::preparation_lease(&old)?;
+        assert!(make().unwrap_err().is::<crate::cmd::overlaycmd::OverlayRetirementBusy>());
+        assert!(old.dir.exists());
+        drop(lease);
+        let state = json!({"id":fixture.head,"kind":"commit","subvol":"","author":crate::model::Author::default(),"time":0});
+        old.db
+            .test_connection()
+            .execute("INSERT INTO states(id,display,kind,rec) VALUES(?1,?1,'commit',?2)", (&fixture.head, state.to_string()))?;
+        old.db.test_connection().execute("INSERT INTO owners(state,kind,holder) VALUES(?1,'head','line')", [&fixture.head])?;
+        let reader = crate::free::pin(&old, &[&fixture.head])?;
+        assert!(make().unwrap_err().is::<crate::cmd::overlaycmd::OverlayRetirementBusy>());
+        assert!(old.dir.exists());
+        drop(reader);
+        mark_removed(&ids::new_id())?;
+        assert!(make().unwrap_err().to_string().contains("different identity"));
+        assert!(old.dir.exists());
+        Ok(())
     }
 
     #[test]

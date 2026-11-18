@@ -384,8 +384,27 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
                     continue;
                 }
                 drop(refresh);
-                let prepared = match repo.prepare_save(ctx, &l) {
-                    Ok(prepared) => prepared,
+                #[cfg(feature = "overlayfs")]
+                let backend = crate::overlayfs::NonBlocking::new();
+                let prepared = (|| -> anyhow::Result<Option<crate::repo::PreparedSave>> {
+                    if !repo.setup_save(ctx, &l, false)? {
+                        return Ok(None);
+                    }
+                    let l = repo.line(&l.id)?;
+                    Ok(Some(repo.prepare_save(
+                        ctx,
+                        &l,
+                        &_line_lock,
+                        crate::repo::SaveMode::Automatic { message: "periodic".into(), running: true, force: false },
+                    )?))
+                })();
+                #[cfg(feature = "overlayfs")]
+                if backend.contended() {
+                    continue;
+                }
+                let prepared = match prepared {
+                    Ok(Some(prepared)) => prepared,
+                    Ok(None) => continue,
                     Err(e) => {
                         eprintln!("layr periodic prepare ({name}/{}): {e:#}", l.name);
                         continue;
@@ -404,11 +423,11 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
-                match prepared.publish(&_lock, ctx, &l, "periodic", true) {
-                    Ok(None) => {
+                match repo.publish_save(ctx, &_lock, prepared) {
+                    Ok(crate::repo::PublishOutcome::Unchanged(_)) => {
                         checks.insert(l.id.clone(), now);
                     }
-                    Ok(Some(_)) => {}
+                    Ok(crate::repo::PublishOutcome::Saved(_) | crate::repo::PublishOutcome::Stale) => {}
                     // A failed save is compared again on the next tick: say why.
                     Err(e) => eprintln!("layr periodic save ({name}/{}): {e:#}", l.name),
                 }

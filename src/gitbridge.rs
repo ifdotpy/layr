@@ -1191,6 +1191,17 @@ fn nearest_built_import(repo: &Repo, state: &str) -> Result<Option<(String, Stri
     Ok(None)
 }
 
+/// Recover a save input into creator-owned storage, without publication, retention or a project
+/// lock. A complete checkout also avoids introducing a thin dependency on missing native storage.
+pub(crate) fn prepare_tree(repo: &Repo, state: &str, dst: &Path) -> Result<()> {
+    let commit = stored_commit(repo, state)?.context("imported state has no local Git commit")?;
+    let temp = crate::repo::Temp::empty(repo.p.work_dir().join(crate::store::temp_name()))?;
+    crate::repo::save_barrier("git_recovery")?;
+    materialize(&store(repo), &commit, &temp.path, None, None, None)?;
+    crate::fs::freeze_path_owned(&temp.path, dst, crate::fs::CapturePurpose::State)?.release();
+    Ok(())
+}
+
 /// Build the tree of an imported state from git and mark it present. The tree is a thin layer
 /// over the nearest imported ancestor on disk, holding the changed paths (APFS), or a copy of that
 /// ancestor with the changed paths (other file systems). Without such an ancestor it is the full

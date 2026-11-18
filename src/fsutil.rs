@@ -9,16 +9,41 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
-static UNSETTLED: AtomicBool = AtomicBool::new(false);
-/// The line about an unsettled copy is printed once per command, also when a command copies twice.
-static UNSETTLED_TOLD: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static UNSETTLED_WARNED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Retries of one save report an unsettled copy only once, even though each capture consumes
+/// its own mark. Restore the caller's warning scope when this save ends.
+pub struct CopyRetryWarnings(Option<bool>);
+
+pub fn copy_retry_warnings() -> CopyRetryWarnings {
+    CopyRetryWarnings(UNSETTLED_WARNED.replace(Some(false)))
+}
+
+impl Drop for CopyRetryWarnings {
+    fn drop(&mut self) {
+        UNSETTLED_WARNED.set(self.0);
+    }
+}
+
+fn record_unsettled() -> bool {
+    let first = !UNSETTLED.replace(true);
+    UNSETTLED_WARNED.with(|warned| match warned.get() {
+        Some(previous) => {
+            warned.set(Some(true));
+            !previous
+        }
+        None => first,
+    })
+}
 
 /// A copy of `src` could not settle: writers changed it in every round, so its files come from
-/// different moments. The copy stays; `repo.save` marks the state as taken while processes ran.
+/// different moments. The copy stays; save capture marks the state as taken while processes ran.
 pub fn mark_unsettled(src: &Path) {
-    if !UNSETTLED.swap(true, Ordering::Relaxed) && !UNSETTLED_TOLD.swap(true, Ordering::Relaxed) {
+    if record_unsettled() {
         eprintln!(
             "layr: {} kept changing while it was copied; the state is kept and marked as taken while processes ran",
             src.display()
@@ -28,7 +53,7 @@ pub fn mark_unsettled(src: &Path) {
 
 /// Whether a copy has not settled since the last call; clears the mark.
 pub fn take_unsettled() -> bool {
-    UNSETTLED.swap(false, Ordering::Relaxed)
+    UNSETTLED.replace(false)
 }
 
 pub use crate::compare::{FType, Meta};
@@ -1496,6 +1521,13 @@ pub fn git_writable(w: &Path, writable: bool) {
     }
 }
 
+/// A directory's role in a source snapshot. Query errors remain separate from this role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StorageRoot {
+    Unmanaged,
+    Managed,
+}
+
 /// Whether a known directory is a nested storage root.
 pub fn is_layer(root: &Path, rel: &str, m: &Meta) -> bool {
     (crate::fs::host().nested_entry)(root, rel, m)
@@ -1696,6 +1728,20 @@ mod range_tests {
         crate::compare::ChangedRanges::from_native(ranges).unwrap().bounded(size)
     }
     use std::fs;
+
+    #[test]
+    fn unsettled_retries_warn_once_but_mark_every_capture() {
+        let warnings = super::copy_retry_warnings();
+        for attempt in 0..3 {
+            assert_eq!(super::record_unsettled(), attempt == 0);
+            assert!(super::take_unsettled());
+            assert!(!super::take_unsettled());
+        }
+        drop(warnings);
+        let _next_save = super::copy_retry_warnings();
+        assert!(super::record_unsettled(), "the next save reports its own unsettled copy");
+        assert!(super::take_unsettled());
+    }
 
     #[test]
     fn copying_metadata_keeps_empty_and_nonempty_attributes() {

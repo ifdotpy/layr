@@ -242,7 +242,11 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// record alone deletes it, and `undo` brings it back without a folder.
 fn drop_entry(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, parked: &Line) -> Result<()> {
     let made = repo.working(parked).exists();
-    super::branch::delete_recorded(locked, ctx, repo, parked, None, made)
+    super::branch::delete_recorded(locked, ctx, repo, parked, None, made, None)?;
+    if let Err(e) = repo.drop_orphan_cache_lines(ctx) {
+        eprintln!("warning: cache overlay lines of deleted lines stay until the next gc: {e:#}");
+    }
+    Ok(())
 }
 
 /// `park [-m <message>] [-u] [-a] [-k]`: save the changes as the head of a new parked line, then

@@ -70,6 +70,21 @@ pub(super) fn managed_root(path: &Path) -> bool {
     }
 }
 
+/// btrfs boundaries are encoded in the metadata already read by the validation walker.
+pub(crate) struct NestedRoots;
+impl NestedRoots {
+    pub(crate) fn read(_root: &Path) -> Result<Self> {
+        Ok(Self)
+    }
+    pub(crate) fn classify(&self, _path: &Path, metadata: &fs::Metadata) -> std::io::Result<crate::fsutil::StorageRoot> {
+        Ok(if metadata.is_dir() && metadata.ino() == FIRST_FREE_OBJECTID {
+            crate::fsutil::StorageRoot::Managed
+        } else {
+            crate::fsutil::StorageRoot::Unmanaged
+        })
+    }
+}
+
 /// Snapshot `src` (a subvolume) to `dst`. The destination must not exist.
 /// A read-only snapshot for comparing content.
 /// A writable copy of a cache folder: a subvolume snapshot, which is O(1) and keeps every link.

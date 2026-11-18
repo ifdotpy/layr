@@ -89,12 +89,39 @@ A crash between the commit and the move leaves the state in `free_queue`. The ne
 A replay (a rebuild of the derived tables, and the owners of `gc` check) runs with freeing off
 (`owners::fill_only`). The replay only fills owners.
 
-After a line delete, its final state gets a complete tree (APFS, `thin::make_keyframe`). The
-`deleted` ring keeps that state, and as a thin layer it keeps the states under it (for example the
-automatic state it changes from). A background process (`layr __keyframe <store> <project> <state> final`)
-makes the tree after the command, waits `thin.view_seconds`, drops the layer and runs the free step: the
-states under it go then. The delete itself makes no copy of the tree. `gc --repair` makes the tree at once
-for a final state that is still thin (a stopped background process).
+Automatic and final-deletion saves capture, compare, recover missing local Git inputs, encode
+objects and prepare cache parts under the line lock, outside the project lock. Publication validates
+the inputs and renames prepared storage. Backend registry contention and stale inputs defer
+publication; foreground callers prepare again outside the lock (at most three attempts), and a
+periodic skip leaves its check timestamp unchanged. Foreground automatic saves, including saves
+before restore, reset, merge and undo, retain an O(source entries) metadata fence under the project
+lock. Preparation scans before and after capture; publication scans once more. These scans read
+identities, permissions, timestamps and backend storage-root markers, never file content or hashes.
+Like source snapshots, ordinary fences stop at nested storage roots: a separately managed cache
+contributes its identity and permissions, not its files or changing directory timestamps. Cache
+boundary queries are fallible: absent APFS markers mean ordinary source directories; marker
+permission, I/O and corruption errors stop the save. OverlayFS reads its registry once per scan
+and uses in-memory path lookups. As with OverlayFS snapshots, a registered cache path remains a
+boundary after replacement by a plain folder; unregistered siblings remain source content. Cache
+writers therefore do not invalidate an otherwise stable source capture or add their files to the
+publication scan. Final deletion keeps its full-tree O(entries) fence, including cache contents,
+because it removes the working folder. Writers outside the line-lock protocol can still write after
+either fence. Disappearance and file-type races consume the same three-attempt budget; permission
+and I/O errors propagate. If an automatic save's last copy cannot settle, the third attempt
+publishes that capture marked as taken while processes ran, without the content fence. The
+remaining publication checks still apply; final deletion always requires its full fence. The
+unsettled-copy warning appears once across the attempts. All automatic-save callers use this
+prepare/publish protocol.
+
+General crash recovery is another exception: acquiring a project lock on APFS can replay a dead pending commit,
+including storage resealing or deletion. The prepare/publish bound applies to a recovered project,
+not to that existing crash-recovery path.
+
+An APFS final save prepares a complete tree before publication, including an exact companion view
+when an unchanged final retains a thin state's ID. The `deleted` ring keeps that state. A background
+process (`layr __keyframe <store> <project> <state> final`) waits `thin.view_seconds`, retires an
+existing layer and runs the free step; it defers if the complete view is missing and never constructs
+one under the project lock. `gc --repair` still completes legacy thin final states from older saves.
 
 ## Storage that a live state needs
 
@@ -202,7 +229,9 @@ frees a state that a local owner holds: owners are per state, not per machine.
 ## Pins
 
 A command that reads a saved state while the store lock may be free pins it: a row `pin` with holder
-`<pid>:<process start>`. `free::pin` takes the pins of a set of states (`Repo::pin`), and
+`<pid>:<process start>`, one row per state for the whole process. Guards in the process count their
+references to each state, and only the release of the last one removes the row, so dropping a nested
+guard keeps the outer reader pinned. `free::pin` takes the pins of a set of states (`Repo::pin`), and
 `Repo::hold` keeps them until the command ends (`free::finish`). A pin counts only for a state that
 has another owner. A state that no owner names, or that a free step already queued, is refused:
 the reader fails with "state X was freed: no line, ref, tag or undo record keeps it", and it never

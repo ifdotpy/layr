@@ -49,8 +49,11 @@ no "nor the proprietary file" l show main@{0}:pro-feature.c
 # of a restore brings it back, and no state of the project holds it.
 ok "restore drops the working change" l restore core.c
 eq "the folder lost it" 0 "$(grep -c "$MARK auto" core.c)"
+echo "/* later unrelated edit */" >> lib.c
 ok "undo of the restore" l undo
 eq "the change is back" 1 "$(grep -c "$MARK auto" core.c)"
+eq "undo keeps the later edit of an unrelated tracked file" 1 "$(grep -c "later unrelated edit" lib.c)"
+l restore lib.c >/dev/null
 eq "the automatic state of the project before the restore holds no patch" 0 "$(l show main@{0}:core.c 2>/dev/null | grep -c "$MARK")"
 has "pro's records hold the working content" "auto." "$(sqlite3 "$LAYR_ROOT/projects/p/meta/overlays/pro/meta/db/layr.sqlite" "select key from config")"
 eq "no record of the project names those states" 0 "$(sqlite3 "$LAYR_ROOT/projects/p/meta/db/layr.sqlite" "select raw from records" | grep -c 'auto\.')"

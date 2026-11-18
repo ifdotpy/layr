@@ -2,10 +2,9 @@
 # ci: macos overlayfs
 # Pins (docs/ownership.md, "Pins"): a command that reads saved states keeps them on disk until it
 # ends, though another command frees their last owner meanwhile. Test hook: LAYR_TEST_PIN_HOLD_MS
-# makes the reader sleep once its pins are taken (test only). Each case: the reader holds its pins;
-# a second process drops the last owner of a state the reader reads; the reader finishes with the
-# right result; the state goes after the reader ends. Three readers: a merge source, the base of a
-# prepared save, and an overlap compare of status.
+# makes the reader sleep once its pins are taken (test only). A merge source, a direct reader
+# and an overlap compare survive concurrent ownership removal. A save also holds its line lock:
+# its reset must wait, and its automatic state keeps the old parent until replaced.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -55,20 +54,75 @@ has "the merge has the main change" "main change" "$(l show head:other.txt)"
 # The merge commit names the source as its parent: the history keeps it.
 ok "the merge keeps the source as its history" on_disk "$S"
 
-# 2. The base of a prepared save: the head moves away while the save holds it.
+# 2. The base of a prepared save: reset waits for the save's line lock. The save
+# retains its parent through the newest automatic state. Replacing that state after
+# reset drops the last owner; its native storage must then be reclaimed.
 l line new -q w >/dev/null
 cd $M/w || exit 1
 echo one >> notes.txt; l save -qam one >/dev/null
 H=$(l rev-parse head)
 echo two >> notes.txt
-hold $M/w $T/save.out save -q
-ok "the save holds its base" wait_pin
-l reset -q head~1 >/dev/null
-ok "a pinned save base stays on disk after its owner goes" on_disk "$H"
-wait
+python3 - "$T" "$LAYR" "$M/w" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+root, binary, work = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+gate = root / 'save-gate'
+gate.mkdir()
+reset = None
+with (root / 'save.out').open('w') as log:
+    saver = subprocess.Popen([binary, 'save', '-q'], cwd=work,
+        env=dict(os.environ, LAYR_TEST_SAVE_PUBLISH_BARRIER=str(gate)), stdout=log, stderr=log)
+try:
+    deadline = time.monotonic() + 20
+    while not (gate / 'ready').exists():
+        assert saver.poll() is None, (root / 'save.out').read_text()
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    with (root / 'reset.out').open('w') as log:
+        reset = subprocess.Popen([binary, 'reset', '-q', 'head~1'], cwd=work, stdout=log, stderr=log)
+    try:
+        reset.wait(timeout=.5)
+        raise AssertionError('reset completed while the save held its line lock')
+    except subprocess.TimeoutExpired:
+        pass
+    (gate / 'release').touch()
+    code = saver.wait(timeout=20)
+    (root / 'save.out.rc').write_text(str(code))
+    assert code == 0, (root / 'save.out').read_text()
+    assert reset.wait(timeout=20) == 0, (root / 'reset.out').read_text()
+finally:
+    for process in (saver, reset):
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+PY
+ok "reset waits for the save's line lock" test "$?" = 0
 eq "the save finishes" 0 "$(cat $T/save.out.rc)"
 eq "the saved state has the working content" "two" "$(l show 'head@{0}:notes.txt' | tail -1)"
-no "the save base goes after the save" on_disk "$H"
+ok "the serialized save keeps its parent through its automatic state" on_disk "$H"
+l save --force -q >/dev/null
+no "the save base goes after its last automatic owner goes" on_disk "$H"
+
+# A direct reader has no line lock: deletion removes the state's last non-pin owner
+# while show is reading. Only the reader's pin can keep this leaf state alive.
+l line new -q pin-only main >/dev/null
+cd $M/pin-only || exit 1
+echo pin-only >> notes.txt; l save -qam pin-only >/dev/null
+R=$(l rev-parse head)
+cd $M/main || exit 1
+hold $M/main $T/read.out show "$R:notes.txt"
+ok "the direct reader holds its state" wait_pin
+l line delete -D --discard pin-only >/dev/null 2>&1
+eq "only the reader's pin still owns the state" 0 "$(q "select count(*) from owners where state='$(dashed "$R")' and kind!='pin'")"
+ok "the pin keeps the state after concurrent deletion" on_disk "$R"
+wait
+eq "the direct reader finishes" 0 "$(cat $T/read.out.rc)"
+has "the direct reader returns its pinned content" "pin-only" "$(cat $T/read.out)"
+no "the state goes when its only pin is released" on_disk "$R"
 
 
 # A reader that comes later (no pin) gets a clear error for a freed state, never its content:

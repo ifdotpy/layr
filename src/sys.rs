@@ -10,7 +10,9 @@
 //! - `setfsuid`/`setfsgid` (file permission checks as a user, for the current thread);
 //! - user database lookups (`getpwuid_r`, `getpwnam_r`, `getgrouplist`).
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
@@ -394,7 +396,7 @@ const _: () = {
     assert!(std::mem::size_of::<FsInfo>() == 1024);
     assert!(std::mem::offset_of!(FsInfo, uuid) == 16);
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const BTRFS_SET_RECEIVED_SUBVOL: libc::c_ulong = 0xc0c8_9425;
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -412,7 +414,7 @@ const _: () = {
     assert!(std::mem::size_of::<ReceivedSubvolArgs>() == 200);
     assert!(std::mem::offset_of!(ReceivedSubvolArgs, flags) == 64);
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 const BTRFS_SEND: libc::c_ulong = 0x4048_9426;
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -747,23 +749,23 @@ pub fn clone_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst
     ioctl_ptr(dst.as_fd(), FICLONERANGE, &mut a)
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
 /// Extent flags that give no stable device offset: unknown, delayed allocation, inline data.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FIEMAP_UNSTABLE: u32 = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_DATA_INLINE;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FIEMAP_EXTENT_UNKNOWN: u32 = 0x2;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FIEMAP_EXTENT_DELALLOC: u32 = 0x4;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x200;
 
 /// `struct file_dedupe_range` with one `struct file_dedupe_range_info`.
 #[repr(C)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 struct DedupeArgs {
     src_offset: u64,
     src_length: u64,
@@ -778,7 +780,7 @@ struct DedupeArgs {
 }
 
 #[repr(C)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 struct FiemapExtent {
     logical: u64,
     physical: u64,
@@ -789,7 +791,7 @@ struct FiemapExtent {
 }
 
 #[repr(C)]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 struct Fiemap {
     start: u64,
     length: u64,
@@ -803,7 +805,7 @@ struct Fiemap {
 /// Share a byte range of `src` with `dst` when the kernel finds the bytes equal (FIDEDUPERANGE).
 /// The kernel compares inside, so a write to either file during the call cannot lose data.
 /// Returns the bytes shared: 0 when the ranges differ. `dst` is open for writing.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 pub fn dedupe_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst_off: u64) -> io::Result<u64> {
     let mut a = DedupeArgs {
         src_offset: src_off,
@@ -827,7 +829,7 @@ pub fn dedupe_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, ds
 
 /// The device offset of the byte at `off`, or `None` when the file system gives none (a hole,
 /// delayed allocation, inline data, or no FIEMAP). Equal offsets in two files mean one extent.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 pub fn physical_at(f: &impl AsFd, off: u64) -> Option<u64> {
     let mut m = Fiemap {
         start: off,

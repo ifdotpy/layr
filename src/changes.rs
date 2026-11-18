@@ -428,6 +428,7 @@ pub fn object_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Size
 
 /// Confirm complete persisted-state differences, including nanosecond timestamps and stored
 /// attributes. This is shared by sparse representation writers and portable transfer plans.
+#[cfg(any(target_os = "macos", feature = "overlayfs"))]
 pub(crate) fn state_changes(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
     let candidates = without_moves(candidates_request(
         parent,

@@ -111,11 +111,6 @@ pub fn platform_key_of(parts: &BTreeMap<String, String>) -> String {
     format!("{base}-{}", short_hash(text.as_bytes()))
 }
 
-/// The key with only the key files `key_files` of the working folder `w` as parts.
-pub fn platform_key(w: &Path, key_files: &[String]) -> String {
-    platform_key_of(&file_parts(w, key_files))
-}
-
 /// The first 16 hex digits of the SHA-256 of `data`.
 fn short_hash(data: &[u8]) -> String {
     use layr_hashers::Digest;
@@ -603,8 +598,22 @@ impl<'a> Repo<'a> {
     }
 
     /// The cache overlay of `folder`, made when missing. The caller holds the project lock.
-    fn ensure_cache_overlay(&self, locked: &crate::store::LockedProject<'_>, ctx: &Ctx, folder: &str) -> Result<String> {
-        locked.check(&self.p)?;
+    pub(crate) fn ensure_cache_overlay(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        folder: &str,
+    ) -> Result<String> {
+        self.ensure_cache_overlay_prepared(locked, ctx, folder, None)
+    }
+
+    pub(crate) fn ensure_cache_overlay_prepared(
+        &self,
+        locked: &crate::store::LockedProject<'_>,
+        ctx: &Ctx,
+        folder: &str,
+        empty: Option<&crate::repo::PreparedEmptyTree>,
+    ) -> Result<String> {
         if let Some(n) = self.folder_overlay_of(folder)? {
             self.sync_cache_readers(ctx, &n);
             return Ok(n);
@@ -627,6 +636,7 @@ impl<'a> Repo<'a> {
             Some(folder),
             key_files.as_ref(),
             None,
+            empty,
         )?;
         Ok(name)
     }
@@ -668,6 +678,7 @@ impl<'a> Repo<'a> {
             &cache_props(),
             Some(folder),
             key_files.as_ref(),
+            None,
             None,
         )?;
         let mut rec = crate::model::DraftRecord::new("config");
@@ -739,7 +750,7 @@ impl<'a> Repo<'a> {
     /// The user a new cache state records as its maker (`cache_by`): the caller, or the line owner when root
     /// saves an owner's line (the owner's tools made the files; root may act for any user, so the cache is
     /// trusted no wider than the owner's own).
-    fn cache_maker(&self, ctx: &Ctx, line: &Line) -> u32 {
+    pub(crate) fn cache_maker(&self, ctx: &Ctx, line: &Line) -> u32 {
         if ctx.caller.uid == 0 {
             self.owner_ids(line).0
         } else {
@@ -761,7 +772,17 @@ impl<'a> Repo<'a> {
         project_state: &str,
     ) -> Result<Vec<(String, String, String)>> {
         locked.check(&self.p)?;
-        self.save_cache_overlays_in(locked, ctx, line, line, &self.working(line), &self.working(line), paths, shared, project_state)
+        self.save_cache_overlays_in(
+            locked,
+            ctx,
+            line,
+            line,
+            &self.working(line),
+            &self.working(line),
+            paths,
+            shared,
+            project_state,
+        )
     }
 
     /// Save to `line` from `build`'s context at `w` (a check copy may have a different source head).
@@ -1368,14 +1389,6 @@ impl<'a> Repo<'a> {
         Ok(out)
     }
 
-    /// The cache adapter hook (issue #167, docs/cache-overlays.md section 19) for `folder`, a folder cache of
-    /// `line` that is in its working copy now. Core runs the adapter that the `prune` property of `overlay`
-    /// names. It never fails: the outcome is one log line on stderr.
-    pub fn prune_cache(&self, line: &Line, overlay: &str, folder: &str) {
-        let root = self.working(line);
-        self.prune_folder(line, Some(overlay), folder, &root);
-    }
-
     /// The hook for a folder that the caller has in the working copy: the overlay is looked up from the folder
     /// (no overlay yet: the adapter is detected).
     pub fn prune_cache_folder(&self, line: &Line, folder: &str) {
@@ -1715,7 +1728,9 @@ impl<'a> Repo<'a> {
         if !crate::cmd::mergecmd::changes_contained(self, &into, &line.head)? {
             return Ok(false);
         }
-        let crate::store::LockAttempt::Acquired(_line_lock) = self.p.try_line_lock(&line.id, &line.name)? else { return Ok(false) };
+        let crate::store::LockAttempt::Acquired(_line_lock) = self.p.try_line_lock(&line.id, &line.name)? else {
+            return Ok(false);
+        };
         if !crate::cmd::branch::unsaved_paths(self, &line)?.is_empty() {
             return Ok(false);
         }
@@ -2025,16 +2040,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&w);
         std::fs::create_dir_all(&w).unwrap();
         let base = crate::model::cache_platform();
-        assert_eq!(platform_key(&w, &[]), base);
+        assert_eq!(platform_key_of(&file_parts(&w, &[])), base);
         let files = vec!["Cargo.lock".to_string(), "rust-toolchain.toml".to_string()];
-        let missing = platform_key(&w, &files);
+        let missing = platform_key_of(&file_parts(&w, &files));
         assert!(missing.starts_with(&format!("{base}-")) && missing.len() == base.len() + 17);
         std::fs::write(w.join("Cargo.lock"), "a").unwrap();
-        let one = platform_key(&w, &files);
+        let one = platform_key_of(&file_parts(&w, &files));
         assert_ne!(one, missing, "content counts");
-        assert_eq!(one, platform_key(&w, &files), "the key is stable");
+        assert_eq!(one, platform_key_of(&file_parts(&w, &files)), "the key is stable");
         std::fs::write(w.join("Cargo.lock"), "b").unwrap();
-        assert_ne!(one, platform_key(&w, &files));
+        assert_ne!(one, platform_key_of(&file_parts(&w, &files)));
         assert!(!other_platform(Some(&base)));
         assert!(!other_platform(Some(&one)));
         assert!(!other_platform(None), "an old state names no platform");

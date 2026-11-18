@@ -91,12 +91,21 @@ pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
         Some(rev) => crate::revs::resolve_state(repo, h.line.as_ref(), rev)?,
         None if !positions.is_empty() => positions.last().unwrap().clone(),
         None => {
-            let _lock = repo.p.lock_maintenance()?;
+            let _line_lock = repo.line_lock(h.line()?)?;
             let line = repo.line(&h.line()?.id)?;
             repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
-            repo.save(&_lock, ctx, &line, "bisect bad (working content)", false, true)?
-                .context("the line has no working folder; use --bad")?
-                .id
+            anyhow::ensure!(repo.working(&line).exists(), "the line has no working folder; use --bad");
+            let (_lock, _, outcome, _) = repo.save_prepared(
+                ctx,
+                &line.id,
+                &_line_lock,
+                crate::repo::SaveMode::Automatic { message: "bisect bad (working content)".into(), running: false, force: true },
+            )?;
+            match outcome {
+                crate::repo::PublishOutcome::Saved(state) => state.id,
+                crate::repo::PublishOutcome::Unchanged(id) => id,
+                crate::repo::PublishOutcome::Stale => unreachable!("foreground save retries stale preparation"),
+            }
         }
     };
     let good = match a.get("--good") {
