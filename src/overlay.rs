@@ -286,6 +286,9 @@ pub struct Info {
     pub root: String,
 }
 
+/// A hidden overlay with its project, whose records hold its metadata (`Repo::hidden_overlays`).
+pub(crate) type HiddenOverlay<'a> = (String, Info, Project<'a>);
+
 /// Metadata and the local project opened for one overlay listing. Public overlays may have
 /// metadata without a local project; hidden overlays need their project to supply the metadata.
 pub(crate) struct ListedOverlay<'a> {
@@ -1901,26 +1904,23 @@ impl<'a> Repo<'a> {
     /// The overlays a line shows, bottom first: the overlays of its view, each at the head of the
     /// line on that overlay (docs/overlays.md section 1).
     pub fn layers(&self, line: &Line) -> Result<Vec<Layer>> {
-        let hidden = self.hidden_overlays()?;
-        self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))
+        self.layers_in(line, &self.hidden_overlays()?)
     }
 
     /// The layers of many lines (line id to layers). The overlays are read once, not once per line.
     pub fn stacks(&self, lines: &[Line]) -> Result<BTreeMap<String, Vec<Layer>>> {
         let hidden = self.hidden_overlays()?;
-        lines
-            .iter()
-            .map(|l| {
-                Ok((
-                    l.id.clone(),
-                    self.layers_with(l, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))?,
-                ))
-            })
-            .collect()
+        lines.iter().map(|l| Ok((l.id.clone(), self.layers_in(l, &hidden)?))).collect()
+    }
+
+    /// `layers` with the hidden overlays that the caller read once for many lines (`hidden_overlays`
+    /// reads every overlay setting of the project).
+    pub(crate) fn layers_in(&self, line: &Line, hidden: &[HiddenOverlay<'a>]) -> Result<Vec<Layer>> {
+        self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))
     }
 
     /// The hidden overlays of the project with their projects. Empty in an overlay project.
-    fn hidden_overlays(&self) -> Result<Vec<(String, Info, Project<'a>)>> {
+    pub(crate) fn hidden_overlays(&self) -> Result<Vec<HiddenOverlay<'a>>> {
         if self.p.is_overlay() {
             return Ok(Vec::new());
         }
@@ -2601,12 +2601,21 @@ impl<'a> Repo<'a> {
     /// Files that automatic states of the line leave out: the files of its overlays (the states it
     /// shows and the newest states of its overlay lines) and the paths of pending moves.
     pub fn private_paths(&self, line: &Line) -> Result<BTreeSet<String>> {
+        let hidden = self.hidden_overlays()?;
+        self.private_paths_in(line, &self.layers_in(line, &hidden)?, &hidden)
+    }
+
+    /// `private_paths` of a line whose layers the caller read with the same hidden overlays (`layers_in`).
+    pub(crate) fn private_paths_in(
+        &self,
+        line: &Line,
+        layers: &[Layer],
+        hidden: &[HiddenOverlay<'a>],
+    ) -> Result<BTreeSet<String>> {
         let mut out = BTreeSet::new();
         if self.p.is_overlay() {
             return Ok(out);
         }
-        let hidden = self.hidden_overlays()?;
-        let layers = self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))?;
         for l in layers {
             let project;
             let public_info;
