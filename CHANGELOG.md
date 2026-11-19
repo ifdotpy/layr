@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.50.0](https://github.com/ifdotpy/layr/compare/v0.49.0...v0.50.0) (2026-11-19)
+
+
+### Features
+
+* **cache:** Caches are portable by default
+* **queue:** Fail the waiting entries that conflict with a new head
+
+
+### Performance Improvements
+
+* **remote:** Pipeline fetch, clone and push on one bounded transfer pool
+* **remote:** Batch and parallelize object reads through every backend wrapper
+* **remote:** Negotiate HTTP/2 for gateway and CDN requests
+* **remote:** Reuse checked record segments when hydrating push parents
+* **fetch:** Revalidate object listings with a conditional request
+* **status:** Read the overlays of the project once for all compared lines
+* **log:** Filter paths before comparing history content
+
+
+### Bug Fixes
+
+* **checks:** Give caches back from a passing check of a queue candidate
+* **fs:** Stop a sparse copy when the source shrinks under SEEK_HOLE, and make the fs stack pass the Linux and APFS checks
+* **save:** Prepare automatic and final states before publication
+* **remote:** Discover overlay keys without listing cache objects, skip an overlay key whose creator record has not arrived, and keep the storage of a clone's source
+* **clone:** Keep history lazy and recognize fallback Git HEAD
+* **add:** Stage removals before additions on a case-insensitive volume
+* **views:** A virtual line shown as a folder gets new cache provenance
+
+
+### Code Refactoring
+
+* **sync:** Separate local replica access from remote transport behind traits
+
 ## [0.49.0](https://github.com/ifdotpy/layr/compare/v0.48.0...v0.49.0) (2026-11-16)
 
 
