@@ -1362,7 +1362,7 @@ fn write_durable(path: &Path, data: &[u8], mode: u32, durable: bool) -> Result<(
         ".{}.tmp-{}-{:016x}",
         path.file_name().unwrap().to_string_lossy(),
         std::process::id(),
-        rand::random::<u64>()
+        crate::ids::random_u64()
     ));
     let _temporary = TempGuard(&tmp);
     {
@@ -1466,7 +1466,7 @@ pub fn read_at(dir: &File, name: &str) -> Option<Vec<u8>> {
 /// rename it over `name`. A link at `name` is replaced, not followed.
 pub fn replace_at(dir: &File, name: &str, content: &mut dyn FnMut(&File) -> Result<()>, own: Option<(u32, u32)>) -> Result<()> {
     use rustix::fs::{AtFlags, Mode, OFlags};
-    let tmp = format!(".{name}.layr-{}-{:016x}", std::process::id(), rand::random::<u64>());
+    let tmp = format!(".{name}.layr-{}-{:016x}", std::process::id(), crate::ids::random_u64());
     let _ = rustix::fs::unlinkat(dir, tmp.as_str(), AtFlags::empty());
     let fd = rustix::fs::openat(
         dir,
