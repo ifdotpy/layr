@@ -79,9 +79,8 @@ run("add", "f0")
 retire()
 time.sleep(1.1)
 result = run("save", "-qm", "saved", extra={"LAYR_TRACE": "1"})
-# OverlayFS compares the mounted line once more for the left-out warning.
-assert 1 <= result.stderr.count("status full comparison") <= (2 if overlay_backend else 1), result.stderr
-assert "saved status used for" in result.stderr, result.stderr
+# The warning compares after publication, once, without an eager comparison to reuse.
+assert result.stderr.count("status full comparison") == 1, result.stderr
 retire()
 run("line", "new", "topic")
 retire()
@@ -103,7 +102,9 @@ retire()
 def edit_during_save():
     repair = run("fsck", "--repair")
     assert "snapshot without record" not in repair.stdout, repair.stdout
-    (work / "f1").write_text("concurrent\n")
+    stamp = (work / "f1").stat()
+    (work / "f1").write_bytes(b"x" * stamp.st_size)
+    os.utime(work / "f1", ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
 
 
 result = paused(["save", "-qm", "concurrent"], "prepared named save ready", edit_during_save)

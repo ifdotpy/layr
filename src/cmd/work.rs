@@ -1216,7 +1216,6 @@ struct NamedPrepared<'p, 's> {
     state: crate::model::StateRec,
     /// The staged changes and the conflicts that the save clears; None: nothing to save.
     checks: Option<(Vec<EntryChange>, Vec<crate::model::Conflict>)>,
-    left_out: Option<crate::repo::LeftOutComparison>,
 }
 
 /// Clone the index of `line` and compare the clone with the head. Call with the line lock held and
@@ -1254,24 +1253,7 @@ fn prepare_named_save<'p, 's>(
         publication.synchronize()?;
     }
     compared.record(&repo.p, &mut state)?;
-    // Failure to list a live working folder must never reject the staged save.
-    // The post-publication warning retains its ordinary snapshot fallback.
-    let left_out = (|| -> Result<_> {
-        let index = if let (Some(tree), Some(times)) = (&state.tree, &state.times) {
-            let refs = layr_objects::StateRef { tree: layr_objects::Id::parse(tree)?, times: layr_objects::Id::parse(times)? };
-            let tree = crate::object_tree::ObjectTree::new(
-                crate::objstore::open(&repo.p)?,
-                refs,
-                &repo.p.meta_dir().join("object-reads"),
-            )?;
-            crate::repo::Snap::Objects(tree)
-        } else {
-            new_root.clone()
-        };
-        repo.prepare_left_out(line, &index)
-    })()
-    .ok();
-    Ok(NamedPrepared { head_id: line.head.clone(), head_root, publication, state, checks, left_out })
+    Ok(NamedPrepared { head_id: line.head.clone(), head_root, publication, state, checks })
 }
 
 fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
@@ -1429,7 +1411,7 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
         };
         return commit_stacked(&lock, ctx, &h, &line, &message, a.has("-a"), a.has("--allow-empty"), out, author, to, nothing);
     }
-    let NamedPrepared { head_root, mut state, mut publication, checks, left_out, .. } =
+    let NamedPrepared { head_root, mut state, mut publication, checks, .. } =
         prepared.take().ok_or_else(|| anyhow::anyhow!("named save was not prepared"))?;
     let (staged, cleared) = checks.ok_or_else(|| anyhow::anyhow!("named save has no checks"))?;
     if let Some((n, e)) = author {
@@ -1481,13 +1463,6 @@ fn commit_state(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // The output reads the trees: it runs after the project lock is released. The journal of the
     // pending save goes after it too: the record is the commit, and the recovery of another
     // command leaves the journal of a live process alone (and finishes it after a crash).
-    let mut saved_line = line.clone();
-    saved_line.head = state.id.clone();
-    if let Some(left_out) = left_out {
-        if let Err(e) = h.repo.cache_left_out(&saved_line, left_out) {
-            eprintln!("warning: cannot retain the files this save left out: {e:#}");
-        }
-    }
     drop(lock);
     publication.finish()?;
     let new_root = h.repo.state_src(&state.id)?;
