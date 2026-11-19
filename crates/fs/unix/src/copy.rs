@@ -65,6 +65,10 @@ fn copy_sparse(source: &File, destination: &File, size: u64) -> io::Result<()> {
             }
             let end = match seek(source, SeekFrom::Hole(data)) {
                 Ok(offset) => offset.min(size),
+                // The file shrank below `data` after SEEK_DATA: a writer truncated it during the copy. Stop as
+                // SEEK_DATA does; the caller's settle check sees the change. Returned, it failed a save while a
+                // process rewrote a file (save-unsettled on overlayfs-ext4, "No such device or address").
+                Err(rustix::io::Errno::NXIO) => break,
                 Err(error) if sparse_unavailable(error) => return copy_bytes(source, destination, 0, size, &mut buffer),
                 Err(error) => return Err(error.into()),
             };
