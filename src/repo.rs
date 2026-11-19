@@ -1776,28 +1776,6 @@ impl<'a> Repo<'a> {
         Ok(st)
     }
 
-    pub fn prepare_left_out(&self, line: &Line, index: &Snap) -> Result<LeftOutComparison> {
-        let work = self.working(line);
-        let started = crate::status_cache::clock()?;
-        let entries = crate::fs::observe_tree(&work)?;
-        let local = Rules::new(&work).local_policy()?;
-        let scan = self.scan(line)?;
-        let st = self.status_of_with_policy(line, &scan.path, index, false, Some(&local))?;
-        Ok(LeftOutComparison { started, entries, local, st })
-    }
-
-    pub fn cache_left_out(&self, line: &Line, comparison: LeftOutComparison) -> Result<()> {
-        let selected = self.select_index(line)?;
-        let work = self.working(line);
-        if Rules::new(&work).local_policy()? != comparison.local {
-            return Ok(());
-        }
-        if let Some(key) = self.status_key(line, &work, &selected, &comparison.local)? {
-            self.save_status_cache(line, &StatusCache::new(key, comparison.started, comparison.entries, comparison.st))?;
-        }
-        Ok(())
-    }
-
     fn status_cache_path(&self, line: &Line) -> PathBuf {
         self.p.meta_dir().join("status").join(format!("{}.cache", line.id))
     }
@@ -4396,13 +4374,6 @@ thread_local! {
 
 /// The head and the index content of a line (`Repo::index_token`).
 pub type IndexToken = String;
-
-pub struct LeftOutComparison {
-    started: u64,
-    entries: BTreeMap<String, FileFingerprint>,
-    local: Vec<u8>,
-    st: Status,
-}
 
 /// Identity of every mutable input used by a comparison.
 struct ObservedVersion {

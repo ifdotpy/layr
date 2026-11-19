@@ -172,9 +172,18 @@ impl Compared {
     /// Store checked object deltas before the record is signed. Other sources keep the
     /// existing publication fallback. Call only after the save's checks succeed.
     pub fn record(self, p: &Project, state: &mut crate::model::StateRec) -> Result<()> {
-        let Some(CheckedDelta { refs, changed, dirty }) = self.delta else { return Ok(()) };
+        if self.prepare(p, state)? {
+            install_prepared(p, state)?;
+        }
+        Ok(())
+    }
+
+    /// Encode this immutable comparison without installing a state ref. Automatic saves
+    /// keep publication under their existing validation and installation protocol.
+    pub(crate) fn prepare(self, p: &Project, state: &mut crate::model::StateRec) -> Result<bool> {
+        let Some(CheckedDelta { refs, changed, dirty }) = self.delta else { return Ok(false) };
         if !enabled(p)? || state.tree.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let store = open(p)?;
         let options = layr_objects::WriteOptions {
@@ -192,23 +201,29 @@ impl Compared {
             &dirty,
             &options,
         )?;
-        attach(p, &store, state, written)
+        describe_write(state, &written)?;
+        Ok(true)
     }
 }
 
 fn attach(p: &Project, store: &Store, state: &mut crate::model::StateRec, written: layr_objects::WriteReport) -> Result<()> {
-    trace_write(state, &written);
-    let refs = StateRef {
-        tree: written.tree.context("object write gave no tree")?,
-        times: written.times.context("object write gave no times")?,
-    };
+    let refs = describe_write(state, &written)?;
     store.set_state(&state.id, &refs)?;
-    state.tree = Some(refs.tree.hex());
-    state.times = Some(refs.times.hex());
     if !p.is_overlay() || state.cache_of.is_some() {
         queue_native(p, &state.id)?;
     }
     Ok(())
+}
+
+fn describe_write(state: &mut crate::model::StateRec, written: &layr_objects::WriteReport) -> Result<StateRef> {
+    trace_write(state, written);
+    let refs = StateRef {
+        tree: written.tree.context("object write gave no tree")?,
+        times: written.times.context("object write gave no times")?,
+    };
+    state.tree = Some(refs.tree.hex());
+    state.times = Some(refs.times.hex());
+    Ok(refs)
 }
 
 fn trace_write(state: &crate::model::StateRec, written: &layr_objects::WriteReport) {
@@ -281,9 +296,7 @@ pub(crate) fn prepare_state(repo: &Repo, state: &mut crate::model::StateRec, sou
         )?,
         None => layr_objects::write::write_tree_from(&store, &source, &options)?,
     };
-    trace_write(state, &written);
-    state.tree = Some(written.tree.context("object write gave no tree")?.hex());
-    state.times = Some(written.times.context("object write gave no times")?.hex());
+    describe_write(state, &written)?;
     Ok(())
 }
 

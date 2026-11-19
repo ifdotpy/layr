@@ -6,6 +6,7 @@ use crate::apfs::NestedRoots;
 use crate::btrfs::NestedRoots;
 use crate::ctx::Ctx;
 use crate::fs as storage;
+use crate::fsutil::Src;
 use crate::model::{Line, StateKind, StateRec};
 use crate::objstore::{self, PreparationLease};
 #[cfg(feature = "overlayfs")]
@@ -566,6 +567,7 @@ impl Repo<'_> {
             unsettled |= crate::fsutil::take_unsettled();
             state.running |= unsettled;
             barrier("comparison")?;
+            let mut compared = None;
             let changed = if force || !self.tree_available(&base) {
                 true
             } else {
@@ -576,7 +578,18 @@ impl Repo<'_> {
                         _ => true,
                     }
                 } else {
-                    crate::changes::any_file_change(&old, &tree.source(self)?, skip_path)?
+                    let source = tree.source(self)?;
+                    // Object encoding needs a complete stored delta, including times,
+                    // directory attributes and hard links. Keep that evidence with the
+                    // immutable capture instead of comparing it again in prepare_state.
+                    if old.objects().is_some() && source.folder().is_some() && objstore::enabled(&self.p)? {
+                        let comparison = objstore::compare(&old, source)?;
+                        let changed = comparison.files.iter().any(|change| !skip_path(change.path()));
+                        compared = Some(comparison);
+                        changed
+                    } else {
+                        crate::changes::any_file_change(&old, &source, skip_path)?
+                    }
                 }
             };
             if !changed {
@@ -588,7 +601,11 @@ impl Repo<'_> {
                     barrier("final_complete")?;
                 }
                 barrier("objects")?;
-                objstore::prepare_state(self, &mut state, &tree.source(self)?)?;
+                if let Some(compared) = compared {
+                    compared.prepare(&self.p, &mut state)?;
+                } else {
+                    objstore::prepare_state(self, &mut state, &tree.source(self)?)?;
+                }
                 Capture::State { state: Box::new(state), tree }
             }
         };
