@@ -5,6 +5,7 @@
 # cache folder as a plain folder; the save-back makes it a cache first, so the first build of a platform is saved.
 # A pending fast-forward queue entry into main gives its caches back as main's next head: a server queue merges it
 # only after its checks passed, so none runs on the head.
+# A queue candidate (main's head merged with a pending entry) gives its caches back the same way.
 . "$(dirname "$0")/lib.sh"
 needs_nested_sandbox
 [ "$(id -u)" != 0 ] || { echo "$(basename "$0") (not as root): 0 passed, 0 failed"; exit 0; }
@@ -69,6 +70,36 @@ for kind in fast-forward titled; do
 done
 eq "a fast-forward entry's check gives its caches back as main's next head" fast-forward "$(cat "$P/w-fast-forward/target/a" 2>&1)"
 no "a titled entry merges as a new state: its check gives nothing back" grep -qx titled "$P/w-titled/target/a"
+
+# A queue candidate gives its caches back as main's next head too: the merge job checks main's head merged with
+# a pending entry that is no fast-forward, and moves main to that merge after its checks passed.
+cd "$P/main" || exit 1
+base=$(l log --json -n 1 "$head" | python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["parents"][0])')
+l config check.unit 'mkdir -p target && cat stamp $(ls extra 2>/dev/null) > target/a' >/dev/null
+l line new cand-entry "$base" >/dev/null 2>&1
+cd "$P/cand-entry" || exit 1
+echo candidate > extra; l add extra >/dev/null; l save -qm "add extra" >/dev/null
+entry=$(l rev-parse cand-entry)
+l queue add cand-entry >/dev/null
+l line new cand "$head" >/dev/null 2>&1
+cd "$P/cand" || exit 1
+l merge "$entry" >/dev/null 2>&1
+candidate=$(l rev-parse cand)
+id() { l log --json -n 1 "$1" | python3 -c 'import json,sys; r=json.loads(sys.stdin.readline()); print(" ".join(r[sys.argv[1]]) if sys.argv[1] == "parents" else r["id"])' "${2:-id}"; }
+eq "the candidate merges main's head with the entry" "$(id "$head") $(id "$entry")" "$(id "$candidate" parents)"
+l approve "$candidate" >/dev/null 2>&1
+l push archive -q >/dev/null 2>&1
+cd "$T/c/store/projects/p/lines/main" || exit 1
+cl fetch origin -q >/dev/null 2>&1
+out=$(cl checks run --state "$candidate" --json 2>/dev/null)
+has "the runner checks the candidate" '"exit":0' "$out"
+cl push origin -q >/dev/null 2>&1
+cd "$P/main" || exit 1
+l fetch archive -q >/dev/null 2>&1
+l line new w-cand "$candidate" >/dev/null 2>&1
+eq "a queue candidate's check gives its caches back as main's next head" "$(printf 'main\ncandidate')" "$(cat "$P/w-cand/target/a" 2>&1)"
+l queue remove "$(l queue list --json | python3 -c 'import json,sys; print([e["id"] for e in json.load(sys.stdin) if e["status"]=="pending"][0])')" >/dev/null 2>&1
+l config check.unit 'mkdir -p target && cat stamp > target/a' >/dev/null
 
 # The runner's queue (a server queue) moves its own main to the entry. A machine whose main stays an older head
 # still fetches the cache saved with the runner's head: --line follows every machine's head of main.
