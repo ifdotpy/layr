@@ -532,6 +532,33 @@ fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: boo
             }
         }
     }
+    // A queue candidate of a pending entry is the line's next head as well. The merge job of Layr Cloud checks
+    // a candidate (the line's head merged with the entry, or a merge train of squashes onto the head) and moves
+    // the line to it after its checks passed, so no check runs on the head it becomes. Without this, no check gave
+    // its caches back once candidates replaced fast-forward entries: every check built cold, and the cache lines
+    // kept their heads of 2026-11-09 until 2026-11-18.
+    let mut candidates = Vec::new();
+    for (id, (line, _)) in &watched_lines {
+        let pending: BTreeSet<String> = repo
+            .p
+            .db
+            .queue_entries(Some(id))?
+            .into_iter()
+            .filter(|entry| entry.status == "pending")
+            .map(|entry| entry.state)
+            .collect();
+        if pending.is_empty() {
+            continue;
+        }
+        let line_heads: BTreeSet<String> = repo.p.db.line_heads(id)?.into_iter().map(|(_, head)| head).collect();
+        let states: BTreeSet<&String> = jobs.iter().map(|(state, _)| state).collect();
+        for state in states {
+            if !heads.contains_key(state) && queue_candidate(repo, state, &line_heads, &pending) {
+                candidates.push((state.clone(), line.clone()));
+            }
+        }
+    }
+    heads.extend(candidates);
     if let Some(state) = state {
         jobs.retain(|(s, _)| s == state);
     }
@@ -557,6 +584,33 @@ fn order_jobs(jobs: BTreeSet<(String, String)>, platforms: &Value) -> Vec<(Strin
         .flat_map(|(state, name)| platforms_of(platforms, &name).into_iter().map(move |p| (state.clone(), name.clone(), p)))
         .filter(|job| seen.insert(job.clone()))
         .collect()
+}
+
+/// Whether `state` is a queue candidate of a pending entry onto a head of the line: a merge whose first parent is
+/// the head and whose second parent is the entry's state, or a merge train (docs/merge.md): single-parent squashes
+/// down to the head, each one naming a pending entry in its `Layr-Queued-State` trailer.
+fn queue_candidate(repo: &Repo, state: &str, line_heads: &BTreeSet<String>, pending: &BTreeSet<String>) -> bool {
+    let mut at = state.to_string();
+    for _ in 0..64 {
+        let Ok(s) = repo.state(&at) else {
+            return false;
+        };
+        match s.parents.as_slice() {
+            [head, entry] => return at == state && line_heads.contains(head) && pending.contains(entry),
+            [below] => {
+                let queued = s.message.lines().rev().find_map(|line| line.strip_prefix("Layr-Queued-State: "));
+                if !queued.is_some_and(|entry| pending.contains(entry)) {
+                    return false;
+                }
+                if line_heads.contains(below) {
+                    return true;
+                }
+                at = below.clone();
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The states in the history of the heads of the protected lines.

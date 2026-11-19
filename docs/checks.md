@@ -131,7 +131,9 @@ that they take on demand ([remotes](remotes.md)). A protected
 head is reviewed code built in the sandbox, so these caches count as caches of a protected line for
 other users. A pending fast-forward entry of the queue into such a line counts as its next head: a server
 queue (Layr Cloud) merges an entry only after its checks passed, so no check runs on the head it becomes, and the
-entry's passing check gives the caches back instead. A titled entry merges as a new squash state and gives nothing
+entry's passing check gives the caches back instead. A queue candidate of a pending entry counts as the next head
+as well: the merge job of Layr Cloud checks the head merged with the entry (or a merge train of squashes onto the
+head, each naming a pending entry in its `Layr-Queued-State` trailer) and moves the line to it. A titled entry merges as a new squash state and gives nothing
 back. A check of any other state, such as a pull request, gives nothing back. A privileged
 check gives nothing back either: its copy is a plain folder of root. A runner that pushes after its
 checks publishes the caches: `layr fetch <remote>`, `layr checks run --state <head>` (or
