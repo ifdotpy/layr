@@ -374,18 +374,23 @@ impl<'a> Repo<'a> {
         })
     }
 
-    /// Destruction is allowed only in a private copy. Live builds do not share Layr's line lock,
-    /// and a negative writer probe cannot establish exclusion on every supported platform.
+    /// Non-empty output may be destroyed only in a private copy. An atomic rmdir can discard an
+    /// empty live folder without losing output from builds that do not share Layr's line lock.
     fn cold_cache(&self, cache: &CacheFolder<'_>, at: &Path, access: CacheAccess, uid: u32, gid: u32) -> Result<()> {
         let (root, folder) = (cache.root, cache.relative);
         let path = fsutil::safe_join(root, folder)?;
+        let tree = crate::tree::Tree::open(root)?;
         if path.symlink_metadata().is_ok() {
-            anyhow::ensure!(access == CacheAccess::Prepared,
+            anyhow::ensure!(access == CacheAccess::Prepared || tree.rmdir(folder),
                 "cache {folder}: incompatible or missing location provenance; cannot exclude active builds; output left intact. Stop builds and remove the cache folder. Before rebuilding, declare this exact folder regenerable (a literal .layrattributes rule or the regenerable config list), then rerun Layr to establish cold output; a wildcard alone cannot initialize an absent folder");
-            fsutil::remove_entry(root, folder)?;
+            if access == CacheAccess::Prepared {
+                fsutil::remove_entry(root, folder)?;
+            }
+        }
+        if access == CacheAccess::Live && root != at {
+            return Ok(()); // Move preflight: initialize only at the final build location.
         }
         // Unlike make_cache, creation must fail on a racing pre-existing directory: never stamp it.
-        let tree = crate::tree::Tree::open(root)?;
         tree.mkdirs_for(folder, Some((uid, gid)))?;
         tree.create_subvolume(folder)?;
         let dir = tree.open_folder(folder)?;
@@ -1801,6 +1806,44 @@ fn build_running(dir: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::overlay::folder_path;
+
+    #[test]
+    fn private_cold_cache_discards_unknown_output() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-cold-cache-{}", ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let store = crate::store::Store::open(&root.join("store"))?;
+        if !crate::fs::host().namespace.supported(&store.root) {
+            return Ok(());
+        }
+        let dir = store.project_dir("cold-cache")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let p = crate::store::Project {
+            lease: Default::default(),
+            store: &store,
+            name: "cold-cache".into(),
+            dir: dir.clone(),
+            id: ids::new_id(),
+            db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+        };
+        let repo = Repo { restore_from_remote: true, p, ctx: None };
+        let working = dir.join("working");
+        std::fs::create_dir_all(working.join("target"))?;
+        let working_cleanup = crate::repo::Temp::existing(working.clone())?;
+        std::fs::write(working.join("target/unknown"), "old output")?;
+        let cache = CacheFolder { root: &working, relative: "target" };
+        repo.cold_cache(
+            &cache,
+            &working,
+            CacheAccess::Prepared,
+            rustix::process::geteuid().as_raw(),
+            rustix::process::getegid().as_raw(),
+        )?;
+        assert!(!working.join("target/unknown").exists());
+        assert_eq!(Provenance::read(&working.join("target")), Some(repo.provenance("target", &working, &working)?));
+        working_cleanup.discard()?;
+        Ok(())
+    }
 
     fn location_key(workspace: &str, target: &str, mobility: CacheMobility) -> CacheKey {
         let provenance = Provenance { location: BuildLocation::new(Path::new(workspace), target).unwrap(), mobility };
