@@ -1473,7 +1473,8 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(all_confirmed(&confirmed, &left));
         assert!(!all_confirmed(&confirmed, &[state_id(50_000)]));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+        // A quadratic check of 50,000 states takes minutes; 10 s leaves room for a loaded CI runner.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     }
 
     /// A window of small parts is one run of the transfer pool and holds at most half of the operation cache. With the
