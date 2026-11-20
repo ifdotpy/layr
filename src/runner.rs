@@ -813,7 +813,7 @@ pub fn serve(root: &Path) -> Result<()> {
         if started.elapsed() > Duration::from_secs(60) {
             backoff = 1;
         }
-        let jitter = rand::random::<u64>() % 1000;
+        let jitter = crate::ids::random_u64() % 1000;
         let wait = Duration::from_millis(backoff * 1000 + jitter);
         let until = std::time::Instant::now() + wait;
         while std::time::Instant::now() < until {

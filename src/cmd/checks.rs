@@ -1302,7 +1302,7 @@ fn execute(
     std::fs::DirBuilder::new().mode(0o700).create(&home)?;
     let scratch = home.join("tmp");
     std::fs::DirBuilder::new().mode(0o700).create(&scratch)?;
-    let link = std::path::Path::new("/tmp").join(format!("lct-{:016x}", rand::random::<u64>()));
+    let link = std::path::Path::new("/tmp").join(format!("lct-{:016x}", crate::ids::random_u64()));
     std::os::unix::fs::symlink(&scratch, &link)?;
     let _link = TempLink(link);
     let seed = ctx.caller.home.join("Library/Application Support/Layr/checks");
@@ -1393,7 +1393,7 @@ mod macos_tests {
     #[test]
     fn sandbox_allows_only_unix_sockets_inside_work() -> Result<()> {
         use std::os::unix::net::UnixListener;
-        let root = std::path::Path::new("/private/var/tmp").join(format!("lsc-{:016x}", rand::random::<u64>()));
+        let root = std::path::Path::new("/private/var/tmp").join(format!("lsc-{:016x}", crate::ids::random_u64()));
         std::fs::create_dir(&root)?;
         let cleanup = crate::repo::Temp::existing(root.clone())?;
         let work = root.join("work");

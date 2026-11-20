@@ -102,8 +102,8 @@ pub fn view(ctx: &Ctx, args: &[String]) -> Result<i32> {
             bail!("{} already exists", dst.display());
         }
         let tmp = crate::model::Line {
-            id: format!("view-{:016x}", rand::random::<u64>()),
-            name: format!(".view-{:016x}", rand::random::<u64>()),
+            id: format!("view-{:016x}", crate::ids::random_u64()),
+            name: format!(".view-{:016x}", crate::ids::random_u64()),
             head: view.shared.clone(),
             owner: ctx.caller.uid,
             machine: h.repo.p.store.machine.id.clone(),
