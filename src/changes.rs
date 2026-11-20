@@ -7,8 +7,9 @@ use crate::compare::DataEvidence;
 pub use crate::compare::EntryChange;
 use crate::fsutil::{self, Meta, Src};
 use anyhow::Result;
+use layr_hashers::FastSet;
 use layr_hashers::{FastCryptographic, PurposeHasher};
-use layr_hashers::{FastMap, FastSet};
+use layr_matching::Candidates;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -279,10 +280,13 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     let mut used_d: FastSet<usize> = FastSet::default();
     let mut used_a: FastSet<usize> = FastSet::default();
-    // Exact: same size and same bytes. Each candidate is read and hashed once; the chosen pair
-    // is compared byte by byte.
+    let mut unreadable_d: FastSet<usize> = FastSet::default();
+    // Exact: same size and same bytes. Hash each candidate once and verify pairs byte by byte.
+    // Consume exact candidates in input order, including failed reads and byte mismatches:
+    // each indexed deletion gets at most one exact verification. Readable mismatches remain
+    // eligible for the separately capped similarity search.
     let hash = |bytes: &[u8]| <FastCryptographic as PurposeHasher>::hash(bytes);
-    let mut by_key: FastMap<(u64, [u8; 32]), Vec<usize>> = FastMap::default();
+    let mut by_key = Candidates::default();
     let del_sizes: HashSet<u64> = dels.iter().filter_map(|&d| v[d].old().map(|m| m.size)).collect();
     let add_sizes: HashSet<u64> = adds.iter().filter_map(|&a| v[a].new().map(|m| m.size)).collect();
     for &d in &dels {
@@ -290,7 +294,9 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
         let size = old.size;
         if add_sizes.contains(&size) {
             if let Some(x) = read_parent(v[d].path()) {
-                by_key.entry((size, hash(&x))).or_default().push(d);
+                by_key.insert((size, hash(&x)), d);
+            } else {
+                unreadable_d.insert(d);
             }
         }
     }
@@ -301,18 +307,20 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
             continue;
         }
         let Some(ad) = read_child(v[a].path()) else { continue };
-        let Some(ds) = by_key.get(&(size, hash(&ad))) else { continue };
-        for &d in ds {
-            if !used_d.contains(&d) && read_parent(v[d].path()).as_ref() == Some(&ad) {
-                pairs.push((d, a));
-                used_d.insert(d);
-                used_a.insert(a);
-                break;
+        if let Some(d) = by_key.take_matching(&(size, hash(&ad)), |&d| match read_parent(v[d].path()) {
+            Some(bytes) => bytes == ad,
+            None => {
+                unreadable_d.insert(d);
+                false
             }
+        }) {
+            pairs.push((d, a));
+            used_d.insert(d);
+            used_a.insert(a);
         }
     }
     // Similar content, for small lists.
-    let rd: Vec<usize> = dels.iter().copied().filter(|d| !used_d.contains(d)).collect();
+    let rd: Vec<usize> = dels.iter().copied().filter(|d| !used_d.contains(d) && !unreadable_d.contains(d)).collect();
     let ra: Vec<usize> = adds.iter().copied().filter(|a| !used_a.contains(a)).collect();
     if !rd.is_empty() && !ra.is_empty() && rd.len() * ra.len() <= 400 {
         let mut scored: Vec<(f32, usize, usize)> = Vec::new();
@@ -343,23 +351,29 @@ pub fn with_renames(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), v
             }
         }
     }
-    // Symlinks are moves only when their targets match exactly.
-    for (d, deleted) in v.iter().enumerate() {
-        if !deleted.old().is_some_and(|m| m.ftype == crate::fsutil::FType::Symlink) || deleted.new().is_some() {
-            continue;
-        }
-        let Ok(target) = crate::fsutil::read_link_bytes(parent, deleted.path()) else { continue };
+    // Symlinks are moves only when their raw targets match exactly. Index each addition once
+    // and consume in input order, for expected linear work in entries and target bytes.
+    let deleted_links: Vec<_> = v
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.old().is_some_and(|m| m.ftype == crate::fsutil::FType::Symlink) && c.new().is_none())
+        .collect();
+    let mut links = Candidates::default();
+    if !deleted_links.is_empty() {
         for (a, added) in v.iter().enumerate() {
-            if !used_a.contains(&a)
-                && added.old().is_none()
-                && added.new().is_some_and(|m| m.ftype == crate::fsutil::FType::Symlink)
-                && crate::fsutil::read_link_bytes(child, added.path()).ok().as_ref() == Some(&target)
-            {
-                pairs.push((d, a));
-                used_d.insert(d);
-                used_a.insert(a);
-                break;
+            if added.old().is_none() && added.new().is_some_and(|m| m.ftype == crate::fsutil::FType::Symlink) {
+                if let Ok(target) = crate::fsutil::read_link_bytes(child, added.path()) {
+                    links.insert(target, a);
+                }
             }
+        }
+    }
+    for (d, deleted) in deleted_links {
+        let Ok(target) = crate::fsutil::read_link_bytes(parent, deleted.path()) else { continue };
+        if let Some(a) = links.take_matching(&target, |_| true) {
+            pairs.push((d, a));
+            used_d.insert(d);
+            used_a.insert(a);
         }
     }
     let mut out: Vec<EntryChange> = Vec::new();
@@ -476,6 +490,27 @@ mod tests {
         }
         fn folder(&self) -> Option<&Path> {
             Some(&self.0)
+        }
+    }
+
+    /// A source whose candidates become unreadable or change after the indexing reads.
+    struct Changing {
+        before: PathBuf,
+        after: Option<PathBuf>,
+        reads: AtomicUsize,
+        count: usize,
+    }
+    impl Src for Changing {
+        fn folder(&self) -> Option<&Path> {
+            Some(&self.before)
+        }
+        fn at(&self, rel: &str) -> Result<PathBuf> {
+            let root = if self.reads.fetch_add(1, Ordering::Relaxed) < self.count {
+                &self.before
+            } else {
+                self.after.as_ref().ok_or_else(|| anyhow::anyhow!("candidate became unreadable"))?
+            };
+            fsutil::safe_join(root, rel)
         }
     }
 
@@ -651,6 +686,169 @@ mod tests {
         let reads = parent.1.load(Ordering::Relaxed) + child.1.load(Ordering::Relaxed);
         assert!(reads <= 4 * n + 2, "{reads} reads for {n} + {n} candidates");
         std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[test]
+    fn duplicate_renames_keep_input_order_and_metadata() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-duplicate-renames-{}", crate::ids::new_id()));
+        let (parent, child) = (tmp.join("parent"), tmp.join("child"));
+        std::fs::create_dir_all(&parent)?;
+        std::fs::create_dir_all(&child)?;
+        let mut changes = Vec::new();
+        for i in (0..32).rev() {
+            std::fs::write(parent.join(format!("old{i:02}")), b"same")?;
+            std::fs::write(child.join(format!("new{i:02}")), b"same")?;
+            changes.push(EntryChange::Remove { path: format!("old{i:02}"), old: meta(4) });
+            changes.push(EntryChange::Add { path: format!("new{i:02}"), new: Meta { mode: 0o755, ..meta(4) } });
+        }
+        // Surplus entries, inaccessible candidates and oversized files must remain unmatched.
+        std::fs::write(parent.join("surplus"), b"same")?;
+        changes.push(EntryChange::Remove { path: "surplus".into(), old: meta(4) });
+        changes.push(EntryChange::Remove { path: "missing-old".into(), old: meta(4) });
+        changes.push(EntryChange::Add { path: "missing-new".into(), new: meta(4) });
+        changes.push(EntryChange::Remove { path: "large-old".into(), old: meta(fsutil::MAX_TEXT + 1) });
+        changes.push(EntryChange::Add { path: "large-new".into(), new: meta(fsutil::MAX_TEXT + 1) });
+        let out = with_renames(&parent, &child, changes);
+        assert_eq!(out.len(), 37);
+        for (i, change) in out.iter().filter(|c| c.old_path().is_some()).enumerate() {
+            assert_eq!(change.path(), &format!("new{i:02}"));
+            assert_eq!(change.src(), &format!("old{i:02}"));
+            assert_eq!(change.old().unwrap().mode, 0o644);
+            assert_eq!(change.new().unwrap().mode, 0o755);
+        }
+        assert_eq!(out.iter().filter(|c| c.old_path().is_some()).count(), 32);
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_exact_rename_candidates_keep_bounded_read_counts() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-stale-renames-{}", crate::ids::new_id()));
+        let (before, after, child) = (tmp.join("before"), tmp.join("after"), tmp.join("child"));
+        for path in [&before, &after, &child] {
+            std::fs::create_dir_all(path)?;
+        }
+        // Exercise both sides of the separate 400-pair similarity limit below.
+        let count = 32;
+        let mut changes = Vec::new();
+        for i in 0..count {
+            std::fs::write(before.join(format!("old{i}")), b"same")?;
+            std::fs::write(after.join(format!("old{i}")), b"else")?;
+            std::fs::write(child.join(format!("new{i}")), b"same")?;
+            changes.push(EntryChange::Remove { path: format!("old{i}"), old: meta(4) });
+            changes.push(EntryChange::Add { path: format!("new{i}"), new: meta(4) });
+        }
+        for count in [1, count] {
+            for replacement in [None, Some(after.clone())] {
+                let similarity_reads = usize::from(count == 1 && replacement.is_some());
+                let parent = Changing { before: before.clone(), after: replacement, reads: AtomicUsize::new(0), count };
+                let out = with_renames(&parent, &child, changes[..2 * count].to_vec());
+                assert_eq!(
+                    parent.reads.load(Ordering::Relaxed),
+                    2 * count + similarity_reads,
+                    "one indexing read and one exact verification per deletion, plus capped similarity for readable candidates"
+                );
+                assert_eq!(out.len(), 2 * count);
+                assert!(out.iter().all(|c| c.old_path().is_none()), "failed verification never establishes a rename");
+            }
+        }
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn readable_exact_rejections_remain_eligible_for_similarity() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-readable-rename-{}", crate::ids::new_id()));
+        let (before, after, child) = (tmp.join("before"), tmp.join("after"), tmp.join("child"));
+        for path in [&before, &after, &child] {
+            std::fs::create_dir_all(path)?;
+        }
+        std::fs::write(before.join("old"), b"a\nb\nc\nd\n")?;
+        std::fs::write(after.join("old"), b"w\nx\ny\nz\n")?;
+        std::fs::write(child.join("new1"), b"a\nb\nc\nd\n")?;
+        std::fs::write(child.join("new2"), b"w\nx\ny\nq\n")?;
+        let parent = Changing { before, after: Some(after), reads: AtomicUsize::new(0), count: 1 };
+        let out = with_renames(
+            &parent,
+            &child,
+            vec![
+                EntryChange::Remove { path: "old".into(), old: meta(8) },
+                EntryChange::Add { path: "new1".into(), new: meta(8) },
+                EntryChange::Add { path: "new2".into(), new: meta(8) },
+            ],
+        );
+        std::fs::remove_dir_all(tmp)?;
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&out[0], EntryChange::Add { path, .. } if path == "new1"));
+        assert_eq!(out[1].path(), "new2");
+        assert_eq!(out[1].old_path().map(String::as_str), Some("old"));
+        assert_eq!(parent.reads.load(Ordering::Relaxed), 3, "index, exact verification, then capped similarity");
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_renames_read_targets_once_and_keep_input_order() -> Result<()> {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let tmp = std::env::temp_dir().join(format!("layr-symlink-renames-{}", crate::ids::new_id()));
+        let (p, c) = (tmp.join("parent"), tmp.join("child"));
+        std::fs::create_dir_all(&p)?;
+        std::fs::create_dir_all(&c)?;
+        let link = Meta { ftype: fsutil::FType::Symlink, ..meta(0) };
+        let count = 64;
+        let mut changes = Vec::new();
+        for i in (0..count).rev() {
+            // Duplicate non-UTF-8 targets pair; disjoint targets do not.
+            let before = if i % 2 == 0 { b"same-\xff".to_vec() } else { format!("before-{i}").into_bytes() };
+            let after = if i % 2 == 0 { b"same-\xff".to_vec() } else { format!("after-{i}").into_bytes() };
+            symlink(std::ffi::OsStr::from_bytes(&before), p.join(format!("old{i:02}")))?;
+            symlink(std::ffi::OsStr::from_bytes(&after), c.join(format!("new{i:02}")))?;
+            changes.push(EntryChange::Remove { path: format!("old{i:02}"), old: link.clone() });
+            changes.push(EntryChange::Add { path: format!("new{i:02}"), new: link.clone() });
+        }
+        changes.push(EntryChange::Remove { path: "missing-old".into(), old: link.clone() });
+        changes.push(EntryChange::Add { path: "missing-new".into(), new: link });
+        let (parent, child) = (Counting(p, AtomicUsize::new(0)), Counting(c, AtomicUsize::new(0)));
+        let out = with_renames(&parent, &child, changes);
+        assert_eq!(out.len(), count + count / 2 + 2);
+        let renames: Vec<_> = out.iter().filter(|c| c.old_path().is_some()).collect();
+        assert_eq!(renames.len(), count / 2);
+        for (i, change) in renames.iter().enumerate() {
+            assert_eq!(change.path(), &format!("new{:02}", 2 * i));
+            assert_eq!(change.src(), &format!("old{:02}", 2 * i));
+        }
+        assert_eq!(parent.1.load(Ordering::Relaxed), count + 1, "each deleted target is read once");
+        assert_eq!(child.1.load(Ordering::Relaxed), count + 1, "each added target is read once");
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn similar_renames_still_match_after_exact_search() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-similar-renames-{}", crate::ids::new_id()));
+        let (parent, child) = (tmp.join("parent"), tmp.join("child"));
+        std::fs::create_dir_all(&parent)?;
+        std::fs::create_dir_all(&child)?;
+        std::fs::write(parent.join("old"), b"a\nb\nc\nd\n")?;
+        std::fs::write(child.join("new"), b"a\nb\nc\ne\n")?;
+        let out = with_renames(
+            &parent,
+            &child,
+            vec![EntryChange::Remove { path: "old".into(), old: meta(8) }, EntryChange::Add { path: "new".into(), new: meta(8) }],
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].src(), "old");
+        assert_eq!(out[0].path(), "new");
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn added_symlinks_without_deletions_do_not_read_targets() {
+        let parent = Counting(PathBuf::from("/"), AtomicUsize::new(0));
+        let child = Counting(PathBuf::from("/"), AtomicUsize::new(0));
+        let changes = vec![EntryChange::Add { path: "missing".into(), new: Meta { ftype: fsutil::FType::Symlink, ..meta(0) } }];
+        assert_eq!(with_renames(&parent, &child, changes).len(), 1);
+        assert_eq!(child.1.load(Ordering::Relaxed), 0);
     }
 }
 

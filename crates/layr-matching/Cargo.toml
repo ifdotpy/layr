@@ -1,0 +1,10 @@
+[lints]
+workspace = true
+
+[package]
+name = "layr-matching"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license = "MIT"
+publish = false
