@@ -10,6 +10,7 @@ members = [
   "crates/layr-api",
   "crates/layr-store",
   "crates/layr-model",
+  "crates/layr-matching",
   "crates/layr-retest",
   "crates/layr-cache",
   "crates/layr-adapter",
@@ -56,6 +57,7 @@ layr-object-format = { layer = 1, dependencies = [
 layr-store = { layer = 1, dependencies = ["layr-hashers", "layr-object-format"] }
 layr-cache = { layer = 1, dependencies = ["layr-adapter"] }
 layr-model = { layer = 2, dependencies = ["layr-hashers", "layr-store", "layr-types"] }
+layr-matching = { layer = 0, dependencies = [], leaf = true, normal-dependencies = [] }
 layr-objects = { layer = 2, dependencies = ["layr-fs-core", "layr-hashers", "layr-object-format", "layr-store"] }
 layr-retest = { layer = 2, dependencies = ["layr-cache"] }
 layr = { layer = 3, dependencies = [
@@ -64,6 +66,7 @@ layr = { layer = 3, dependencies = [
   "layr-cache",
   "layr-hashers",
   "layr-model",
+  "layr-matching",
   "layr-objects",
   "layr-retest",
   "layr-store",
@@ -117,6 +120,7 @@ layr-types = { path = "crates/core/types" }
 layr-api = { path = "crates/layr-api" }
 layr-store = { path = "crates/layr-store" }
 layr-model = { path = "crates/layr-model" }
+layr-matching = { path = "crates/layr-matching" }
 layr-retest = { path = "crates/layr-retest" }
 layr-adapter = { path = "crates/layr-adapter" }
 layr-cache = { path = "crates/layr-cache" }
