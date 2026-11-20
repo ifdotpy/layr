@@ -523,20 +523,30 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         let identity = layer_identity(store, &orepo.p.id, &published)?;
         let scoped = layer(store, &published, identity.clone(), repo.chunked_overlay(&name)?)?;
         if let Some(identity) = &identity {
+            // A slot never changes within an epoch, and a conditional write of one that is there still costs a
+            // request: one listing finds the slots that exist, and only the missing ones are written. A listing
+            // that fails writes them all, as before.
+            let present: BTreeSet<String> =
+                scoped.backend.list("slots/").map(|objects| objects.into_iter().map(|o| o.key).collect()).unwrap_or_default();
+            let put_slot = |key: String, body: &dyn Fn() -> Result<Vec<u8>>| -> Result<()> {
+                if !present.contains(&key) {
+                    scoped.backend.put_new(&key, body()?)?;
+                }
+                Ok(())
+            };
             for principal in readers.keys() {
                 if let Some(machine) = principal.strip_prefix("machine:") {
                     if let Some(public) = trusted.get(machine) {
-                        scoped.backend.put_new(&format!("slots/machine-{machine}.age"), keys::machine_slot(identity, public)?)?;
+                        put_slot(format!("slots/machine-{machine}.age"), &|| keys::machine_slot(identity, public))?;
                     }
                 } else if let Some((login, recipient)) = principal.strip_prefix("person:").and_then(|s| s.split_once('=')) {
-                    scoped.backend.put_new(
-                        &format!("slots/{}", layr_store::person::slot_name(login, recipient)?),
-                        keys::seal_slot(identity, recipient)?,
-                    )?;
+                    put_slot(format!("slots/{}", layr_store::person::slot_name(login, recipient)?), &|| {
+                        keys::seal_slot(identity, recipient)
+                    })?;
                 }
             }
             if let Some(recipient) = &paper_recipient {
-                scoped.backend.put_new("slots/paper.age", keys::seal_slot(identity, recipient)?)?;
+                put_slot("slots/paper.age".into(), &|| keys::seal_slot(identity, recipient))?;
             } else if !repo.shares_with_machines(&name)? {
                 // An overlay that the trusted machines share is regenerable: the paper key need not open it.
                 report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
@@ -548,17 +558,27 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
         let selected = layer_selection(repo, &orepo, opts)?;
-        merge(report, writer::push_locked(&scoped, ctx, &orepo, &selected)?, &name, "push");
+        let pushed = writer::push_locked(&scoped, ctx, &orepo, &selected)?;
+        let moved = pushed.records > 0 || pushed.states > 0;
+        merge(report, pushed, &name, "push");
         // The push record names the epoch and the store, so eviction counts a copy only where readers find it.
         if let Some((_, transfer)) = report.overlay_transfers.last_mut().filter(|(n, _)| *n == name) {
             transfer.epoch = Some(published.key.epoch.clone());
             transfer.store = Some(descriptor.recipient.clone());
         }
         // The push makes the old caches of the overlay dead on the remote too: delete them now.
-        // The sweep never fails the push: what it cannot delete now waits for a later pass.
-        if !opts.no_cache_sweep && repo.limited_history(&name)? {
+        // The sweep never fails the push: what it cannot delete now waits for a later pass. A pass reads every kept
+        // tree from the remote, so a push that sent nothing skips it while the kept set is the one of the last pass of
+        // this machine and that pass is younger than the chunk grace (`sweep_due`).
+        if moved && std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace sweep of {name} is due: the push sent records or states");
+        }
+        if !opts.no_cache_sweep && repo.limited_history(&name)? && (moved || sweep_due(repo, &name, &scoped)?) {
             match sweep_layer(repo, &name, &orepo, &scoped, false) {
                 Ok(swept) => {
+                    if swept.refused.is_none() {
+                        note_sweep(repo, &name, &scoped);
+                    }
                     if !swept.trees.is_empty() || !swept.packs.is_empty() {
                         eprintln!(
                             "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes), {} dead chunk(s) in {} pack object(s) ({} bytes) in the remote",
@@ -872,6 +892,44 @@ fn layer_identity(store: &Store, overlay: &str, published: &Published) -> Result
         }
     }
     Ok(identity)
+}
+
+/// The file in the layer store where a push notes its last complete sweep pass: the time, then the kept states.
+const SWEEP_PASS: &str = "sweep-pass";
+
+fn kept_text(repo: &Repo, name: &str) -> Result<Option<String>> {
+    Ok(repo.cache_kept(name)?.map(|kept| kept.into_iter().collect::<Vec<_>>().join("\n")))
+}
+
+/// Whether a push that sent nothing to cache overlay `name` sweeps its layer `scoped`: when the kept set changed since
+/// the last complete pass of this machine (a line went, another push made a state live), when no pass is noted, or when
+/// the noted pass is older than the chunk grace (dead chunks wait for a second pass that late).
+fn sweep_due(repo: &Repo, name: &str, scoped: &Store) -> Result<bool> {
+    let due = |reason: &str| {
+        if std::env::var_os("LAYR_TRACE").is_some() {
+            eprintln!("trace sweep of {name} is due: {reason}");
+        }
+        Ok(true)
+    };
+    let Some(kept) = kept_text(repo, name)? else { return due("no kept set") };
+    let Ok(noted) = std::fs::read_to_string(scoped.dir.join(SWEEP_PASS)) else { return due("no pass noted") };
+    let Some((time, ids)) = noted.split_once('\n') else { return due("the note is damaged") };
+    let Ok(time) = time.parse::<i64>() else { return due("the note is damaged") };
+    if ids != kept {
+        return due("the kept set changed");
+    }
+    if chrono::Utc::now().timestamp() - time >= super::sweep::chunk_grace() {
+        return due("the last pass is older than the chunk grace");
+    }
+    Ok(false)
+}
+
+/// Note a complete pass for `sweep_due`. A failed write only makes the next push sweep again.
+fn note_sweep(repo: &Repo, name: &str, scoped: &Store) {
+    if let Ok(Some(kept)) = kept_text(repo, name) {
+        let text = format!("{}\n{kept}", chrono::Utc::now().timestamp());
+        let _ = crate::fsutil::atomic_write(&scoped.dir.join(SWEEP_PASS), text.as_bytes(), 0o600);
+    }
 }
 
 /// The sweep of the layer `scoped` of cache overlay `name` (`sweep::sweep`) with the live set of the records.
