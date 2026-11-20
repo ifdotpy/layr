@@ -776,15 +776,29 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
 
 /// History selection needs only membership: filter before reading content and keep both move
 /// endpoints. Pairing separate adds/deletes as renames cannot change that membership.
-fn state_touches(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<bool> {
+fn state_touches(repo: &Repo, s: &StateRec, specs: &[String], selected: Option<&BTreeSet<String>>) -> Result<bool> {
     repo.source_state(&s.id)?;
     if let Some(sides) = git_sides(repo, s, specs)? {
         return Ok(sides.changes.iter().any(|c| !skip_path(c.path())));
     }
+    // A record may outlive its tree. Keep walking ancestors, but do not restore remote trees
+    // or invent changes against an empty parent when either side is unavailable locally.
+    if !repo.tree_available(&s.id) || s.parents.first().is_some_and(|p| !repo.tree_available(p)) {
+        return Ok(false);
+    }
     let root = repo.state_src(&s.id)?;
-    match s.parents.first() {
-        Some(p) => changes::any_file_change(&repo.state_src(p)?, &root, |path| skip_path(path) || !matches(specs, path)),
-        None => Ok(all_files(&root)?.iter().any(|c| matches(specs, c.path()))),
+    let empty;
+    let parent = match s.parents.first() {
+        Some(p) => repo.state_src(p)?,
+        None => {
+            empty = empty_root(repo)?;
+            snap(&empty.path)
+        }
+    };
+    let skip = |path: &str| skip_path(path) || selected.is_none() && !matches(specs, path);
+    match selected {
+        Some(paths) => changes::any_file_change_selected(&parent, &root, paths, skip),
+        None => changes::any_file_change(&parent, &root, skip),
     }
 }
 
@@ -1096,6 +1110,9 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &path_base(ctx, &h), &a)?;
     repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     let specs = h.specs(&paths)?;
+    // Literal roots can be looked up directly. Wildcards and the root keep full matching.
+    let selected = (!specs.iter().any(|s| s.is_empty() || s.contains(['*', '?', '['])))
+        .then(|| specs.iter().cloned().collect::<BTreeSet<_>>());
     let mut include: Vec<String> = Vec::new();
     let mut exclude: BTreeSet<String> = BTreeSet::new();
     let mut add_excl = |id: &str| -> Result<()> {
@@ -1194,7 +1211,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 return Ok(Vec::new());
             }
             // Candidate paths were already filtered; the walker only needs a membership marker.
-            Ok(if state_touches(repo, s, &specs)? { vec![String::new()] } else { Vec::new() })
+            Ok(if state_touches(repo, s, &specs, selected.as_ref())? { vec![String::new()] } else { Vec::new() })
         },
         |_| true,
         |s| {

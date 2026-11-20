@@ -157,14 +157,23 @@ struct CheckedDelta {
     dirty: Vec<Vec<u8>>,
 }
 
-pub fn compare(parent: &crate::repo::Snap, source: crate::repo::Snap) -> Result<Compared> {
+/// Compare `source` with `parent`, everywhere or within a `Selection` outside which they are
+/// equal (an object base still compares everything: its write needs every folder's times).
+pub fn compare(
+    parent: &crate::repo::Snap,
+    source: crate::repo::Snap,
+    selection: Option<&crate::changes::Selection>,
+) -> Result<Compared> {
     use crate::fsutil::Src;
     if let (Some(objects), Some(folder)) = (parent.objects(), source.folder()) {
         let comparison = crate::changes::compare_for_write(parent, folder)?;
         let delta = CheckedDelta { refs: objects.refs, changed: comparison.changed, dirty: comparison.dirty };
         return Ok(Compared { files: comparison.files, source, delta: Some(delta) });
     }
-    let files = crate::changes::file_changes(parent, &source)?;
+    let files = match selection {
+        Some(selection) => crate::changes::file_changes_selected(parent, &source, selection)?,
+        None => crate::changes::file_changes(parent, &source)?,
+    };
     Ok(Compared { files, source, delta: None })
 }
 
@@ -838,7 +847,7 @@ mod tests {
         for i in 0..5 {
             std::fs::write(folder.join(format!("sub/f{i}")), format!("changed {i}"))?;
         }
-        let compared = compare(&parent, crate::repo::snap(&folder))?;
+        let compared = compare(&parent, crate::repo::snap(&folder), None)?;
         assert_eq!(compared.files.len(), 5);
         let CheckedDelta { refs, changed, dirty } = compared.delta.unwrap();
         assert_eq!(changed.len(), 5);
@@ -935,7 +944,7 @@ mod tests {
         std::fs::create_dir(folder.join("empty"))?;
         std::fs::remove_file(folder.join("sub/file"))?;
         std::fs::create_dir(folder.join("sub/file"))?;
-        let compared = compare(&parent, crate::repo::snap(&folder))?;
+        let compared = compare(&parent, crate::repo::snap(&folder), None)?;
         let CheckedDelta { refs, changed, dirty } = compared.delta.unwrap();
         let store = Store::open(&root.join("objects"), Keying::Plain)?;
         let report = layr_objects::write::write_changed_with_dirty_from(

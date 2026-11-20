@@ -776,7 +776,10 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         Vec::new()
     };
+    // The paths a named save compares (`Repo::record_staged`).
+    let before = h.repo.staged_selection(&line)?;
     stage_paths(&h.repo, &line, &scan.path, &paths)?;
+    h.repo.record_staged(&line, before, &paths)?;
     for (what, p) in verbose {
         outln!(ctx, "{what} '{}'", h.rel(p));
     }
@@ -1230,7 +1233,9 @@ fn prepare_named_save<'p, 's>(
     let amend = opts.amend;
     let head_root = repo.state_src(&line.head)?;
     let parents = if amend { head.parents.clone() } else { vec![line.head.clone()] };
-    let publication = crate::source::publication::IndexPublication::prepare(repo, line, &head_root)?;
+    // Outside the paths that `add` recorded for exactly this index, it is the head.
+    let (publication, staged) =
+        repo.freeze_with_selection(line, || crate::source::publication::IndexPublication::prepare(repo, line, &head_root))?;
     let mut state = repo.state_record(
         ctx,
         publication.id().to_owned(),
@@ -1246,7 +1251,7 @@ fn prepare_named_save<'p, 's>(
     }
     let new_root = publication.source()?;
     // An attribute-only change that `add` staged is a change of the state.
-    let compared = crate::objstore::compare(&head_root, new_root.clone())?;
+    let compared = crate::objstore::compare(&head_root, new_root.clone(), staged.as_ref())?;
     let checks = named_checks(ctx, repo, head, &mut state, &head_root, &new_root, line, &compared.files, opts)?;
     if checks.is_some() {
         publication.synchronize()?;

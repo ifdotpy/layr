@@ -89,11 +89,7 @@ fn candidates_with_hints(
         HintSet::Complete(entries) => return Ok(entries),
         HintSet::Partial => {}
     }
-    let mut entries = object_change_candidates(parent, child)?;
-    if let Some(selected) = selection {
-        entries
-            .retain(|change| selected.iter().any(|path| change.path() == path || change.path().starts_with(&format!("{path}/"))));
-    }
+    let mut entries = object_change_candidates_selected(parent, child, selection)?;
     if request.detail == ChangeDetail::Ranges && parent.objects().is_none() && child.objects().is_none() {
         for change in &mut entries {
             if let (Some(old), Some(new)) = (change.old(), change.new()) {
@@ -107,6 +103,59 @@ fn candidates_with_hints(
         }
     }
     Ok(entries)
+}
+
+/// The part of two trees that may differ; elsewhere they are equal.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Selection {
+    /// Paths compared with everything below them.
+    pub subtrees: std::collections::BTreeSet<String>,
+    /// Paths compared alone; a folder on one side only brings its content.
+    pub entries: std::collections::BTreeSet<String>,
+}
+
+/// `file_changes` within a `Selection`.
+pub fn file_changes_selected(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    selection: &Selection,
+) -> Result<Vec<EntryChange>> {
+    file_changes_of(parent, child, selected_candidates(parent, child, selection)?)
+}
+
+/// The candidates of a `Selection`: one walk covers every selected subtree, an entry that is a
+/// folder on one side only included; the other entries are read alone. Each entry is visited
+/// once: O(s log s) for the s entries covered, whatever the size of the trees.
+fn selected_candidates(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    selection: &Selection,
+) -> Result<Vec<EntryChange>> {
+    let inside = |subtrees: &std::collections::BTreeSet<String>, path: &str| {
+        subtrees.contains("")
+            || subtrees.contains(path)
+            || path.match_indices('/').any(|(end, _)| subtrees.contains(&path[..end]))
+    };
+    let mut subtrees = selection.subtrees.clone();
+    let mut alone = Vec::new();
+    // The root is not an entry of a tree.
+    for path in selection.entries.iter().filter(|path| !path.is_empty() && !inside(&selection.subtrees, path)) {
+        let sides = [fsutil::lmeta_checked(parent, path)?, fsutil::lmeta_checked(child, path)?];
+        if sides[0].as_ref().is_some_and(Meta::is_dir) != sides[1].as_ref().is_some_and(Meta::is_dir) {
+            subtrees.insert(path.clone());
+        } else {
+            alone.push((path, sides));
+        }
+    }
+    let mut candidates = object_change_candidates_selected(parent, child, Some(&subtrees))?;
+    candidates.extend(
+        alone
+            .into_iter()
+            .filter(|(path, _)| !inside(&subtrees, path))
+            .filter_map(|(path, [old, new])| EntryChange::observed(path.clone(), old, new, DataEvidence::Unknown)),
+    );
+    candidates.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(candidates)
 }
 
 /// True when the entry changed in a way git would see: type, content, link target or the
@@ -220,7 +269,26 @@ pub fn file_changes_of(
 
 /// Stop at the first confirmed change outside the skipped paths, including either move endpoint.
 pub fn any_file_change(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized), skip: impl Fn(&str) -> bool) -> Result<bool> {
-    for c in candidates_equal(parent, child)? {
+    any_file_change_of(parent, child, candidates_equal(parent, child)?, skip)
+}
+
+/// Confirm only candidates below selected literal paths, without enumerating unrelated trees.
+pub(crate) fn any_file_change_selected(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    paths: &std::collections::BTreeSet<String>,
+    skip: impl Fn(&str) -> bool,
+) -> Result<bool> {
+    any_file_change_of(parent, child, candidates_selected(parent, child, paths)?, skip)
+}
+
+fn any_file_change_of(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    candidates: Vec<EntryChange>,
+    skip: impl Fn(&str) -> bool,
+) -> Result<bool> {
+    for c in candidates {
         if (!skip(c.path()) || c.old_path().is_some_and(|p| !skip(p))) && file_change(parent, child, c)?.is_some() {
             return Ok(true);
         }
@@ -663,6 +731,40 @@ mod tests {
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
+    /// A selection compares its paths and everything below them, never the rest of the trees.
+    #[test]
+    fn selected_changes_are_the_full_changes_of_the_selected_paths() -> Result<()> {
+        let tmp = std::env::temp_dir().join(format!("layr-selected-{}", crate::ids::new_id()));
+        let (p, c) = (tmp.join("p"), tmp.join("c"));
+        for (root, files) in [
+            (&p, &[("a/x", "1"), ("a/y", "2"), ("b", "3"), ("c/d", "4"), ("f", "5")][..]),
+            (&c, &[("a/x", "one"), ("a/y", "2"), ("b/z", "3"), ("c/d", "changed"), ("e", "6")][..]),
+        ] {
+            for (path, data) in files {
+                root.join(path).parent().map(std::fs::create_dir_all).transpose()?;
+                std::fs::write(root.join(path), data)?;
+            }
+        }
+        let selected = ["a", "a/x", "b", "e", "f"].map(String::from).into();
+        let paths = |v: Vec<EntryChange>| v.iter().map(|c| c.path().clone()).collect::<Vec<_>>();
+        let changes = paths(file_changes_of(&p, &c, candidates_selected(&p, &c, &selected)?)?);
+        assert_eq!(changes, ["a/x", "b", "b/z", "e", "f"]);
+        let all = paths(file_changes(&p, &c)?);
+        assert_eq!(all.into_iter().filter(|p| !p.starts_with("c/")).collect::<Vec<_>>(), changes);
+        // An unreadable entry is an error on either side, never an addition or a removal.
+        use std::os::unix::fs::PermissionsExt;
+        let locked: std::collections::BTreeSet<String> = ["c/d".to_owned()].into();
+        for side in [&p, &c] {
+            std::fs::set_permissions(side.join("c"), std::fs::Permissions::from_mode(0o000))?;
+            let unreadable = std::fs::metadata(side.join("c/d")).is_err();
+            let result = candidates_selected(&p, &c, &locked);
+            std::fs::set_permissions(side.join("c"), std::fs::Permissions::from_mode(0o755))?;
+            assert!(!unreadable || result.is_err(), "{result:?}");
+        }
+        std::fs::remove_dir_all(tmp)?;
+        Ok(())
+    }
+
     /// Exact rename search reads each candidate once, not once per pair of candidates.
     #[test]
     fn exact_renames_read_each_candidate_once() {
@@ -855,6 +957,37 @@ mod tests {
 /// Object trees have no native inode stream. Enumerate their entries and let the
 /// content comparison reject unchanged candidates without a checkout.
 fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?Sized)) -> Result<Vec<EntryChange>> {
+    object_change_candidates_selected(parent, child, None)
+}
+
+/// Visit each selected root once, including its own metadata (walk visits only descendants).
+fn walk_selected(
+    source: &(impl Src + ?Sized),
+    selection: Option<&std::collections::BTreeSet<String>>,
+    visit: &mut dyn FnMut(&str, &Meta) -> Result<bool>,
+) -> Result<()> {
+    let Some(paths) = selection.filter(|paths| !paths.contains("")) else {
+        return fsutil::walk(source, "", visit);
+    };
+    for path in paths {
+        // An ancestor in the set already covers this subtree, regardless of lexical neighbours.
+        if path.match_indices('/').any(|(i, _)| paths.contains(&path[..i])) {
+            continue;
+        }
+        if let Some(meta) = fsutil::lmeta_checked(source, path)? {
+            if visit(path, &meta)? && meta.is_dir() {
+                fsutil::walk(source, path, visit)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn object_change_candidates_selected(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    selection: Option<&std::collections::BTreeSet<String>>,
+) -> Result<Vec<EntryChange>> {
     let objects = parent.objects().zip(child.objects());
     let prunable = objects.filter(|(a, b)| a.same_links(b));
     if let Some((a, b)) = prunable {
@@ -864,7 +997,7 @@ fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?S
     }
     let mut entries: BTreeMap<String, (Option<Meta>, Option<Meta>)> = BTreeMap::new();
     let mut pruned = HashSet::new();
-    fsutil::walk(parent, "", &mut |path, meta| {
+    walk_selected(parent, selection, &mut |path, meta| {
         if meta.is_dir() {
             if let Some((a, b)) = prunable {
                 if a.same_subtree(b, path)? {
@@ -876,7 +1009,7 @@ fn object_change_candidates(parent: &(impl Src + ?Sized), child: &(impl Src + ?S
         entries.entry(path.to_owned()).or_default().0 = Some(meta.clone());
         Ok(true)
     })?;
-    fsutil::walk(child, "", &mut |path, meta| {
+    walk_selected(child, selection, &mut |path, meta| {
         if pruned.contains(path) {
             return Ok(false);
         }
