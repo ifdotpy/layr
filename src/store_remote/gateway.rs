@@ -1738,7 +1738,7 @@ pub(super) mod tests {
 
     fn test_listener() -> (TestListener, TestEndpoint) {
         if std::env::var_os("LAYR_TEST_GATEWAY_UNIX").as_deref() == Some(std::ffi::OsStr::new("1")) {
-            let path = std::env::temp_dir().join(format!("lg-{:016x}.sock", rand::random::<u64>()));
+            let path = std::env::temp_dir().join(format!("lg-{:016x}.sock", crate::ids::random_u64()));
             let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
             (TestListener::Unix(listener), TestEndpoint::Unix(path))
         } else {

@@ -18,7 +18,7 @@ pub fn with_try_copy<T>(
     caches: bool,
     run: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
-    let name = format!(".try-{:016x}", rand::random::<u64>());
+    let name = format!(".try-{:016x}", crate::ids::random_u64());
     let dir = repo.p.line_path(&name);
     let tmp_line = Line {
         id: format!("try-{name}"),

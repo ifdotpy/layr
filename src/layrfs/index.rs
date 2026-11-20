@@ -205,7 +205,7 @@ impl Overlay {
     /// with their ignore files, and the subtree of `target` (empty files, real ignore files). The
     /// walker then applies exactly the rules that rg applies on the mount. Returns its root.
     fn skeleton(&self, target: &[u8], kind: Kind) -> std::io::Result<PathBuf> {
-        let root = std::env::temp_dir().join(format!("layrfs-skeleton-{}-{}", std::process::id(), rand::random::<u64>()));
+        let root = std::env::temp_dir().join(format!("layrfs-skeleton-{}-{}", std::process::id(), crate::ids::random_u64()));
         std::fs::create_dir_all(&root)?;
         let made = (|| -> std::io::Result<()> {
             let rules_of = |dir: &[u8]| -> std::io::Result<()> {
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     fn tempfile_dir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("layrfs-index-{}-{}", std::process::id(), rand::random::<u64>()));
+        let d = std::env::temp_dir().join(format!("layrfs-index-{}-{}", std::process::id(), crate::ids::random_u64()));
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
     }

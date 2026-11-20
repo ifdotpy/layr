@@ -7,6 +7,16 @@ pub fn new_uuid() -> Uuid {
     Uuid::now_v7()
 }
 
+/// A random u64 straight from the OS. `rand::random` draws from the thread RNG, and after the
+/// service forks a request process the child still serves the parent's buffered block before
+/// it reseeds (rand 0.8, `ReseedingRng`): two requests got the same "random" try folder
+/// `.try-3a75b87d22a1b9df` on 2026-11-16, and the second `layr try` failed. Names of temporary
+/// folders, files and sockets take this instead.
+pub fn random_u64() -> u64 {
+    use rand::RngCore;
+    rand::rngs::OsRng.next_u64()
+}
+
 pub fn new_id() -> String {
     new_uuid().hyphenated().to_string()
 }
