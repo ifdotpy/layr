@@ -94,6 +94,13 @@ eq "only the new epoch has cache states" 1 "$(epochs)"
 eq "and it has the kept states" 2 "$(trees)"
 has "nothing is unreachable" "unreachable cache data: 0 object(s)" "$(l fsck --overlays --remote archive 2>&1)"
 
+# A push that sends nothing, with the kept set of the last pass and a pass younger than the chunk grace, does not
+# read the kept trees again; once the pass is older than the grace, it sweeps.
+LAYR_TEST_CHUNK_GRACE=3600 l push archive -q >/dev/null 2>&1
+out=$(LAYR_TEST_CHUNK_GRACE=3600 LAYR_TRACE=1 l push archive -q 2>&1)
+eq "a push with nothing new reads no cache tree" 0 "$(printf '%s\n' "$out" | grep -c 'store decode tree')"
+has "a pass older than the grace sweeps again" "older than the chunk grace" "$(LAYR_TRACE=1 l push archive -q 2>&1)"
+
 mkdir -p "$T/b"
 env LAYR_ROOT="$T/b/store" LAYR_PAPER_KEY_FILE="$T/paper.txt" "$LAYR" clone "file://$T/archive" p >/dev/null 2>&1
 Q=$T/b/store/projects/p/lines

@@ -81,7 +81,7 @@ const PACK_GRACE: i64 = 24 * 3600;
 /// before then, and the chunk is live at the next pass. The test hook `LAYR_TEST_CHUNK_GRACE` (seconds) sets it.
 const CHUNK_GRACE: i64 = 2 * 3600;
 
-fn chunk_grace() -> i64 {
+pub(super) fn chunk_grace() -> i64 {
     std::env::var("LAYR_TEST_CHUNK_GRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(CHUNK_GRACE)
 }
 
