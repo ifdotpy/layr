@@ -117,11 +117,8 @@ pub fn park(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     let line = h.line()?.clone();
     let repo = &h.repo;
-    if repo.is_stacked(&line)? && !matches!(sub, "list" | "show" | "drop" | "clear") {
-        return Err(exit(
-            1,
-            "error: layr park is not available in a line with overlays yet; save the changes or use 'layr save'",
-        ));
+    if !matches!(sub, "list" | "show" | "drop" | "clear") {
+        refuse_stacked(repo, &line)?;
     }
     move_old_entries(ctx, repo)?;
     match sub {
@@ -249,6 +246,16 @@ fn drop_entry(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Repo, 
     Ok(())
 }
 
+fn refuse_stacked(repo: &Repo, line: &Line) -> Result<()> {
+    if repo.is_stacked(line)? {
+        return Err(exit(
+            1,
+            "error: layr park is not available in a line with overlays yet; save the changes or use 'layr save'",
+        ));
+    }
+    Ok(())
+}
+
 /// `park [-m <message>] [-u] [-a] [-k]`: save the changes as the head of a new parked line, then
 /// reset the working folder to the head (with `-k`, to the index).
 fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
@@ -262,6 +269,10 @@ fn push(ctx: &Ctx, repo: &Repo, line: &Line, rest: &[String]) -> Result<i32> {
     repo.require(ctx, "line.create")?;
     let untracked = a.has("-u") || a.has("-a");
     let ignored = a.has("-a");
+    // An overlay switch takes the line lease too: from here on the overlays of the line stay.
+    let _lease = repo.line_lock(line)?;
+    let line = &repo.line(&line.id)?;
+    refuse_stacked(repo, line)?;
     // The status, the park tree and its snapshot copy go before the store lock (copies of
     // the working folder and of the head took minutes under it). Under the lock they hold when the
     // head and the index did not change.

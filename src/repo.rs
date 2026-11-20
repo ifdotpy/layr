@@ -712,12 +712,15 @@ impl<'a> Repo<'a> {
     }
 
     fn head_src_with(&self, line: &Line, write: bool) -> Result<Snap> {
-        let layers = if self.p.is_overlay() { Vec::new() } else { self.layers(line)? };
+        self.head_src_of(line, &self.layers(line)?, write)
+    }
+
+    /// `head_src` of the `layers` the caller read (`layers`: empty in an overlay project).
+    fn head_src_of(&self, line: &Line, layers: &[crate::overlay::Layer], write: bool) -> Result<Snap> {
         if layers.is_empty() {
             return if write { self.state_src_to_write(&line.head) } else { self.state_src(&line.head) };
         }
-        let base = self.head_tree(line)?;
-        Ok(snap(&base))
+        Ok(snap(&self.head_tree_of(line, layers)?))
     }
 
     /// A complete folder of a tree. A layered tree gets a temporary read-only copy in `keep`.
@@ -1482,12 +1485,15 @@ impl<'a> Repo<'a> {
     fn select_index(&self, line: &Line) -> Result<SelectedIndex> {
         // Bind the driver identity BEFORE reading complete/thin semantics. Validate
         // afterward too: a replacement cannot lend its token to the old semantics.
+        // The layers too: an overlay switch after this makes the token stale, never wrong.
+        let layers = self.layers(line)?;
         let stage = self.current_stage(line)?.map(SelectedStage::capture).transpose()?;
+        let head = self.head_src_of(line, &layers, false)?;
         let source = match &stage {
-            Some(stage) => self.stage_tree(line, &stage.path)?,
-            None => self.head_src(line)?,
+            Some(stage) => Snap::stage(&stage.path, head)?,
+            None => head,
         };
-        let selected = SelectedIndex { source, stage };
+        let selected = SelectedIndex { source, stage, layers };
         selected.validate_stage()?;
         #[cfg(test)]
         if let Some(hook) = INDEX_SELECTED_HOOK.with_borrow_mut(Option::take) {
@@ -1615,8 +1621,8 @@ impl<'a> Repo<'a> {
         Ok(())
     }
 
-    /// The head and the index content of a line: a read before the store lock is still valid
-    /// under it when this did not change.
+    /// The head, the overlay layers and the index content of a line: a read before the store
+    /// lock is still valid under it when this did not change.
     pub fn index_token(&self, line: &Line) -> Result<IndexToken> {
         self.index_token_for(line, &self.select_index(line)?)
     }
@@ -1626,6 +1632,8 @@ impl<'a> Repo<'a> {
         use layr_hashers::{Digest, GitCompatible};
         let mut h = GitCompatible::new();
         h.update(line.head.as_bytes());
+        // An overlay switch changes the index of a line without a stage, and without moving its head.
+        h.update(serde_json::to_vec(&selected.layers)?);
         if let Some(stage) = &selected.stage {
             let started = crate::status_cache::clock()?;
             let scan = crate::fs::observe_tree(&stage.path)?;
@@ -1706,12 +1714,13 @@ impl<'a> Repo<'a> {
         Ok((st, scan, itemp, index))
     }
 
-    /// The status `add` needs: unstaged and untracked paths only, without the head to index diff.
-    pub fn status_light(&self, line: &Line) -> Result<(Status, Temp, Option<Temp>, Snap)> {
+    /// The status `add` needs on a capture of the working folder: unstaged and untracked paths
+    /// only, without the head to index diff, and only the `limit` paths (see `status_for_add`).
+    pub fn status_light(&self, line: &Line, limit: Option<&BTreeSet<String>>) -> Result<(Status, Temp, Option<Temp>, Snap)> {
         let _t = crate::trace::span("status for add");
         let scan = self.scan(line)?;
         let (index, itemp) = self.index_view(line)?;
-        let st = self.status_for_add(line, &scan.path, &index, None)?;
+        let st = self.status_for_add(line, &scan.path, &index, limit)?;
         Ok((st, scan, itemp, index))
     }
 
@@ -4323,6 +4332,8 @@ mod cache_platform_tests {
 struct SelectedIndex {
     source: Snap,
     stage: Option<SelectedStage>,
+    /// The overlay layers read before the source was selected.
+    layers: Vec<crate::overlay::Layer>,
 }
 
 struct SelectedStage {
@@ -4372,7 +4383,7 @@ thread_local! {
     static INDEX_SELECTED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The head and the index content of a line (`Repo::index_token`).
+/// The head, the overlay layers and the index content of a line (`Repo::index_token`).
 pub type IndexToken = String;
 
 /// Identity of every mutable input used by a comparison.
@@ -4759,7 +4770,7 @@ mod status_policy_tests {
         std::fs::write(head.join("file"), b"base")?;
         std::fs::write(work.join("file"), b"edit")?;
         assert!(repo.current_stage(&line)?.is_none());
-        let selected = SelectedIndex { source: snap(&head), stage: None };
+        let selected = SelectedIndex { source: snap(&head), stage: None, layers: Vec::new() };
         let key = repo.status_key(&line, &work, &selected, b"")?.unwrap();
 
         // add creates a stage after the no-stage key was read. The old independent
@@ -4778,7 +4789,12 @@ mod status_policy_tests {
         std::fs::remove_file(repo.stage_base_file(&line))?;
         assert!(repo.current_stage(&line)?.is_none());
         assert_eq!(
-            repo.status_key(&line, &work, &SelectedIndex { source: selected.source.clone(), stage: None }, b"")?,
+            repo.status_key(
+                &line,
+                &work,
+                &SelectedIndex { source: selected.source.clone(), stage: None, layers: Vec::new() },
+                b""
+            )?,
             Some(key)
         );
         let candidate = EntryChange::observed(
@@ -4794,6 +4810,48 @@ mod status_policy_tests {
         assert!(st.staged.is_empty());
         assert_eq!(st.unstaged.len(), 1);
         assert_eq!(st.unstaged[0].path(), "file");
+        drop(repo);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_index_token_names_the_layers_selected_with_the_source() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-index-layers-{}", ids::new_id()));
+        let store = crate::store::Store::open(&root.join("store"))?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let repo = Repo {
+            restore_from_remote: true,
+            p: Project {
+                lease: Default::default(),
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&dir.join("meta/db/layr.sqlite"))?,
+            },
+            ctx: None,
+        };
+        let line = Line {
+            id: ids::new_id(),
+            name: "main".into(),
+            head: ids::new_id(),
+            owner: rustix::process::geteuid().as_raw(),
+            machine: store.machine.id.clone(),
+        };
+        let head = root.join("head");
+        std::fs::create_dir(&head)?;
+        let token = |states: &[&str]| {
+            let layers = states.iter().map(|s| crate::overlay::Layer { overlay: "other".into(), state: s.to_string() }).collect();
+            repo.index_token_for(&line, &SelectedIndex { source: snap(&head), stage: None, layers })
+        };
+        // An overlay switch or an overlay save changes the index without a stage or a head move.
+        // The token takes the layers bound to the selected source, not the current ones (none here).
+        assert_eq!(token(&[])?, token(&[])?);
+        assert_ne!(token(&[])?, token(&["a"])?);
+        assert_ne!(token(&["a"])?, token(&["b"])?);
         drop(repo);
         drop(store);
         std::fs::remove_dir_all(root)?;
@@ -5012,8 +5070,11 @@ mod status_policy_tests {
         let stage = root.join("stage");
         crate::thin::empty_layer(&stage, &ids::new_id(), &head)?;
         std::fs::write(stage.join("edited"), b"staged")?;
-        let selected =
-            SelectedIndex { source: Snap::stage(&stage, snap(&head))?, stage: Some(SelectedStage::capture(stage.clone())?) };
+        let selected = SelectedIndex {
+            source: Snap::stage(&stage, snap(&head))?,
+            stage: Some(SelectedStage::capture(stage.clone())?),
+            layers: Vec::new(),
+        };
         let (frozen, temp) = repo.snapshot_index(&selected)?;
         // The sparse snapshot must retain its selected base independently of its marker.
         assert!(frozen.folder().is_none());

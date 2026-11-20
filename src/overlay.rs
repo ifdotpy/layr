@@ -2658,16 +2658,20 @@ impl<'a> Repo<'a> {
     /// The full tree of the line's head: the head state, or for a line with overlays its base
     /// (made when missing).
     pub fn head_tree(&self, line: &Line) -> Result<PathBuf> {
-        let layers = if self.p.is_overlay() { Vec::new() } else { self.layers(line)? };
+        self.head_tree_of(line, &self.layers(line)?)
+    }
+
+    /// `head_tree` of the `layers` the caller read.
+    pub(crate) fn head_tree_of(&self, line: &Line, layers: &[Layer]) -> Result<PathBuf> {
         if layers.is_empty() {
             return self.state_root(&line.head);
         }
-        let path = self.base_path(line, &line.head, &layers);
+        let path = self.base_path(line, &line.head, layers);
         let _publication = self.lock_base(&path)?;
         if self.base_ready(&path)? {
             return Ok(path);
         }
-        let view = self.assemble(line, &line.head, &layers)?;
+        let view = self.assemble(line, &line.head, layers)?;
         self.place_base(&view, &path)?;
         Ok(path)
     }
