@@ -983,12 +983,44 @@ pub(crate) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
     Ok(out)
 }
 
+const SELECTION_OMISSION: &str = "overlays outside --overlay were skipped";
+
+fn main_only(opts: &Options) -> bool {
+    opts.overlays.as_ref().is_some_and(|only| only.len() == 1 && only.contains(crate::overlay::MAIN))
+}
+
+/// Only exclude ids positively known here. New visible overlays can have parent metadata but no local
+/// project yet, and hidden overlays reveal their names only after their slots and manifests open.
+fn excluded_overlay_ids(repo: &Repo, opts: &Options) -> Result<BTreeSet<String>> {
+    let mut excluded = BTreeSet::new();
+    if opts.overlays.is_some() {
+        for name in repo.overlay_candidates()?.into_iter().filter(|name| !opts.takes_layer(name)) {
+            let pname = format!("{}%{name}", repo.p.name);
+            if !crate::store::db_file(&repo.p.store.project_dir(&pname)?).exists() {
+                continue;
+            }
+            if let Ok(project) = Project::open_partial(repo.p.store, &pname) {
+                if !project.id.is_empty() {
+                    excluded.insert(project.id);
+                }
+            }
+        }
+    }
+    Ok(excluded)
+}
+
 pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    if main_only(opts) {
+        report.omitted.push(SELECTION_OMISSION.into());
+        return Ok(());
+    }
+    let excluded = excluded_overlay_ids(repo, opts)?;
+    let mut skipped = !excluded.is_empty();
     let descriptor = store.root_descriptor()?;
     let trusted = trusted_keys(repo)?;
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let mut authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
-    let objects = store.backend.overlay_key_objects()?;
+    let objects = store.backend.overlay_key_objects_filtered(|id| !excluded.contains(id))?;
     let (mut published, refused) =
         published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects.clone())?;
     report.omitted.extend(refused);
@@ -1019,7 +1051,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
     for (name, published) in published {
         let info = repo.overlay_info(&name).ok().flatten();
         if !opts.takes_layer(&name) {
-            report.omitted.push(format!("overlay {name}: not in --overlay"));
+            skipped = true;
             continue;
         }
         if let Some(p) = info.and_then(|i| i.platform).filter(|p| opts.other_platform(&name, Some(p))) {
@@ -1125,6 +1157,9 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             r => r?,
         }
     }
+    if skipped {
+        report.omitted.push(SELECTION_OMISSION.into());
+    }
     Ok(())
 }
 
@@ -1209,6 +1244,11 @@ fn readable_by_all(access: &BTreeMap<String, crate::access::Role>) -> bool {
 
 /// Fetches each overlay that the project records name from its plain layer on Layr Cloud.
 pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    if main_only(opts) {
+        report.omitted.push(SELECTION_OMISSION.into());
+        return Ok(());
+    }
+    let mut skipped = false;
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     for name in repo.overlay_names()? {
         let Some(info) = repo.overlay_info(&name)? else { continue };
@@ -1216,9 +1256,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             continue;
         }
         if !opts.takes_layer(&name) {
-            if opts.overlays.is_some() {
-                report.omitted.push(format!("overlay {name}: not in --overlay"));
-            }
+            skipped = true;
             continue;
         }
         if opts.other_platform(&name, info.platform.as_deref()) {
@@ -1263,12 +1301,110 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             r => r?,
         }
     }
+    if skipped {
+        report.omitted.push(SELECTION_OMISSION.into());
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_fetch_excludes_known_ids_but_keeps_unknown_ones() -> Result<()> {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root)?;
+        let cleanup = crate::repo::Temp::plain(root.clone());
+        let ctx = super::super::writer::tests::context(&root);
+        let store = super::super::writer::tests::remote(&root, &ctx);
+        super::super::writer::initialize_plain(&store, super::super::format::Mode::Private)?;
+        let repo = Repo { restore_from_remote: true, p: Project::create_empty(&ctx.store, "fixture")?, ctx: None };
+        let selected = Project::create_overlay(&ctx.store, "fixture%selected", &ctx.actor(), serde_json::json!({}))?;
+        let excluded = Project::create_overlay(&ctx.store, "fixture%excluded", &ctx.actor(), serde_json::json!({}))?;
+        let unknown = crate::ids::new_id();
+        for id in [&selected.id, &excluded.id, &unknown] {
+            store.backend.put_new(&format!("overlays/{id}/keys/unrelated"), vec![0])?;
+        }
+        let opts = Options { overlays: Some(BTreeSet::from(["selected".into()])), ..Default::default() };
+        let excluded_ids = excluded_overlay_ids(&repo, &opts)?;
+        assert_eq!(excluded_ids, BTreeSet::from([excluded.id.clone()]));
+        // Folder-capable backends prune before listing keys, also inside a scoped backend.
+        let scoped = store.backend.scoped("namespace")?;
+        for id in [&selected.id, &excluded.id, &unknown] {
+            scoped.put_new(&format!("overlays/{id}/keys/unrelated"), vec![0])?;
+        }
+        let files = root.join("remote");
+        super::super::backend::FILE_REQUESTS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("file request log poisoned"))?
+            .insert(files.clone(), Vec::new());
+        let objects = scoped.overlay_key_objects_filtered(|id| !excluded_ids.contains(id))?;
+        let requests = super::super::backend::FILE_REQUESTS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("file request log poisoned"))?
+            .remove(&files)
+            .context("file request log missing")?;
+        assert_eq!(requests.len(), 2, "only selected and unknown key folders are listed: {requests:?}");
+        assert!(requests.iter().all(|(operation, key)| *operation == "list" && !key.contains(&excluded.id)));
+        assert_eq!(objects.len(), 2);
+        assert!(objects.iter().all(|o| !o.key.contains(&excluded.id)));
+        // The transport fixture lacks delimiter support, exercising the full-list fallback.
+        let (backend, peer) = super::super::gateway::tests::file_transport(store.backend.clone());
+        let objects = backend.overlay_key_objects_filtered(|id| !excluded_ids.contains(id))?;
+        let requests = peer.finish();
+        assert_eq!(requests.len(), 2, "one folder attempt and one fallback listing: {requests:?}");
+        assert_eq!(objects.len(), 2);
+        assert!(objects.iter().any(|o| o.key.contains(&selected.id)));
+        assert!(objects.iter().any(|o| o.key.contains(&unknown)));
+        assert!(objects.iter().all(|o| !o.key.contains(&excluded.id)));
+        crate::free::finish(&ctx);
+        drop(selected);
+        drop(excluded);
+        drop(repo);
+        drop(store);
+        let projects = ctx.store.root.join("projects");
+        drop(ctx);
+        // Project databases may still be mounted: remove them through the native filesystem first.
+        crate::fs::remove(&projects)?;
+        cleanup.discard()?;
+        assert!(!root.exists(), "fixture cleanup left the temporary store behind");
+        Ok(())
+    }
+
+    #[test]
+    fn main_only_fetch_makes_no_overlay_requests() -> Result<()> {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root)?;
+        let cleanup = crate::repo::Temp::plain(root.clone());
+        let ctx = super::super::writer::tests::context(&root);
+        let mut store = super::super::writer::tests::remote(&root, &ctx);
+        super::super::writer::initialize_plain(&store, super::super::format::Mode::Private)?;
+        // Match the benchmark's 63 overlay folders. No matching JSON or age manifest is needed:
+        // the regression is the inventory requests, before any key can be used.
+        for _ in 0..63 {
+            store.backend.put_new(&format!("overlays/{}/keys/unrelated", crate::ids::new_id()), vec![0])?;
+        }
+        let (backend, peer) = super::super::gateway::tests::file_transport(store.backend.clone());
+        store.backend = backend;
+        let repo = Repo { restore_from_remote: true, p: Project::create_empty(&ctx.store, "fixture")?, ctx: None };
+        let opts = Options { overlays: Some(BTreeSet::from([crate::overlay::MAIN.to_string()])), ..Default::default() };
+        let mut report = Report::default();
+        fetch(&store, &ctx, &repo, &opts, &mut report)?;
+        let requests = peer.finish();
+        assert!(requests.is_empty(), "main-only fetch made overlay discovery requests: {requests:?}");
+        assert_eq!(report.omitted, ["overlays outside --overlay were skipped"]);
+        crate::free::finish(&ctx);
+        drop(repo);
+        drop(store);
+        let projects = ctx.store.root.join("projects");
+        drop(ctx);
+        // Project databases may still be mounted: remove them through the native filesystem first.
+        crate::fs::remove(&projects)?;
+        cleanup.discard()?;
+        assert!(!root.exists(), "fixture cleanup left the temporary store behind");
+        Ok(())
+    }
 
     #[test]
     fn only_an_overlay_that_everyone_reads_goes_to_layr_cloud_plain() {

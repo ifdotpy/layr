@@ -140,8 +140,8 @@ try:
   check('0 records, 0 states, 0 bytes' in p.stdout,'fetch is a no-op in a fresh process')
   check(not any(q.get('prefix')==['states/'] for q in listings),'a no-op fetch never lists states, including historical data pages')
   check(sum(path=='/v1/p/project/store.json' for _,path,_ in requests)>1,'a connected fetch rechecks the live descriptor')
-  check(sum(q.get('prefix')==['overlays/'] and q.get('delimiter')==['/'] for q in listings)<=1,'overlay discovery lists folders at most once')
-  check(len(requests)<=13,'a no-op fetch makes at most thirteen HTTP requests with live pin checks')
+  check(not any(q.get('prefix',[''])[0].startswith('overlays/') for q in listings),'main-only fetch makes zero overlay discovery requests')
+  check(len(requests)<=11,'a no-op fetch makes at most eleven HTTP requests with live pin checks')
   for request,count in sorted(Counter((method,path) for method,path,_ in requests).items()):
    print(count,*request,flush=True)
  # A new process must still reject a descriptor that no longer matches its pinned project.
