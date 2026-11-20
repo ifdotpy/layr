@@ -9,7 +9,7 @@ use crate::store::{Project, Store};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 /// Projects this process opened: `(store root, project name)`. `finish` frees their queues when
 /// the command ends and forgets them.
@@ -82,6 +82,22 @@ pub fn release_effects(effects: crate::db::CommittedEffects) {
     }
 }
 
+/// Finish catalog migrations and other work from daemon discovery once, before requests fork.
+/// The single-threaded parent opens no more projects after this point. Its children must inherit
+/// neither discovery's registrations nor a remembered free pass (which could hide later work).
+/// Pins are released normally by `finish`, never forgotten while their durable owners remain.
+pub fn finish_daemon_startup(ctx: &crate::ctx::Ctx) {
+    finish(ctx);
+    if let Ok(mut queued) = LEFT_QUEUED.lock() {
+        queued.clear();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INSPECTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The free step of the projects that this command opened. Errors wait for the next command
 /// (the queue keeps the states). Test only: `LAYR_TEST_EXIT_AFTER_COMMIT` exits with status 86
 /// here, before any storage moves, when a queue is not empty (tests/t99-ownership-free.sh).
@@ -102,6 +118,8 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     #[cfg(target_os = "macos")]
     let finals: BTreeSet<String> = FINALS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
     for name in names {
+        #[cfg(test)]
+        INSPECTED.with(|names| names.borrow_mut().push(name.clone()));
         if store.project_dir(&name).is_ok_and(|dir| dir.join("meta/object-native").is_dir()) {
             if let Ok(Some(p)) = Project::open_maintenance(store, &name) {
                 let repo = crate::repo::Repo { restore_from_remote: true, p, ctx: Some(ctx) };
@@ -467,16 +485,26 @@ fn release_dead_pins(p: &Project) -> Result<()> {
 
 /// The holder of this process's pins: `pid:start time`.
 pub fn self_holder() -> String {
-    static HOLDER: OnceLock<String> = OnceLock::new();
-    HOLDER
-        .get_or_init(|| {
-            let pid = std::process::id();
-            let start = process_start(pid).or_else(|| {
-                HolderProcesses::new(&[format!("{pid}:")]).start(pid).filter(|&time| time != 0).and_then(format_start)
-            });
-            format!("{pid}:{}", start.unwrap_or_default())
-        })
-        .clone()
+    // Startup native retirement can initialize this before the single-threaded daemon forks.
+    // A worker must cache its own identity, rather than protecting all workers with one row.
+    static HOLDER: Mutex<Option<(u32, String)>> = Mutex::new(None);
+    let mut cached = HOLDER.lock().unwrap_or_else(|error| error.into_inner());
+    holder_for_pid(&mut cached, std::process::id(), |pid| {
+        process_start(pid)
+            .or_else(|| HolderProcesses::new(&[format!("{pid}:")]).start(pid).filter(|&time| time != 0).and_then(format_start))
+    })
+}
+
+/// Reuse a process identity only while its PID matches. `start` runs once for each new PID.
+fn holder_for_pid(cached: &mut Option<(u32, String)>, pid: u32, start: impl FnOnce(u32) -> Option<String>) -> String {
+    if let Some((owner, holder)) = cached {
+        if *owner == pid {
+            return holder.clone();
+        }
+    }
+    let holder = format!("{pid}:{}", start(pid).unwrap_or_default());
+    *cached = Some((pid, holder.clone()));
+    holder
 }
 
 /// True when the process of a holder runs. An unknown start time counts as the same process,
@@ -677,6 +705,67 @@ impl<D: ReleasePins> Drop for Pin<D> {
 #[cfg(test)]
 mod inspection_tests {
     use super::*;
+
+    #[test]
+    fn daemon_discovery_is_finished_once_and_requests_inspect_only_their_projects() -> Result<()> {
+        const CHILD: &str = "LAYR_TEST_FREE_STARTUP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "free::inspection_tests::daemon_discovery_is_finished_once_and_requests_inspect_only_their_projects",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()?;
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            return Ok(());
+        }
+        // Global cleanup notifications belong to this subprocess alone.
+        let root = std::env::temp_dir().join(format!("layr-startup-{}", crate::ids::new_id()));
+        let ctx = crate::ctx::Ctx {
+            store: Store::open(&root)?,
+            caller: crate::ctx::Caller::from_uid(rustix::process::geteuid().as_raw()),
+            cwd: root.clone(),
+            env: Default::default(),
+            author: Default::default(),
+            captures: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+        };
+        for name in ["a", "b", "c"] {
+            let dir = ctx.store.project_dir(name)?;
+            std::fs::create_dir_all(dir.join("meta/db"))?;
+            let db = crate::db::Db::open(&crate::store::db_file(&dir))?;
+            db.test_connection().execute(
+                "INSERT INTO records(id,machine,seq,time,op,raw) VALUES('project','machine',1,0,'project',?1)",
+                [serde_json::json!({"r": {"data": {"id": crate::ids::new_id()}}}).to_string()],
+            )?;
+            // Startup migrations can leave queued work. It must run, rather than being forgotten.
+            db.test_connection().execute("INSERT INTO free_queue(state) VALUES('dead')", [])?;
+            register(&ctx.store, name);
+        }
+        crate::pools::mark_forking_parent();
+        finish_daemon_startup(&ctx);
+        crate::pools::mark_worker();
+        assert_eq!(INSPECTED.with(|names| std::mem::take(&mut *names.borrow_mut())), ["a", "b", "c"]);
+        assert!(LEFT_QUEUED.lock().is_ok_and(|queued| queued.is_empty()));
+        for name in ["a", "b", "c"] {
+            let db = crate::db::Db::open(&crate::store::db_file(&ctx.store.project_dir(name)?))?;
+            assert!(db.queued_frees()?.is_empty(), "startup cleanup of {name}");
+        }
+        finish(&ctx);
+        assert!(INSPECTED.with(|names| names.borrow().is_empty()), "a project-free request inspects no projects");
+        let db = crate::db::Db::open(&crate::store::db_file(&ctx.store.project_dir("a")?))?;
+        db.test_connection().execute("INSERT INTO free_queue(state) VALUES('later')", [])?;
+        register(&ctx.store, "a");
+        finish(&ctx);
+        assert!(db.queued_frees()?.is_empty(), "request cleanup still runs");
+        drop(db);
+        assert_eq!(INSPECTED.with(|names| std::mem::take(&mut *names.borrow_mut())), ["a"]);
+        drop(ctx);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn busy_maintenance_leaves_the_queue_and_last_pass_untouched() -> Result<()> {
@@ -903,6 +992,36 @@ mod pin_tests {
 
 #[cfg(test)]
 mod holder_tests {
+    #[test]
+    fn holder_cache_refreshes_inherited_identity_once_per_child_pid() {
+        let lookups = std::cell::Cell::new(0);
+        let start = |pid| {
+            lookups.set(lookups.get() + 1);
+            Some(format!("start-{pid}"))
+        };
+        let mut parent = None;
+        assert_eq!(super::holder_for_pid(&mut parent, 10, start), "10:start-10");
+        assert_eq!(super::holder_for_pid(&mut parent, 10, start), "10:start-10");
+        assert_eq!(lookups.get(), 1, "a cached PID needs no process lookup");
+        // Forked workers inherit independent copies of the parent's initialized cache.
+        let mut first_child = parent.clone();
+        let mut second_child = parent.clone();
+        for _ in 0..2 {
+            assert_eq!(super::holder_for_pid(&mut first_child, 11, start), "11:start-11");
+            assert_eq!(super::holder_for_pid(&mut second_child, 12, start), "12:start-12");
+            assert_eq!(super::holder_for_pid(&mut parent, 10, start), "10:start-10");
+        }
+        assert_eq!(lookups.get(), 3, "each worker refreshes only its own identity once");
+    }
+
+    #[test]
+    fn holder_cache_keeps_unknown_start_until_pid_changes() {
+        let mut cached = None;
+        assert_eq!(super::holder_for_pid(&mut cached, 10, |_| None), "10:");
+        assert_eq!(super::holder_for_pid(&mut cached, 10, |_| Some("later".into())), "10:");
+        assert_eq!(super::holder_for_pid(&mut cached, 11, |_| Some("child".into())), "11:child");
+    }
+
     #[test]
     fn system_lookup_only_retains_and_mismatch_uses_fallback() {
         let timestamp = 1_700_000_000;

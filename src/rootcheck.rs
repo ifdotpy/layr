@@ -181,15 +181,54 @@ mod imp {
 
     /// The working folders of this machine's lines and the newest local state folders.
     pub fn check_project(p: &Project) -> Result<()> {
-        for line in p.db.lines()? {
+        let lines = p.db.lines()?;
+        let folders = p.line_folders();
+        for line in lines {
             if line.machine == p.store.machine.id {
-                refuse_emptied(&format!("working folder of line {}", line.name), &p.line_path(&line.name))?;
+                refuse_emptied(&format!("working folder of line {}", line.name), &folders.path(p, &line.id, &line.name))?;
             }
         }
         for id in p.db.newest_present_states(STATES_CHECKED)? {
             refuse_emptied(&format!("state {id}"), &p.state_path(&id))?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn project_check_reads_recorded_paths_once_at_one_and_215_lines() -> Result<()> {
+            let root = std::env::temp_dir().join(format!("layr-rootcheck-{}", crate::ids::new_id()));
+            let store = crate::store::Store::open(&root)?;
+            let dir = store.project_dir("p")?;
+            std::fs::create_dir_all(dir.join("meta/db"))?;
+            let p = Project {
+                lease: Default::default(),
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: crate::ids::new_id(),
+                db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+            };
+            for count in [1, 215] {
+                p.db.test_connection().execute("DELETE FROM lines", [])?;
+                for i in 0..count {
+                    p.db.test_connection().execute(
+                        "INSERT INTO lines(id,name,owner,machine,head) VALUES(?1,?1,0,?2,'head')",
+                        rusqlite::params![format!("line-{i}"), store.machine.id],
+                    )?;
+                }
+                crate::linepaths::PATH_READS.with(|reads| reads.set(0));
+                check_project(&p)?;
+                assert_eq!(crate::linepaths::PATH_READS.with(|reads| reads.get()), 1, "{count} lines");
+            }
+            drop(p);
+            drop(store);
+            std::fs::remove_dir_all(root)?;
+            Ok(())
+        }
     }
 }
 

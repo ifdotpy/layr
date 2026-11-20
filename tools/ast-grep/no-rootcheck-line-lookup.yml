@@ -1,0 +1,11 @@
+id: no-rootcheck-line-lookup
+language: Rust
+severity: error
+message: Resolve known line IDs through one line_folders snapshot; per-line lookup repeats SQL and JSON reads.
+files:
+  - src/rootcheck.rs
+rule:
+  any:
+    - pattern: $PROJECT.line_path($$$)
+    - pattern: $PROJECT.line_folder($$$)
+    - pattern: $DB.line_by_name($$$)

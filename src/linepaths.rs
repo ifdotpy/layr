@@ -10,7 +10,7 @@
 //! the project, so only the project file holds it, never the index.
 use crate::store::{Project, Store};
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -59,6 +59,36 @@ fn project_entries(root: &Path) -> Vec<Entry> {
     out
 }
 
+/// One validation's snapshot of recorded folders, including names reserved by renames.
+/// Build in O(M log(M+1)); each resolution is O(log(M+1)), without SQL or file reads.
+pub(crate) struct LineFolders {
+    recorded: BTreeMap<String, PathBuf>,
+    kept: BTreeSet<PathBuf>,
+}
+
+impl LineFolders {
+    fn new(recorded: BTreeMap<String, PathBuf>) -> Self {
+        let kept = recorded.values().filter(|path| path.is_relative()).cloned().collect();
+        Self { recorded, kept }
+    }
+
+    pub(crate) fn path(&self, project: &Project<'_>, line_id: &str, name: &str) -> PathBuf {
+        if let Some(path) = self.recorded.get(line_id) {
+            return project.resolve_folder(path.clone());
+        }
+        // This line has no recorded entry, so any reservation belongs to another line.
+        if self.kept.contains(Path::new(name)) {
+            return project.meta_dir().join("no-folder").join(line_id);
+        }
+        project.default_line_path(name)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PATH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Project<'_> {
     fn paths_file(&self) -> PathBuf {
         paths_file_in(&self.meta_dir())
@@ -67,6 +97,8 @@ impl Project<'_> {
     /// The project file as written: line id to an absolute folder (moved out of the store) or to a
     /// folder name below `lines/` (kept after a rename).
     fn recorded_paths(&self) -> BTreeMap<String, PathBuf> {
+        #[cfg(test)]
+        PATH_READS.with(|reads| reads.set(reads.get() + 1));
         std::fs::read(self.paths_file()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
     }
 
@@ -94,14 +126,13 @@ impl Project<'_> {
     /// folder of its id below `meta/`, which no command makes, so that no command reads, writes or deletes the
     /// folder of the other line as this line's.
     pub fn line_folder(&self, line_id: &str, name: &str) -> PathBuf {
-        let map = self.recorded_paths();
-        if let Some(p) = map.get(line_id) {
-            return self.resolve_folder(p.clone());
-        }
-        if map.iter().any(|(id, p)| id != line_id && p.is_relative() && p == Path::new(name)) {
-            return self.meta_dir().join("no-folder").join(line_id);
-        }
-        self.default_line_path(name)
+        self.line_folders().path(self, line_id, name)
+    }
+
+    /// Read recorded folders once for a batch of resolutions. Do not retain across validations:
+    /// a move or rename by another command must be visible at the next project open.
+    pub(crate) fn line_folders(&self) -> LineFolders {
+        LineFolders::new(self.recorded_paths())
     }
 
     /// The line id that keeps the folder `lines/<folder>` after a rename.
@@ -234,6 +265,45 @@ pub fn register_with(root: &Path, extra: Option<&Path>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_snapshot_preserves_moves_renames_collisions_and_validation() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-folders-{}", crate::ids::new_id()));
+        let store = Store::open(&root)?;
+        let dir = store.project_dir("p")?;
+        std::fs::create_dir_all(dir.join("meta/db"))?;
+        let p = Project {
+            lease: Default::default(),
+            store: &store,
+            name: "p".into(),
+            dir: dir.clone(),
+            id: crate::ids::new_id(),
+            db: crate::db::Db::open(&crate::store::db_file(&dir))?,
+        };
+        let outside = root.join("outside");
+        let map: BTreeMap<String, PathBuf> =
+            [("moved".into(), outside.clone()), ("renamed".into(), "old".into()), ("invalid".into(), "../escape".into())].into();
+        std::fs::write(p.paths_file(), serde_json::to_vec(&map)?)?;
+        let folders = p.line_folders();
+        assert_eq!(folders.path(&p, "moved", "new"), outside);
+        assert_eq!(folders.path(&p, "renamed", "new"), p.default_line_path("old"));
+        assert_eq!(folders.path(&p, "other", "old"), p.meta_dir().join("no-folder/other"));
+        assert_eq!(folders.path(&p, "other", "new"), p.default_line_path("new"));
+        assert_eq!(folders.path(&p, "invalid", "new"), p.default_line_path("../escape"));
+        for (id, name) in [("moved", "new"), ("renamed", "new"), ("other", "old"), ("invalid", "new")] {
+            assert_eq!(folders.path(&p, id, name), p.line_folder(id, name));
+        }
+        // A snapshot is stable, but the next validation sees a move or malformed-file fallback.
+        std::fs::write(p.paths_file(), b"not JSON")?;
+        assert_eq!(folders.path(&p, "moved", "new"), outside);
+        assert_eq!(p.line_folder("moved", "new"), p.default_line_path("new"));
+        std::fs::remove_file(p.paths_file())?;
+        assert_eq!(p.line_folder("renamed", "new"), p.default_line_path("new"));
+        drop(p);
+        drop(store);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn a_kept_folder_is_found_by_its_relative_entry() {
