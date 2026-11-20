@@ -46,6 +46,7 @@ pub struct Store {
 #[cfg(test)]
 thread_local! {
     static PROJECT_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static PROJECT_LOCK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -604,6 +605,8 @@ fn pid_alive(pid: i32) -> bool {
 /// Write `meta/lock.holder` for this process, which holds the lock. Best effort: a lock never
 /// fails for the holder file.
 fn write_lock_holder(meta: &Path) {
+    #[cfg(test)]
+    PROJECT_LOCK_COUNT.with(|count| count.set(count.get() + 1));
     let command = HOLDER_COMMAND.lock().ok().and_then(|c| c.clone());
     let command = command.unwrap_or_else(|| format!("layr {}", std::env::args().skip(1).collect::<Vec<_>>().join(" ")));
     let command: String = command.chars().take(200).collect();
@@ -2574,6 +2577,10 @@ impl LockedProject<'_> {
         for (machine, recs) in by.iter_mut() {
             recs.sort_by_key(|s| s.record.seq);
             let mut last = self.db.last_seq(machine)?;
+            let first_seq = recs.first().ok_or_else(|| anyhow!("no records"))?.record.seq;
+            let last_seq = recs.last().ok_or_else(|| anyhow!("no records"))?.record.seq.min(last);
+            let stored =
+                if first_seq <= last_seq { self.db.record_range(machine, first_seq, last_seq)? } else { BTreeMap::new() };
             let key = if last > 0 {
                 let first = self.db.record_line(machine, 1)?.ok_or_else(|| anyhow!("no records"))?;
                 oplog::machine_key(&oplog::parse_line(&first)?.record)?
@@ -2593,8 +2600,7 @@ impl LockedProject<'_> {
                 if s.record.seq <= last {
                     // A record we have: the copy must be the same bytes (else a changed or a
                     // forked history).
-                    let stored = self.db.record_line(machine, s.record.seq)?;
-                    if stored.as_deref() != Some(s.line.as_str()) {
+                    if stored.get(&s.record.seq).map(String::as_str) != Some(s.line.as_str()) {
                         bail!(
                             "record {} of machine {machine} differs from the stored record (changed or forked history)",
                             s.record.seq

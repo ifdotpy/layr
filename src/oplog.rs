@@ -15,6 +15,11 @@ pub struct Signed {
 }
 
 #[cfg(test)]
+thread_local! {
+    pub(crate) static DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
 pub fn sign_line(rec: &Record, key: &SigningKey) -> Result<String> {
     let body = serde_json::to_string(rec)?;
     let s = layr_store::keys::sign_bytes(body.as_bytes(), key);
@@ -23,6 +28,8 @@ pub fn sign_line(rec: &Record, key: &SigningKey) -> Result<String> {
 
 /// Parse one stored line without granting signature or authority proof.
 pub fn parse_line(line: &str) -> Result<Signed> {
+    #[cfg(test)]
+    DECODE_COUNT.with(|count| count.set(count.get() + 1));
     let body = layr_store::record::parse_line(line)?;
     let record: Record = serde_json::from_str(body.get())?;
     Ok(Signed { record, line: line.to_string() })
@@ -30,6 +37,8 @@ pub fn parse_line(line: &str) -> Result<Signed> {
 
 /// Verify the exact stored bytes before decoding the untrusted wire DTO.
 pub fn verify_line(line: &str, key: &VerifyingKey) -> Result<Signed> {
+    #[cfg(test)]
+    DECODE_COUNT.with(|count| count.set(count.get() + 1));
     let body = layr_store::record::verify_line(line.as_bytes(), key)?;
     Ok(Signed { record: serde_json::from_str(body.get())?, line: body.line().into() })
 }

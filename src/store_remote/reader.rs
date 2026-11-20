@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 mod fetch_plan;
 use fetch_plan::{unchanged, Material};
 
+#[cfg(test)]
+#[path = "local_fetch_tests.rs"]
+mod local_fetch_tests;
+
 use crate::sync_local::fetch::publish_restored;
 #[cfg(test)]
 use crate::sync_local::fetch::walk_ancestry;
@@ -54,10 +58,14 @@ pub(super) fn records_with_local(
         .map(|text| text.lines().map(str::to_owned).collect())
         .unwrap_or_default();
     let mut have: BTreeMap<String, BTreeMap<u64, &str>> = BTreeMap::new();
-    if !known.is_empty() {
-        for line in local {
-            let record = oplog::parse_line(line)?.record;
-            have.entry(record.machine).or_default().insert(record.seq, line);
+    for line in local {
+        let record = oplog::parse_line(line)?.record;
+        if record.project != project {
+            bail!("local records belong to another project");
+        }
+        let by_seq = have.entry(record.machine.clone()).or_default();
+        if by_seq.insert(record.seq, line).is_some_and(|previous| previous != line) {
+            bail!("conflicting history of machine {}, record {}", record.machine, record.seq);
         }
     }
     let mut checked = Vec::new();
@@ -121,25 +129,24 @@ pub(super) fn records_with_local(
         Ok(())
     })?;
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
-    for line in local {
-        let record = oplog::parse_line(line)?.record;
-        if record.project != project {
-            bail!("local records belong to another project");
-        }
-        let by_seq = machines.entry(record.machine.clone()).or_default();
-        if let Some(existing) = by_seq.get(&record.seq).filter(|existing| *existing != line) {
-            if record.seq == 1 {
-                let remote = oplog::parse_line(existing)?.record;
-                if oplog::machine_key(&remote)? != oplog::machine_key(&record)? {
-                    bail!("remote machine {}: first-record key does not match the known public key", record.machine);
+    for (machine, local) in have {
+        let by_seq = machines.entry(machine.clone()).or_default();
+        for (seq, line) in local {
+            if let Some(existing) = by_seq.get(&seq).filter(|existing| existing.as_str() != line) {
+                if seq == 1 {
+                    let remote = oplog::parse_line(existing)?.record;
+                    let local = oplog::parse_line(line)?.record;
+                    if oplog::machine_key(&remote)? != oplog::machine_key(&local)? {
+                        bail!("remote machine {machine}: first-record key does not match the known public key");
+                    }
                 }
+                bail!("conflicting history of machine {machine}, record {seq}");
             }
-            bail!("conflicting history of machine {}, record {}", record.machine, record.seq);
+            by_seq.entry(seq).or_insert_with(|| line.to_owned());
         }
-        by_seq.entry(record.seq).or_insert_with(|| line.clone());
     }
     let mut keys = BTreeMap::new();
-    let mut lines = Vec::new();
+    let mut ordered = Vec::new();
     let mut gaps = Vec::new();
     for (machine, by_seq) in machines {
         let Some(first) = by_seq.get(&1) else {
@@ -151,24 +158,23 @@ pub(super) fn records_with_local(
             bail!("machine {machine}: first record is not its key");
         }
         let key = oplog::machine_key(&first.record)?;
-        // Verify the complete segment set, including records beyond a gap.
-        for line in by_seq.values() {
-            oplog::verify_line(line, &key)?;
-        }
+        // Verify the complete segment set, including records beyond a gap. Retain the verified ordering
+        // metadata: parsing in the sort comparator used to decode the history O(n log n) times.
         let mut seq = 1;
-        while let Some(line) = by_seq.get(&seq) {
-            lines.push(line.clone());
-            seq += 1;
+        for (&number, line) in &by_seq {
+            let signed = oplog::verify_line(line, &key)?;
+            if number == seq {
+                ordered.push((signed.record.time, machine.clone(), number, line.clone()));
+                seq += 1;
+            }
         }
         if by_seq.keys().next_back().is_some_and(|last| *last >= seq) {
             gaps.push(format!("machine {machine}: missing record {seq}"));
         }
         keys.insert(machine, key);
     }
-    lines.sort_by_key(|l| {
-        let r = oplog::parse_line(l).expect("record checked").record;
-        (r.time, r.machine, r.seq)
-    });
+    ordered.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
+    let lines = ordered.into_iter().map(|(_, _, _, line)| line).collect();
     if let Some(path) = seen {
         // Only after every segment was checked: a failed read leaves the old file. The first fetch of an overlay
         // layer makes its folder.
@@ -1225,7 +1231,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     const MACHINE: &str = "01a12290-0000-7000-8000-000000000001";
-    const PROJECT: &str = "01a12290-0000-7000-8000-000000000002";
+    pub(super) const PROJECT: &str = "01a12290-0000-7000-8000-000000000002";
     const STATE: &str = "01a12290-0000-7000-8000-000000000003";
 
     #[test]
@@ -1302,7 +1308,7 @@ mod tests {
         assert!(found.contains(&"derived".to_string()));
     }
 
-    fn fixture() -> (Backend, String, ed25519_dalek::SigningKey, std::path::PathBuf) {
+    pub(super) fn fixture() -> (Backend, String, ed25519_dalek::SigningKey, std::path::PathBuf) {
         let root = std::env::temp_dir().join(crate::ids::new_id());
         (Backend::file(root.clone()), keys::generate_identity(), ed25519_dalek::SigningKey::from_bytes(&[9; 32]), root)
     }
@@ -1595,7 +1601,7 @@ mod tests {
         assert_eq!(reader.material.as_ref().unwrap().bytes, 0, "last planned use reclaims disk bytes");
     }
 
-    fn line(seq: u64, key: &ed25519_dalek::SigningKey) -> String {
+    pub(super) fn line(seq: u64, key: &ed25519_dalek::SigningKey) -> String {
         let mut record = Record::untrusted_preview(if seq == 1 { "machine" } else { "config" });
         record.id = format!("01a12290-0000-7000-8000-{seq:012x}");
         record.machine = MACHINE.into();
@@ -1606,7 +1612,7 @@ mod tests {
         }
         oplog::sign_line(&record, key).unwrap()
     }
-    fn segment(backend: &Backend, identity: &str, first: u64, last: u64, lines: &[String]) {
+    pub(super) fn segment(backend: &Backend, identity: &str, first: u64, last: u64, lines: &[String]) {
         let mut body = lines.join("\n");
         body.push('\n');
         assert!(backend

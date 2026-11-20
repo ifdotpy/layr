@@ -7,6 +7,12 @@ use layr_store::sync::{FetchSelection, Imported};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_PRESENCE_RECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_FETCH_CATALOG: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Local<'_, '_> {
     pub(super) fn import(&mut self, lines: &[String], keys: &BTreeMap<String, VerifyingKey>) -> Result<Imported> {
         let repo = self.repo();
@@ -49,22 +55,85 @@ impl Local<'_, '_> {
         available: &[String],
         clone_lines: Option<Vec<crate::model::Line>>,
     ) -> Result<FetchSelection<StateRec, crate::model::Line>> {
-        let (plan, present) = self.plan_fetch(records, opts, available, clone_lines)?;
-        for id in present {
-            self.repo().p.lock_or_borrow()?.write(|tx| tx.set_present(&id, true))?;
+        let (mut plan, present) = self.plan_fetch(records, opts, Some(available), clone_lines)?;
+        for id in self.reconcile_present(&present)? {
+            // Collection can remove a tree after planning. Restore it through the usual publication path.
+            plan.missing.push(self.repo().p.db.state(&id)?.context("selected state's record disappeared")?);
         }
         Ok(plan)
+    }
+
+    /// One lock and at most one transaction for the batch. Recheck both disk and flags under the lock:
+    /// collection may have removed a tree since planning, and another fetch may have confirmed its presence.
+    pub(super) fn reconcile_present(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let repo = self.repo();
+        #[cfg(test)]
+        BEFORE_PRESENCE_RECHECK.with(|hook| {
+            if let Some(run) = hook.take() {
+                run();
+            }
+        });
+        let lock = repo.p.lock_or_borrow()?;
+        let needed = repo.p.db.states_needing_presence()?;
+        let mut missing = Vec::new();
+        let mut changed = Vec::new();
+        for id in ids {
+            if !repo.p.has_state(id) {
+                missing.push(id.clone());
+            } else if needed.contains(id) {
+                changed.push(id);
+            }
+        }
+        if !changed.is_empty() {
+            lock.write(|tx| {
+                for id in changed {
+                    tx.set_present(id, true)?;
+                }
+                Ok(())
+            })?;
+        }
+        Ok(missing)
     }
     pub(super) fn plan_fetch(
         &self,
         records: &[String],
         opts: &Options,
-        available: &[String],
+        available: Option<&[String]>,
+        clone_lines: Option<Vec<crate::model::Line>>,
+    ) -> Result<(FetchSelection<StateRec, crate::model::Line>, Vec<String>)> {
+        // State rows, refs and line heads must describe the same catalog version. End this read
+        // transaction before reconciliation obtains a project lock or starts a write transaction.
+        self.repo().p.db.with_read_snapshot(|| self.plan_fetch_snapshot(records, opts, available, clone_lines))
+    }
+
+    fn plan_fetch_snapshot(
+        &self,
+        records: &[String],
+        opts: &Options,
+        available: Option<&[String]>,
         clone_lines: Option<Vec<crate::model::Line>>,
     ) -> Result<(FetchSelection<StateRec, crate::model::Line>, Vec<String>)> {
         let repo = self.repo();
         let ctx = self.ctx;
         let parent = self.parent;
+        let states = state_catalog(repo)?;
+        #[cfg(test)]
+        AFTER_FETCH_CATALOG.with(|hook| {
+            if let Some(run) = hook.take() {
+                run();
+            }
+        });
+        let known;
+        let available = match available {
+            Some(ids) => ids,
+            None => {
+                known = states.keys().cloned().collect::<Vec<_>>();
+                &known
+            }
+        };
         let mut selected = opts.clone();
         if let Some(parent) = parent {
             if let Some(state) = opts.caches_of_state.as_deref() {
@@ -81,12 +150,12 @@ impl Local<'_, '_> {
         }
         let opts = &selected;
         let mut omitted = omitted_cache_refs(repo, opts)?;
-        let mut required = required_states(repo, records, opts)?;
+        let mut required = required_states_in(repo, records, opts, Some(&states))?;
         if let Some(lines) = &clone_lines {
-            required.extend(state_ancestries(repo, lines.iter().map(|line| line.head.clone()))?);
+            required.extend(ancestries(repo, Some(&states), lines.iter().map(|line| line.head.clone()))?);
         }
         // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
-        let lines_keep = base_selection(repo, records, opts)?;
+        let lines_keep = base_selection_in(repo, records, opts, Some(&states))?;
         let heads: Option<BTreeSet<String>> = opts
             .heads
             .then(|| -> Result<BTreeSet<String>> {
@@ -118,11 +187,11 @@ impl Local<'_, '_> {
             // A tree whose record this fetch did not read: a push published both after this fetch read the records
             // (the record first, then the tree), or an overlay left out the records of a signer that is not trusted
             // here yet. The next fetch takes it; nothing is imported without its record.
-            let Some(state) = repo.p.db.state(id)? else {
+            let Some(state) = states.get(id) else {
                 omitted.push(format!("state {}: its record is not taken here yet", crate::ids::short(id)));
                 continue;
             };
-            if !wanted(&state, opts) && !required.contains(id) {
+            if !wanted(state, opts) && !required.contains(id) {
                 continue;
             }
             if heads.as_ref().is_some_and(|keep| !repo.p.is_overlay() && !keep.contains(id)) {
@@ -177,7 +246,7 @@ impl Local<'_, '_> {
             if repo.p.has_state(id) {
                 present.push(id.clone());
             } else {
-                missing.push(state);
+                missing.push(state.clone());
             }
         }
         if stay > 0 {
@@ -289,7 +358,24 @@ fn state_parents(repo: &Repo, id: &str) -> Result<Vec<String>> {
 }
 
 pub(crate) fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
-    walk_ancestry(tips, |id| state_parents(repo, id))
+    ancestries(repo, None, tips)
+}
+
+fn state_catalog(repo: &Repo) -> Result<BTreeMap<String, StateRec>> {
+    Ok(repo.p.db.state_rows()?.into_iter().map(|(state, _)| (state.id.clone(), state)).collect())
+}
+
+fn ancestries(
+    repo: &Repo,
+    states: Option<&BTreeMap<String, StateRec>>,
+    tips: impl IntoIterator<Item = String>,
+) -> Result<Vec<String>> {
+    walk_ancestry(tips, |id| match states {
+        Some(states) => {
+            Ok(states.get(id).map(|state| state.parents.iter().chain(&state.derived_from).cloned().collect()).unwrap_or_default())
+        }
+        None => state_parents(repo, id),
+    })
 }
 
 /// `LocalReplica::nearest_ancestor`.
@@ -314,16 +400,29 @@ pub(crate) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
 }
 
 pub(crate) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
+    required_states_in(repo, lines, opts, None)
+}
+
+fn required_states_in(
+    repo: &Repo,
+    lines: &[String],
+    opts: &Options,
+    states: Option<&BTreeMap<String, StateRec>>,
+) -> Result<BTreeSet<String>> {
     let mut required = deletion_dependencies(lines)?;
     let mut tips: Vec<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
     for reference in repo.p.db.refs("", crate::ids::now_ms())? {
-        let state = repo.state(&reference.target)?;
+        let state = match states {
+            Some(states) => states.get(&reference.target).cloned(),
+            None => repo.p.db.state(&reference.target)?,
+        }
+        .with_context(|| format!("state {} not found", crate::ids::short(&reference.target)))?;
         if state.kind == crate::model::StateKind::Cache && !opts.caches {
             continue;
         }
         tips.push(reference.target);
     }
-    required.extend(state_ancestries(repo, tips)?);
+    required.extend(ancestries(repo, states, tips)?);
     Ok(required)
 }
 
@@ -331,6 +430,15 @@ pub(crate) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> 
 /// no base state comes; with `--line`, the history of those lines (only their heads with `--heads`) and what an undo of
 /// a line delete needs.
 pub(crate) fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
+    base_selection_in(repo, records, opts, None)
+}
+
+fn base_selection_in(
+    repo: &Repo,
+    records: &[String],
+    opts: &Options,
+    states: Option<&BTreeMap<String, StateRec>>,
+) -> Result<Option<BTreeSet<String>>> {
     if repo.p.is_overlay() {
         return Ok(None);
     }
@@ -357,7 +465,7 @@ pub(crate) fn base_selection(repo: &Repo, records: &[String], opts: &Options) ->
         return Ok(None);
     }
     let mut keep: BTreeSet<String> =
-        if opts.heads { tips.into_iter().collect() } else { state_ancestries(repo, tips)?.into_iter().collect() };
+        if opts.heads { tips.into_iter().collect() } else { ancestries(repo, states, tips)?.into_iter().collect() };
     keep.extend(deletion_dependencies(records)?);
     Ok(Some(keep))
 }
