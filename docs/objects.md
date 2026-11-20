@@ -415,6 +415,12 @@ layr objects checkout <tree or rev> <folder>
   caller's file identity (`privs::CallerFs`: file system uid, gid and groups, one step at a time on
   one thread), while the store is read as root: every file belongs to the caller, and root never
   writes into the caller's folder (`tests/t201-objects-service.sh`).
+  A revision with no imported object tree uses `layr export <state> <folder> --all` instead,
+  without importing or creating an object store. The destination must still be absent or empty,
+  with its parent already present. This fallback writes `.layr-export.json` and uses export's
+  file semantics: file modes and modification times and symlink targets are preserved, but empty
+  folders, hard-link groups, extended attributes and folder metadata are not. Names that differ
+  only in case or Unicode form are skipped and make the command fail, as with export.
 - `import`, `verify` and `repack` need the admin role; `stat` needs read access.
 
 Garbage collection: `layr gc` prunes the store before the repack (`Store::plan_maintenance`): state records that the project no longer keeps, and loose objects and hot blobs that kept states do not reach (delta bases and chunk lists count). Open questions: sharded trees (section 11); a repack that merges small packs and drops packed objects that nothing reaches; garbage collection of
