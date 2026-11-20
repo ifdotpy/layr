@@ -84,14 +84,17 @@ assert sys.argv[2] not in json.load(open(sys.argv[1]))
 PY
 PARENT=$(state_id "$MERGE~1")
 STATES=$LAYR_ROOT/projects/indexed/states
+if premounted_user; then btrfs property set -ts "$STATES/$PARENT" ro false || exit 1; fi
 mv "$STATES/$PARENT" "$STATES/$PARENT.index-test" || exit 1
-# The store holds the parent tree, so a reachable store restores it on demand (t90). With the
-# store unreachable, the missing tree is still an error.
+# Path history skips a comparison with an unavailable first parent, then keeps walking.
+# It is a local read even when a remote holds the missing tree (explicit fetch restores it).
 l config cloud.remote.archive.url "file://$T/unreachable" >/dev/null || exit 1
-no 'unfiltered path history detects its missing parent tree when no store is reachable' l log "$MERGE" --json -- file.txt
+ok 'unfiltered path history skips its missing parent tree when no store is reachable' l log "$MERGE" --json -- file.txt
 ok 'message-filtered path history skips unavailable trees' l log "$MERGE" --grep '^absent-fixture-message$' --json -- file.txt
 ok 'zero-row path history skips unavailable trees' l log "$MERGE" -n 0 --json -- file.txt
 l config cloud.remote.archive.url "file://$T/archive" >/dev/null || exit 1
-ok 'unfiltered path history restores its missing parent tree from the store' l log "$MERGE" --json -- file.txt
-ok 'the restored parent tree is on disk' test -d "$STATES/$PARENT"
+ok 'unfiltered path history skips its missing parent tree with a reachable store' l log "$MERGE" --json -- file.txt
+no 'path history does not restore its missing parent tree' test -d "$STATES/$PARENT"
+mv "$STATES/$PARENT.index-test" "$STATES/$PARENT" || exit 1
+if premounted_user; then btrfs property set -ts "$STATES/$PARENT" ro true || exit 1; fi
 finish

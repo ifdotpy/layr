@@ -1470,7 +1470,67 @@ impl<'a> Repo<'a> {
             self.p.trash(&p)?;
         }
         let _ = std::fs::remove_file(self.stage_base_file(line));
-        Ok(())
+        self.forget_staged(line)
+    }
+
+    fn staged_file(&self, line: &Line) -> PathBuf {
+        self.p.meta_dir().join("stage").join(format!("{}.staged", line.id))
+    }
+
+    fn forget_staged(&self, line: &Line) -> Result<()> {
+        match std::fs::remove_file(self.staged_file(line)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Where the index of `line` may differ from its head state, as `add` recorded it; None
+    /// without a record of exactly this index. Reads metadata of the index, never its content.
+    pub fn staged_selection(&self, line: &Line) -> Result<Option<changes::Selection>> {
+        self.staged_selection_of(line, &self.select_index(line)?)
+    }
+
+    /// Run `freeze` on the index selected now; then the record of `add` if it describes exactly
+    /// that index (`staged_selection`).
+    pub fn freeze_with_selection<T>(
+        &self,
+        line: &Line,
+        freeze: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, Option<changes::Selection>)> {
+        let selected = self.select_index(line)?;
+        let frozen = freeze()?;
+        Ok((frozen, self.staged_selection_of(line, &selected)?))
+    }
+
+    fn staged_selection_of(&self, line: &Line, selected: &SelectedIndex) -> Result<Option<changes::Selection>> {
+        if !selected.layers.is_empty() {
+            return Ok(None);
+        }
+        if selected.stage.is_none() {
+            // The head is the index, unless a stage appeared since the selection.
+            return Ok(self.current_stage(line)?.is_none().then(changes::Selection::default));
+        }
+        let Some(record) =
+            std::fs::read(self.staged_file(line)).ok().and_then(|raw| serde_json::from_slice::<StagedPaths>(&raw).ok())
+        else {
+            return Ok(None);
+        };
+        let (token, _) = self.index_digest(line, selected, Some(&record.racy))?;
+        Ok((token == record.token).then(|| {
+            let mut selection = record.selection;
+            selection.entries.extend(record.racy);
+            selection
+        }))
+    }
+
+    /// After `add` staged `staged` over `before` (`staged_selection` read before staging), record
+    /// where the index may differ from the head, bound to the index token. O(n) metadata reads.
+    pub fn record_staged(&self, line: &Line, before: Option<changes::Selection>, staged: &BTreeSet<String>) -> Result<()> {
+        let selected = self.select_index(line)?;
+        let Some(mut selection) = before.filter(|_| selected.stage.is_some()) else { return self.forget_staged(line) };
+        selection.subtrees.extend(staged.iter().cloned());
+        let (token, racy) = self.index_digest(line, &selected, None)?;
+        crate::fsutil::atomic_write(&self.staged_file(line), &serde_json::to_vec(&StagedPaths { token, racy, selection })?, 0o600)
     }
 
     /// The index to read and the staging folder when there is one. The caller must hold the
@@ -1628,24 +1688,56 @@ impl<'a> Repo<'a> {
     }
 
     fn index_token_for(&self, line: &Line, selected: &SelectedIndex) -> Result<IndexToken> {
+        let (token, racy) = self.index_digest(line, selected, None)?;
+        // Unverifiable/racy index contents cannot validate a prepared comparison.
+        Ok(if racy.is_empty() { token } else { ids::new_id() })
+    }
+
+    /// The token of the selected index in which the `racy` entries (None: those found now, the
+    /// root as "") count by their presence only, and those entries. O(n) metadata reads.
+    fn index_digest(
+        &self,
+        line: &Line,
+        selected: &SelectedIndex,
+        racy: Option<&BTreeSet<String>>,
+    ) -> Result<(IndexToken, BTreeSet<String>)> {
         selected.validate_stage()?;
         use layr_hashers::{Digest, GitCompatible};
         let mut h = GitCompatible::new();
         h.update(line.head.as_bytes());
         // An overlay switch changes the index of a line without a stage, and without moving its head.
         h.update(serde_json::to_vec(&selected.layers)?);
+        let mut exempt = BTreeSet::new();
         if let Some(stage) = &selected.stage {
             let started = crate::status_cache::clock()?;
-            let scan = crate::fs::observe_tree(&stage.path)?;
-            if !stage.root.trusted(stage.observed_before) || scan.values().any(|f| !f.trusted(started)) {
-                // Unverifiable/racy index contents cannot validate a prepared comparison.
-                h.update(ids::new_id().as_bytes());
+            let mut scan = crate::fs::observe_tree(&stage.path)?;
+            exempt = match racy {
+                Some(racy) => racy.clone(),
+                None => {
+                    let root = (!stage.root.trusted(stage.observed_before)).then(String::new);
+                    scan.iter().filter(|(_, f)| !f.trusted(started)).map(|(p, _)| p.clone()).chain(root).collect()
+                }
+            };
+            for path in &exempt {
+                if let Some(entry) = scan.get_mut(path) {
+                    *entry = FileFingerprint::Unverifiable;
+                }
             }
             h.update(&stage.identity);
-            h.update(serde_json::to_vec(&scan)?);
+            // Hash the observations directly: a JSON copy of a large index costs more than its scan.
+            struct Feed<'h>(&'h mut GitCompatible);
+            impl std::hash::Hasher for Feed<'_> {
+                fn write(&mut self, bytes: &[u8]) {
+                    self.0.update(bytes);
+                }
+                fn finish(&self) -> u64 {
+                    0
+                }
+            }
+            std::hash::Hash::hash(&scan, &mut Feed(&mut h));
         }
         selected.validate_stage()?;
-        Ok(hex::encode(h.finalize()))
+        Ok((hex::encode(h.finalize()), exempt))
     }
 
     pub fn uses_native_hints(&self, line: &Line) -> Result<bool> {
@@ -4332,6 +4424,15 @@ mod cache_platform_tests {
         drop(p);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+/// What `add` knows of an index: outside `selection` it equals the head while the index has
+/// `token`, an `index_digest` in which the `racy` entries count by presence only.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StagedPaths {
+    token: IndexToken,
+    racy: BTreeSet<String>,
+    selection: changes::Selection,
 }
 
 /// An index choice whose presence and source are shared by its token and comparison.

@@ -583,7 +583,7 @@ impl Repo<'_> {
                     // directory attributes and hard links. Keep that evidence with the
                     // immutable capture instead of comparing it again in prepare_state.
                     if old.objects().is_some() && source.folder().is_some() && objstore::enabled(&self.p)? {
-                        let comparison = objstore::compare(&old, source)?;
+                        let comparison = objstore::compare(&old, source, None)?;
                         let changed = comparison.files.iter().any(|change| !skip_path(change.path()));
                         compared = Some(comparison);
                         changed

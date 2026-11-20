@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 root, binary = Path(sys.argv[1]), str(Path(sys.argv[2]).resolve())
 source = root / 'source'
@@ -44,6 +45,43 @@ for flags in ([], ['-q'], ['--json']):
     assert 'not saved (modified, not added): f01' in result.stderr, result.stderr
     if '--json' in flags:
         json.loads(result.stdout)
+
+# A named save compares the head with the index only where `add` staged: not the whole tree.
+# Another writer of the index (`rm --cached`) makes it compare everything again.
+for i in range(40):
+    (work / f'many{i:02}').write_text(f'many {i}\n')
+run('add', '-A')
+run('save', '-m', 'many files')
+time.sleep(1.1)  # Index entries younger than a second are compared again (racy).
+with (work / 'many00').open('a') as output:
+    output.write('staged\n')
+run('add', 'many00')
+result = run('save', '-m', 'one staged file', trace=True, no_cache=True)
+tracked = len(run('ls-files').stdout.split())
+# The warning compares every tracked file once; the staged comparison only `many00`. A copied
+# index (overlayfs) has new change times: all its entries are racy right after `add`.
+if not os.environ.get('LAYR_OVERLAYFS_TEST_ROOT'):
+    assert result.stderr.count('content compare') <= tracked + 1, (tracked, result.stderr.count('content compare'))
+for name in ('many01', 'many02', 'many04'):
+    with (work / name).open('a') as output:
+        output.write('changed\n')
+run('add', 'many01')
+run('add', 'many04')
+run('rm', '--cached', '-q', 'many03')
+saved = json.loads(run('save', '-m', 'staged by add and rm', '--json').stdout)
+# The comparison decides the checks and the summary of the save.
+assert saved['files'] == {'changed': 3, 'insertions': 2, 'deletions': 1}, saved
+assert run('show', 'head:many01').stdout.endswith('changed\n')
+assert run('show', 'head:many04').stdout.endswith('changed\n')
+assert not run('show', 'head:many02').stdout.endswith('changed\n')
+assert 'many03' not in run('ls-files').stdout.split()
+# Another writer (an older Layr) changes the index after the record of `add`: the record no
+# longer describes it, and the save compares everything.
+run('add', 'many05')
+[stage] = [path for path in (project / 'meta/stage').iterdir() if path.is_dir()]
+(stage / 'many06').write_text('foreign\n')
+saved = json.loads(run('save', '-m', 'foreign index change', '--json').stdout)
+assert saved['files'] == {'changed': 1, 'insertions': 1, 'deletions': 1}, saved
 
 # Retire the native base so the automatic save compares objects against its immutable capture.
 try:

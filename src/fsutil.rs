@@ -83,7 +83,10 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
         cur.push(c);
         if i + 1 < comps.len() {
             match fs::symlink_metadata(&cur) {
-                Ok(m) if m.file_type().is_symlink() => bail!("path goes through a symbolic link: {rel}"),
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(layr_fs_core::FsError::SymlinkAncestor)
+                        .with_context(|| format!("path goes through a symbolic link: {rel}"));
+                }
                 _ => {}
             }
         }
@@ -406,6 +409,42 @@ pub fn lmeta(root: &(impl Src + ?Sized), rel: &str) -> Option<Meta> {
     }
     let p = root.at(rel).ok()?;
     exact_metadata(&p, rel).map(|m| meta_of(&m))
+}
+
+/// Fallible metadata for comparisons: only an absent path is `None`, never an I/O failure.
+/// Native readers resolve ancestors without following symlinks.
+pub(crate) fn lmeta_checked(root: &(impl Src + ?Sized), rel: &str) -> Result<Option<Meta>> {
+    #[cfg(test)]
+    root.comparison_io(rel, ComparisonIo::Metadata);
+    if let Some(objects) = root.objects() {
+        return objects.meta(rel);
+    }
+    let native;
+    let reader = match root.core_reader() {
+        Some(reader) => reader,
+        None => {
+            let folder = root.folder().context("source has neither a reader nor a native folder")?;
+            crate::fs::observations::note_read(folder, [rel]);
+            native = crate::fs::reader(folder)?;
+            native.as_ref()
+        }
+    };
+    let meta = match reader.metadata(&layr_fs_core::RelDir::from_bytes(rel.as_bytes())?) {
+        Ok(meta) => meta,
+        // A pathspec below a symlink names no entry in the stored namespace.
+        Err(error) if error.is_symlink_ancestor() => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let Some(meta) = meta else { return Ok(None) };
+    #[cfg(target_os = "macos")]
+    if !rel.is_empty() {
+        if let Some(folder) = root.folder() {
+            if exact_metadata_checked(&folder.join(rel), rel)?.is_none() {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(layr_fs_common::observation(&meta)))
 }
 
 /// Metadata of the entry at `path`, which is `rel` below some root, only when the volume

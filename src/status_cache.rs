@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::MetadataExt;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct Timestamp {
     pub seconds: i64,
     pub nanos: i64,
@@ -13,13 +13,13 @@ pub(crate) struct Timestamp {
 
 /// Native observation stamps are compared for equality; shared logic never interprets a
 /// filesystem's counter layout. A backing stat binds a merged entry to its physical source.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum ObservationEvidence {
     Counter([u64; 3]),
     Backing(FileStat),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct FileStat {
     pub dev: u64,
     pub ino: u64,
@@ -50,7 +50,7 @@ impl FileStat {
 }
 
 /// Missing optional acceleration is distinct from evidence that cannot verify this entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum FileFingerprint {
     Verified { stat: FileStat, evidence: Option<ObservationEvidence> },
     Unverifiable,

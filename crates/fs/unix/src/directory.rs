@@ -69,7 +69,7 @@ impl DirectoryTree {
                         if fs::statat(&current, name, AtFlags::SYMLINK_NOFOLLOW)
                             .is_ok_and(|stat| fs::FileType::from_raw_mode(stat.st_mode) == fs::FileType::Symlink)
                         {
-                            return Err(FsError::Invalid("path goes through a symbolic link"));
+                            return Err(FsError::SymlinkAncestor);
                         }
                         return Err(FsError::Io(error.into()));
                     }

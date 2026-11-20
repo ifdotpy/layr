@@ -336,3 +336,166 @@ fn fallback_preserves_ranges_renames_and_rejects_incomplete_observations() -> Re
     }
     Ok(())
 }
+
+#[test]
+fn selected_comparisons_do_not_visit_unrelated_paths() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let old = object_source(fixture.snapshot()?);
+    std::fs::write(fixture.native.join("edit/0"), b"edit")?;
+    let new = object_source(fixture.snapshot()?);
+    for source in [&fixture.native as &dyn Src, &new as &dyn Src] {
+        let (parent, child) = (FakeSource::new(&old), FakeSource::new(source));
+        let paths = ["edit/0".to_string()].into();
+        assert!(!file_changes_of(&parent, &child, candidates_selected(&parent, &child, &paths)?)?.is_empty());
+        for source in [&parent, &child] {
+            let counts = source.counts.lock().map_err(|_| anyhow::anyhow!("comparison counts poisoned"))?;
+            assert_eq!(counts.metadata.keys().map(String::as_str).collect::<Vec<_>>(), ["edit/0"]);
+            assert_eq!(counts.metadata["edit/0"], 1);
+            assert!(counts.opens <= 1, "{counts:?}");
+        }
+        assert!(
+            file_changes_of(&parent, &child, candidates_selected(&parent, &child, &["keep/0".to_string()].into())?)?.is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_roots_cover_deletes_types_links_and_overlapping_directories() -> Result<()> {
+    let fixture = Fixture::new()?;
+    std::os::unix::fs::symlink("before", fixture.native.join("link"))?;
+    let old = object_source(fixture.snapshot()?);
+    std::fs::remove_file(fixture.native.join("edit/0"))?;
+    std::fs::create_dir(fixture.native.join("edit/0"))?;
+    std::fs::write(fixture.native.join("edit/0/new"), b"new")?;
+    std::fs::remove_file(fixture.native.join("edit/1"))?;
+    std::fs::rename(fixture.native.join("edit/2"), fixture.native.join("renamed"))?;
+    std::fs::remove_file(fixture.native.join("link"))?;
+    std::os::unix::fs::symlink("after", fixture.native.join("link"))?;
+    let child = &fixture.native;
+    for path in ["edit/0", "edit/1", "edit/2", "renamed", "link"] {
+        assert!(
+            !file_changes_of(&old, child, candidates_selected(&old, child, &[path.to_string()].into())?)?.is_empty(),
+            "{path}"
+        );
+    }
+    assert!(!any_file_change_selected(&old, child, &["link/child".to_string()].into(), |_| false)?);
+    let paths = ["edit", "edit-elsewhere", "edit/0", "edit/0/new"].map(str::to_string).into();
+    let source = FakeSource::new(child);
+    let candidates = candidates_selected(&old, &source, &paths)?;
+    assert!(file_changes_of(&old, &source, candidates)?.iter().any(|c| c.path() == "edit/1"));
+    let counts = source.counts.lock().map_err(|_| anyhow::anyhow!("comparison counts poisoned"))?;
+    assert!(counts.metadata.values().all(|count| *count == 1), "{counts:?}");
+    assert!(!counts.metadata.contains_key("keep"), "{counts:?}");
+    Ok(())
+}
+
+/// Reader adapters may wrap namespace failures with platform-specific diagnostic context.
+struct FailingReader<F>(F);
+impl<F: Fn() -> layr_fs_core::FsError + Send + Sync> layr_fs_core::TreeRead for FailingReader<F> {
+    fn metadata(&self, _: &layr_fs_core::RelDir) -> layr_fs_core::Result<Option<layr_fs_core::EntryMetadata>> {
+        Err((self.0)())
+    }
+    fn entries(
+        &self,
+        _: &layr_fs_core::RelDir,
+        _: &mut dyn FnMut(&layr_fs_core::RelPath) -> layr_fs_core::Result<()>,
+    ) -> layr_fs_core::Result<()> {
+        Err(layr_fs_core::FsError::Invalid("unselected enumeration"))
+    }
+    fn open_file(&self, _: &layr_fs_core::RelPath) -> layr_fs_core::Result<Box<dyn layr_fs_core::ReadSeek + '_>> {
+        Err(layr_fs_core::FsError::Invalid("unselected content read"))
+    }
+    fn read_link(&self, _: &layr_fs_core::RelPath) -> layr_fs_core::Result<Vec<u8>> {
+        Err(layr_fs_core::FsError::Invalid("unselected link read"))
+    }
+}
+impl<F: Fn() -> layr_fs_core::FsError + Send + Sync> Src for FailingReader<F> {
+    fn core_reader(&self) -> Option<&dyn layr_fs_core::TreeRead> {
+        Some(self)
+    }
+    fn at(&self, _: &str) -> Result<PathBuf> {
+        anyhow::bail!("no materialization")
+    }
+    fn folder(&self) -> Option<&Path> {
+        None
+    }
+}
+
+#[test]
+fn selected_comparisons_propagate_metadata_errors() -> Result<()> {
+    use layr_fs_core::FsError;
+    for errno in [libc::EACCES, libc::EIO] {
+        for wrapped in [false, true] {
+            let reader = FailingReader(|| {
+                let error = FsError::Io(std::io::Error::from_raw_os_error(errno));
+                if wrapped {
+                    FsError::backend(anyhow::Error::new(error).context("metadata adapter"))
+                } else {
+                    error
+                }
+            });
+            let paths = ["file".to_string()].into();
+            let error = candidates_selected(&reader, &reader, &paths)
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("metadata error was swallowed"))?;
+            assert!(
+                error
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.raw_os_error() == Some(errno))),
+                "{error:#}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_comparisons_skip_wrapped_symlink_ancestors() -> Result<()> {
+    assert_eq!(layr_fs_core::FsError::SymlinkAncestor.to_string(), "path goes through a symbolic link");
+    let fixture = Fixture::new()?;
+    let outside = fixture.root.join("outside");
+    std::fs::create_dir(&outside)?;
+    std::fs::write(outside.join("child"), b"outside the source namespace")?;
+    std::os::unix::fs::symlink(&outside, fixture.native.join("link"))?;
+    // APFS visibility performs safe_join before calling the native metadata reader.
+    let reader = FailingReader(|| match crate::fsutil::safe_join(&fixture.native, "link/child") {
+        Err(error) => layr_fs_core::FsError::backend(error.context("metadata adapter")),
+        Ok(_) => layr_fs_core::FsError::Invalid("symlink ancestor was followed"),
+    });
+    assert!(crate::fsutil::lmeta_checked(&reader, "link/child")?.is_none());
+    let paths = ["link/child".to_string()].into();
+    assert!(!any_file_change_selected(&reader, &reader, &paths, |_| false)?);
+    // The native source must behave identically, while a final symlink is still an entry.
+    assert!(crate::fsutil::lmeta_checked(&fixture.native, "link/child")?.is_none());
+    assert!(
+        crate::fsutil::lmeta_checked(&fixture.native, "link")?.is_some_and(|meta| meta.ftype == crate::fsutil::FType::Symlink)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_selection_visits_each_entry_once_and_ends_at_symlinks() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (parent, child) = (fixture.root.join("parent"), fixture.root.join("child"));
+    std::fs::create_dir_all(parent.join("dir"))?;
+    std::fs::write(parent.join("dir/file"), b"old")?;
+    std::fs::create_dir_all(child.join("a/b/c"))?;
+    std::fs::write(child.join("a/b/c/file"), b"new")?;
+    std::os::unix::fs::symlink("elsewhere", child.join("dir"))?;
+    // `add` of a/b/c/file left its new folders racy: entries alone that exist on one side only.
+    let selection = Selection {
+        subtrees: ["a/b/c/file", "dir/file"].map(str::to_string).into(),
+        entries: ["", "a", "a/b", "a/b/c"].map(str::to_string).into(),
+    };
+    let source = FakeSource::new(&child);
+    let changes = file_changes_selected(&parent, &source, &selection)?;
+    let paths: Vec<&str> = changes.iter().map(|c| c.path().as_str()).collect();
+    assert_eq!(paths, ["a/b/c/file", "dir/file"], "a file below a symlink is removed from the stored namespace");
+    assert!(matches!(changes[1], EntryChange::Remove { .. }));
+    let counts = source.counts.lock().map_err(|_| anyhow::anyhow!("comparison counts poisoned"))?;
+    // A folder found alone is read once more by its walk; nothing below it is visited twice.
+    assert_eq!(counts.metadata.get("a/b/c/file"), Some(&1), "{counts:?}");
+    assert!(counts.metadata.values().all(|count| *count <= 2), "{counts:?}");
+    Ok(())
+}

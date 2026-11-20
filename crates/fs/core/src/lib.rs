@@ -14,6 +14,7 @@ use std::io::{Read, Seek};
 pub enum FsError {
     Io(std::io::Error),
     Invalid(&'static str),
+    SymlinkAncestor,
     WrongInstance,
     LocationChanged,
     Busy,
@@ -21,6 +22,12 @@ pub enum FsError {
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }
 impl FsError {
+    /// Namespace traversal rejects symlink ancestors even when an adapter adds context.
+    pub fn is_symlink_ancestor(&self) -> bool {
+        std::iter::successors(Some(self as &(dyn std::error::Error + 'static)), |cause| cause.source())
+            .any(|cause| matches!(cause.downcast_ref::<Self>(), Some(Self::SymlinkAncestor)))
+    }
+
     pub fn backend(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         Self::Backend(error.into())
     }
@@ -30,6 +37,7 @@ impl std::fmt::Display for FsError {
         match self {
             Self::Io(e) => e.fmt(f),
             Self::Invalid(s) => f.write_str(s),
+            Self::SymlinkAncestor => f.write_str("path goes through a symbolic link"),
             Self::WrongInstance => f.write_str("filesystem handle belongs to another instance"),
             Self::LocationChanged => f.write_str("owned tree location changed; deletion authority retained"),
             Self::Busy => f.write_str("tree still has active readers"),
