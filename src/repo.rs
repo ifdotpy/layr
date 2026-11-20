@@ -2376,7 +2376,13 @@ impl<'a> Repo<'a> {
     pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
         self.prepare_cache_locations(line)?;
         let w = self.working(line);
-        for (p, _, due) in self.named_cache_overlays(line)? {
+        // The copies only speed up the save. An overlay that cannot be read here (one of this
+        // platform that another machine made and this machine never received) must not stop the
+        // named save: `save_named_cache_parts` reports it as a warning and saves without its part.
+        let Ok(overlays) = self.named_cache_overlays(line) else {
+            return Ok(());
+        };
+        for (p, _, due) in overlays {
             if due {
                 self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
             }
