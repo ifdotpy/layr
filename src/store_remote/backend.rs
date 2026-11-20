@@ -699,11 +699,21 @@ impl Backend {
     /// of `overlays/`. A gateway lists the overlay folders, then the keys of each: the full listing holds every
     /// chunk of every overlay, and it took a follow pass of project layr more than 10 minutes (2026-11-15).
     pub fn overlay_key_objects(&self) -> Result<Vec<Object>> {
+        self.overlay_key_objects_filtered(|_| true)
+    }
+
+    /// Filter overlay ids before listing keys or reading manifests. Unknown ids can still be taken:
+    /// a hidden overlay's name is only available after its manifest opens.
+    pub(super) fn overlay_key_objects_filtered(&self, take: impl Fn(&str) -> bool) -> Result<Vec<Object>> {
         let folders = self.folders("overlays/")?;
-        let Some(folders) = folders else { return self.list("overlays/") };
+        let Some(folders) = folders else {
+            return Ok(self.list("overlays/")?.into_iter().filter(|o| take(o.key.split('/').nth(1).unwrap_or(""))).collect());
+        };
         let mut objects = Vec::new();
         for folder in folders {
-            objects.extend(self.list(&format!("{folder}keys/"))?);
+            if take(folder.trim_end_matches('/').rsplit('/').next().unwrap_or("")) {
+                objects.extend(self.list(&format!("{folder}keys/"))?);
+            }
         }
         Ok(objects)
     }
