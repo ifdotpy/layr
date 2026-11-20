@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS records (id TEXT PRIMARY KEY, machine TEXT, seq INTEG
 CREATE INDEX IF NOT EXISTS records_time ON records(time);
 CREATE INDEX IF NOT EXISTS records_time_seq ON records(time, seq);
 CREATE UNIQUE INDEX IF NOT EXISTS records_seq ON records(machine, seq);
+-- derive_rows looks up the state.tree and state.parts records of each new state. Without this index each lookup read
+-- every record: a rebuild of a store from 0.47 (70,904 records) did not finish in 31 minutes; with it, 80 seconds.
+CREATE INDEX IF NOT EXISTS records_op ON records(op);
 CREATE INDEX IF NOT EXISTS records_git_import ON records(json_extract(raw, '$.r.data.state')) WHERE op='import';
 CREATE INDEX IF NOT EXISTS records_git_export ON records(json_extract(raw, '$.r.data.state')) WHERE op='export';
 -- kind 0: global push/sync; kind 1: exact line association. IDs link records; record_order preserves insertion ties.
@@ -1689,6 +1692,22 @@ mod tests {
         db.release_trees(&["remove".into()], &[], "collector")?;
         assert!(!db.is_pinned("read")?);
         assert!(db.pins_add(&["remove"], "other-reader").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn the_state_mapping_lookups_of_derive_rows_use_the_op_index() -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(super::SCHEMA)?;
+        for op in ["state.tree", "state.parts"] {
+            let plan: Vec<String> = conn
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN SELECT raw FROM records WHERE op='{op}' AND json_type(raw, '$.r.data.states.' || ?1)='object'"
+                ))?
+                .query_map(["x"], |row| row.get::<_, String>(3))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert!(plan.iter().any(|step| step.contains("USING INDEX records_op")), "{op}: {plan:?}");
+        }
         Ok(())
     }
 
