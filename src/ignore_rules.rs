@@ -12,6 +12,8 @@ use std::sync::Arc;
 /// The local ignore file of a working folder: not versioned, read by git and layr. The project
 /// setting `ignore.local` fills it in the `.git` folder of each line.
 pub const LOCAL_EXCLUDE: &str = ".git/info/exclude";
+/// The names of the files in a tree that hold ignore rules for their folder.
+pub(crate) const RULE_FILES: &[&str] = &[".gitignore", ".layrignore"];
 
 /// The local ignore file of the line of this command (`set_line_exclude`). A command often scans a
 /// snapshot of the line folder, which has no `.git` or an empty one (a nested subvolume on btrfs, the
@@ -51,7 +53,7 @@ impl Rules {
         Rules {
             root: root.to_path_buf(),
             captured: None,
-            files: &[".gitignore", ".layrignore"],
+            files: RULE_FILES,
             attribute: None,
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
@@ -67,7 +69,7 @@ impl Rules {
         Rules {
             root: root.to_path_buf(),
             captured: None,
-            files: if attribute.is_some() { &[".layrattributes"] } else { &[".gitignore", ".layrignore"] },
+            files: if attribute.is_some() { &[".layrattributes"] } else { RULE_FILES },
             attribute,
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
@@ -139,7 +141,7 @@ impl Rules {
         let mut files = BTreeMap::new();
         for path in paths {
             for dir in std::iter::once("").chain(path.match_indices('/').map(|(i, _)| &path[..i])) {
-                for name in [".gitignore", ".layrignore"] {
+                for name in RULE_FILES {
                     let rel = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
                     if !files.contains_key(&rel) {
                         let bytes = optional_rule(&root.join(&rel))?;
