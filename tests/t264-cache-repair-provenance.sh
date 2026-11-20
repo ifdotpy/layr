@@ -21,6 +21,11 @@ ok "the repaired cache can be saved immediately" l save --overlays --folder targ
 
 rm -rf target
 mkdir target
+ok "repair accepts an empty replacement cache" l overlay repair "$TG"
+ok "repair initializes the empty cache's location" cmp "$T/provenance" target/.layr-cache-location
+
+rm -rf target
+mkdir target
 echo unknown > target/output
 out=$(l overlay repair "$TG" 2>&1); rc=$?
 no "repair refuses existing unknown output" test "$rc" = 0
