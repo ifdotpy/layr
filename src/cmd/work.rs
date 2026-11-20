@@ -717,21 +717,23 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     h.repo.authorize_line(ctx, &line, crate::repo::LineOp::Direct)?;
     // The stage and the working folder of the line: no other command of the line writes them meanwhile.
     let _line_lock = h.repo.line_lock(&line)?;
-    // The status and the copy of the named paths read the whole working folder: seconds in a
-    // large line. They run before the store lock; under it the copy is used when the head and
-    // the staging content did not change, else the read runs again under the lock.
+    // Another command of the line may have saved while this one waited for the lease.
+    let line = h.repo.line(&line.id)?;
+    // The status and the copy of the named paths read the working folder: seconds in a large
+    // line. They run before the store lock; under it the copy is used when the head, the staging
+    // content and the quiet overlay files did not change, else the read runs again under the
+    // lock. Both reads compare only the paths the specs can touch.
     let limit = add_scan_limit(&specs);
-    let read = |line: &Line| -> Result<Option<(crate::repo::Temp, BTreeSet<String>, Vec<String>)>> {
-        let quiet = h.repo.quiet_paths(line)?;
+    let read = |line: &Line, quiet: &BTreeSet<String>| -> Result<(crate::repo::Temp, BTreeSet<String>, Vec<String>)> {
         let work = h.repo.working(line);
         let (index, stage) = h.repo.index_source(line)?;
         let mut roots = vec![work.as_path()];
         if let Some(s) = &stage {
             roots.push(s.as_path());
         }
-        let read = || {
+        let live = || {
             let st = h.repo.status_for_add(line, &work, &index, limit.as_ref())?;
-            let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, &quiet)?;
+            let (paths, ignored) = select_add(&h, &a, &specs, &st, &work, &index, quiet)?;
             crate::fs::observations::note_read(&work, &paths);
             let scan = crate::repo::Temp::selected(
                 &Snap::native(&work),
@@ -740,29 +742,26 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
             )?;
             Ok((scan, paths, ignored))
         };
-        crate::fs::observations::validated_read(&roots, limit.as_ref(), read)
+        if let Some(read) = crate::fs::observations::validated_read(&roots, limit.as_ref(), live)? {
+            return Ok(read);
+        }
+        // Without live read evidence (Linux), read a capture of the folder.
+        let (st, scan, _it, index) = h.repo.status_light(line, limit.as_ref())?;
+        let (paths, ignored) = select_add(&h, &a, &specs, &st, &scan.path, &index, quiet)?;
+        Ok((scan, paths, ignored))
     };
-    let early = {
-        let token = h.repo.index_token(&line)?;
-        read(&line)?.map(|r| (token, r))
-    };
-    // Drop the scan after the project lock on every return path. Native cleanup may
-    // reclaim backing objects, which publication defers until the lock is released.
+    let (token, quiet) = (h.repo.index_token(&line)?, h.repo.quiet_paths(&line)?);
+    // An early failure (a path that a concurrent change makes valid) is decided again under the lock.
+    let early = (token, read(&line, &quiet), quiet);
+    // The prepared scans (the one staged and a rejected early one) drop after the project lock.
+    // Native cleanup may reclaim backing objects, which publication defers until the lock is released.
     let (scan, paths, ignored_named);
     let _lock = _line_lock.lock(&h.repo.p)?;
     let line = h.repo.line(&line.id)?;
     let quiet = h.repo.quiet_paths(&line)?;
-    let prepared = match early {
-        Some((token, r)) if token == h.repo.index_token(&line)? => Some(r),
-        _ => read(&line)?,
-    };
-    (scan, paths, ignored_named) = match prepared {
-        Some(v) => v,
-        None => {
-            let (st, scan, _it, index) = h.repo.status_light(&line)?;
-            let (paths, ignored) = select_add(&h, &a, &specs, &st, &scan.path, &index, &quiet)?;
-            (scan, paths, ignored)
-        }
+    (scan, paths, ignored_named) = match early {
+        (token, Ok(prepared), early_quiet) if early_quiet == quiet && token == h.repo.index_token(&line)? => prepared,
+        _ => read(&line, &quiet)?,
     };
     if a.has("-n") {
         for p in &paths {

@@ -1417,7 +1417,8 @@ fn use_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(exit(1, "error: a virtual line shows main only; use a folder line for the view of an overlay"));
     }
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
-    let _lock = repo.p.lock_maintenance()?;
+    // The view changes the working folder: commands of the line (add, save) hold its lease.
+    let _lock = repo.line_lock(&line)?.lock(&repo.p)?;
     let line = repo.line(&line.id)?;
     let cur = repo.layers(&line)?;
     let names = match &top {
@@ -1516,7 +1517,8 @@ fn move_cmd(ctx: &Ctx, args: &[String]) -> Result<i32> {
         refuse_folder(repo, &name)?;
     }
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Save)?;
-    let _lock = repo.p.lock_maintenance()?;
+    // The view changes the working folder: commands of the line (add, save) hold its lease.
+    let _lock = repo.line_lock(&line)?.lock(&repo.p)?;
     let mut line = repo.line(&line.id)?;
     // The overlay is on the path of the view (docs/overlays.md section 1). An overlay above the one that
     // the folder shows (or any overlay, in the view of main) becomes the view first: its files come into the
