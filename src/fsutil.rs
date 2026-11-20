@@ -432,27 +432,82 @@ pub(crate) fn exact_metadata_checked(path: &Path, rel: &str) -> std::io::Result<
     Ok(Some(metadata))
 }
 
-/// True when the listing of folder `dir` has exactly `name`. The last listing is kept per
-/// thread while the folder stays the same: status checks each hard-linked file of a folder.
+/// True when the listing of folder `dir` has exactly `name`. The last listings are kept per
+/// thread while their folders stay the same (`Listings`): status checks each hard-linked file of
+/// a folder, often in a base and a live tree in turn.
 #[cfg(target_os = "macos")]
 fn listed(dir: &Path, name: &std::ffi::OsStr) -> std::io::Result<bool> {
     use std::cell::RefCell;
-    use std::collections::HashSet;
-    type Listing = (PathBuf, (u64, u64, i64, i64), HashSet<std::ffi::OsString>);
-    thread_local!(static LAST: RefCell<Option<Listing>> = const { RefCell::new(None) });
+    thread_local!(static LAST: RefCell<Listings> = RefCell::new(Listings::default()));
     let m = fs::symlink_metadata(dir)?;
     // A new, removed or renamed entry changes the ctime of the folder; tools can set its mtime
     // back, but not its ctime.
     let key = (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
     LAST.with_borrow_mut(|last| {
-        if !last.as_ref().is_some_and(|(d, k, _)| d == dir && *k == key) {
-            *last = None;
-            // A listing with an error is not kept.
-            let names = fs::read_dir(dir)?.map(|entry| entry.map(|entry| entry.file_name())).collect::<std::io::Result<_>>()?;
-            *last = Some((dir.to_path_buf(), key, names));
-        }
-        Ok(last.as_ref().is_some_and(|(_, _, names)| names.contains(name)))
+        let list = || fs::read_dir(dir)?.map(|entry| entry.map(|entry| entry.file_name())).collect();
+        Ok(last.names(dir, key, list)?.contains(name))
     })
+}
+
+/// The listings of the folders used last, at most `KEPT`, most recent first. Code that alternates
+/// between trees (a base and a live folder) keeps a listing of each.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct Listings(std::collections::VecDeque<(PathBuf, (u64, u64, i64, i64), std::collections::HashSet<std::ffi::OsString>)>);
+
+#[cfg(any(target_os = "macos", test))]
+impl Listings {
+    const KEPT: usize = 4;
+
+    /// The names in `dir`, listed again when its `key` changed. A listing with an error is not kept.
+    fn names(
+        &mut self,
+        dir: &Path,
+        key: (u64, u64, i64, i64),
+        list: impl FnOnce() -> std::io::Result<std::collections::HashSet<std::ffi::OsString>>,
+    ) -> std::io::Result<&std::collections::HashSet<std::ffi::OsString>> {
+        let known = self.0.iter().position(|(d, _, _)| d == dir).and_then(|at| self.0.remove(at));
+        let entry = match known.filter(|(_, k, _)| *k == key) {
+            Some(entry) => entry,
+            None => (dir.to_path_buf(), key, list()?),
+        };
+        self.0.truncate(Self::KEPT - 1);
+        self.0.push_front(entry);
+        Ok(&self.0[0].2)
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::Listings;
+    use std::cell::Cell;
+    use std::path::Path;
+
+    /// Lookups that alternate between a base and a live folder list each folder once; a folder
+    /// whose key changed is listed again, and the least recent of more than `KEPT` folders goes.
+    #[test]
+    fn alternating_folders_keep_their_listings() -> std::io::Result<()> {
+        let (lists, mut cache) = (Cell::new(0), Listings::default());
+        let mut names = |dir: &str, key: i64| {
+            let list = || {
+                lists.set(lists.get() + 1);
+                Ok(["f".into()].into())
+            };
+            cache.names(Path::new(dir), (1, 1, key, 0), list).map(|names| names.len())
+        };
+        for _ in 0..100 {
+            names("base/d", 0)?;
+            names("live/d", 0)?;
+        }
+        assert_eq!(lists.get(), 2);
+        names("live/d", 1)?;
+        assert_eq!(lists.get(), 3, "a changed folder is listed again");
+        for dir in ["a", "b", "c", "d", "base/d"] {
+            names(dir, 0)?;
+        }
+        assert_eq!(lists.get(), 8, "more folders than kept evict the least recent");
+        Ok(())
+    }
 }
 
 /// True when the volume stores the last `rel` components of `path` with exactly these names.
