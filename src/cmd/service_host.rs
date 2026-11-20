@@ -553,7 +553,7 @@ pub fn daemon(args: &[String]) -> Result<i32> {
             }
         }
     }
-    let _store_guard = Store::open(&root)?;
+    let store = Store::open(&root)?;
     if let Some(d) = sock.parent() {
         std::fs::create_dir_all(d)?;
         use std::os::unix::fs::PermissionsExt;
@@ -567,6 +567,18 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     }
     // The OCI registry serves other users: a user daemon has none.
     let registry_listeners = if user_mode { Vec::new() } else { crate::oci::registry::listeners(&root)? };
+    // Registry discovery opened every project and may have migrated catalogs. Complete that
+    // work in the parent once, so requests inherit no unrelated cleanup registrations.
+    let startup = Ctx {
+        store,
+        caller: Caller::from_uid(own),
+        cwd: std::env::current_dir()?,
+        env: std::env::vars().collect(),
+        author: Default::default(),
+        captures: Default::default(),
+        out: std::cell::RefCell::new(Box::new(std::io::sink())),
+    };
+    crate::free::finish_daemon_startup(&startup);
     let registry_uids: Vec<u32> = registry_listeners.iter().map(|(_, _, user)| user.uid).collect();
     let listener = UnixListener::bind(&sock)?;
     {
