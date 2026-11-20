@@ -99,17 +99,13 @@ impl LocalReplica for Local<'_, '_> {
     ) -> Result<Option<layr_store::sync::FetchSelection<StateRec, Line>>> {
         // W7's presence preflight, sharing the exact selection policy with discovery.
         // A missing selected state causes full remote inventory before catalog writes.
-        let known = self.repo().p.db.state_auxiliary()?.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         let lines = clone.then(|| fetch::source_lines(self.repo(), true)).transpose()?;
-        let (plan, present) = self.plan_fetch(records, selection, &known, lines)?;
+        let (plan, present) = self.plan_fetch(records, selection, None, lines)?;
         if !plan.missing.is_empty() {
             return Ok(None);
         }
-        for id in present {
-            if !self.repo().p.has_state(&id) {
-                return Ok(None);
-            }
-            self.repo().p.lock_or_borrow()?.write(|tx| tx.set_present(&id, true))?;
+        if !self.reconcile_present(&present)?.is_empty() {
+            return Ok(None);
         }
         Ok(Some(plan))
     }

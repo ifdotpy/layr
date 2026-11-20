@@ -151,6 +151,11 @@ fn retry_locked<T>(mut step: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::R
 }
 
 pub mod owners;
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static STATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 mod queries;
 mod transaction;
 #[cfg(test)]
@@ -399,11 +404,23 @@ impl Db {
     }
 
     pub fn record_line(&self, machine: &str, seq: u64) -> Result<Option<String>> {
+        #[cfg(test)]
+        RECORD_READS.with(|count| count.set(count.get() + 1));
         Ok(self
             .conn
             .prepare_cached("SELECT raw FROM records WHERE machine=?1 AND seq=?2")?
             .query_row(params![machine, seq as i64], |r| r.get(0))
             .optional()?)
+    }
+
+    /// Exact stored bytes in the incoming overlap's bounding range, read once under the project lock.
+    /// Sparse inputs can span more stored records than they contain themselves.
+    pub fn record_range(&self, machine: &str, first: u64, last: u64) -> Result<std::collections::BTreeMap<u64, String>> {
+        #[cfg(test)]
+        RECORD_READS.with(|count| count.set(count.get() + 1));
+        let mut st = self.conn.prepare_cached("SELECT seq, raw FROM records WHERE machine=?1 AND seq BETWEEN ?2 AND ?3")?;
+        let rows = st.query_map(params![machine, first.cast_signed(), last.cast_signed()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn record_machines(&self) -> Result<Vec<String>> {
@@ -878,6 +895,8 @@ impl Db {
     }
 
     pub fn state(&self, id: &str) -> Result<Option<StateRec>> {
+        #[cfg(test)]
+        STATE_READS.with(|count| count.set(count.get() + 1));
         let raw: Option<String> =
             self.conn.prepare_cached("SELECT rec FROM states WHERE id=?1")?.query_row(params![id], |r| r.get(0)).optional()?;
         Ok(match raw {

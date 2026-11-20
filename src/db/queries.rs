@@ -34,6 +34,13 @@ impl Db {
         rows.into_iter().map(|(raw, deleted)| Ok((serde_json::from_str(&raw)?, deleted))).collect()
     }
 
+    /// States whose catalog flags would change when a complete local tree is confirmed.
+    pub fn states_needing_presence(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT id FROM states WHERE present=0 OR deleted=1")?;
+        let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub fn stored_eviction_candidates(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT s.id FROM states s WHERE s.present=1 AND s.deleted=0
