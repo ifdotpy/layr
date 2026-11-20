@@ -35,6 +35,53 @@ P=$LAYR_ROOT/projects/p/lines
 O=$LAYR_ROOT/projects/p/meta/objects
 cd $P/main
 
+# Native-only states use export without importing objects or changing the working content.
+first=$(l rev-parse head)
+no "a legacy init makes no object store" test -e "$O"
+no "an unknown tree without an object store is refused" l objects checkout "$(printf 'ab%.0s' $(seq 32))" "$T/native-unknown-tree"
+ok "checkout of a native state by full id" l objects checkout "$first" "$T/native"
+eq "native checkout file content" "$(cat notes.txt)" "$(cat "$T/native/notes.txt" 2>/dev/null)"
+ok "native checkout large file content" cmp big.bin "$T/native/big.bin"
+eq "native checkout symbolic link" ../notes.txt "$(readlink "$T/native/bin/notes-link")"
+eq "native checkout dangling link" missing/target "$(readlink "$T/native/dangling")"
+ok "native checkout executable mode" test -x "$T/native/bin/run.sh"
+eq "native checkout modification time" "$(stat_mtime notes.txt)" "$(stat_mtime "$T/native/notes.txt" 2>/dev/null)"
+ok "native checkout uses the export marker" test -f "$T/native/.layr-export.json"
+no "native checkout does not create an object store" test -e "$O"
+mkdir "$T/native-empty"
+ok "native checkout accepts an empty destination and a state prefix" l objects checkout "${first:0:12}" "$T/native-empty"
+# Resolving head must not save or copy a working edit.
+echo working-only > working-only.txt
+ok "native checkout resolves head" l objects checkout head "$T/native-head"
+no "native checkout does not copy working edits" test -e "$T/native-head/working-only.txt"
+eq "native head checkout has the saved content" "$(cat "$T/src/notes.txt")" "$(cat "$T/native-head/notes.txt" 2>/dev/null)"
+# A positional destination must stay positional when forwarded to export.
+ok "native checkout accepts an option-like destination" l objects checkout head -- --force
+no "option-like destination excludes working edits" test -e ./--force/working-only.txt
+eq "option-like destination gets saved content" "$(cat "$T/src/notes.txt")" "$(cat ./--force/notes.txt 2>/dev/null)"
+no "option-like destination creates no state-id folder" test -e "./$first"
+no "native checkout creates no automatic state" l rev-parse 'head@{0}'
+rm -rf -- ./--force
+rm working-only.txt
+mkdir "$T/native-occupied"
+echo keep > "$T/native-occupied/keep"
+no "native checkout refuses a nonempty destination" l objects checkout head "$T/native-occupied"
+eq "native checkout leaves existing content intact" keep "$(cat "$T/native-occupied/keep")"
+l export head "$T/native-exported" --all -q
+no "native checkout refuses an existing export" l objects checkout head "$T/native-exported"
+no "native checkout does not create missing parent folders" l objects checkout head "$T/missing-parent/out"
+no "native checkout leaves missing parents absent" test -e "$T/missing-parent"
+echo keep-file > "$T/native-file"
+no "native checkout refuses a file destination" l objects checkout head "$T/native-file"
+eq "native checkout leaves a file destination intact" keep-file "$(cat "$T/native-file")"
+no "native checkouts still make no object store" test -e "$O"
+# An initialized object store can also lack a mapping for this native state.
+l objects stat --json >/dev/null
+before=$(l objects stat --json)
+ok "native checkout with an existing object store" l objects checkout head "$T/native-existing-store"
+eq "native checkout does not import objects or mappings" "$before" "$(l objects stat --json)"
+eq "native checkout leaves the line clean" "" "$(l status --short)"
+
 # 1. Import: the tree id is printed first; the same state gives the same tree and no new object.
 out=$(l objects import head 2>&1)
 tree=$(echo "$out" | head -1)
@@ -104,5 +151,20 @@ python3 -I -c 'import sys; p=sys.argv[1]; d=bytearray(open(p,"rb").read()); d[0]
 out=$(l objects verify "$first" 2>&1); rc=$?
 eq "verify of a corrupted store fails" 1 "$rc"
 has "and names the file" "content differs: src/main.rs" "$out"
+
+# Saved paths remain exportable after an ignore rule is added; checkout still scans secrets.
+l init native-rules --no-objects --from "$T/src" -q >/dev/null
+cd "$LAYR_ROOT/projects/native-rules/lines/main"
+printf '\nnotes.txt\n' >> .gitignore
+printf 'password=sk_live_1234567890abcdef\n' > credential.txt
+l add credential.txt
+l save -qam "ignore an already saved file"
+ok "native checkout includes saved files now ignored" l objects checkout head "$T/native-ignored"
+eq "the ignored saved file keeps its content" "$(l show head:notes.txt)" "$(cat "$T/native-ignored/notes.txt" 2>/dev/null)"
+eq "the secret fixture is saved" password=sk_live_1234567890abcdef "$(l show head:credential.txt)"
+l config secrets.paths '["credential.txt"]' >/dev/null
+no "native checkout refuses declared secrets" l objects checkout head "$T/native-secret"
+no "refused native checkout writes no secret file" test -e "$T/native-secret/credential.txt"
+no "native checkout with ignore and secret rules creates no objects" test -e "$LAYR_ROOT/projects/native-rules/meta/objects"
 
 finish

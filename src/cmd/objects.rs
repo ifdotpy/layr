@@ -6,7 +6,7 @@ use super::{exit, here, Here};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use crate::ids;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use layr_objects::{Id, StateRef, Store, Temperature, WriteOptions, WriteReport};
 use serde_json::json;
 use std::sync::atomic::Ordering;
@@ -435,24 +435,49 @@ fn checkout(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // On a root service every write of the checkout takes the caller's file identity, so the
     // files belong to the caller and root never writes into the caller's folder.
     let caller = crate::privs::CallerFs::of(ctx)?;
-    let store = open(&h)?;
+    let dst = if a.pos[1].starts_with('/') { std::path::PathBuf::from(&a.pos[1]) } else { ctx.cwd.join(&a.pos[1]) };
+    // Looking up a native-only state must not initialize an object store.
+    let store = if crate::objstore::exists(&h.repo.p) { Some(open(&h)?) } else { None };
     let (refs, state) = match Id::parse(&a.pos[0]) {
-        Ok(tree) => match store.states_of(&tree)?.into_iter().next() {
-            Some(state) => (store.state_ref(&state)?.expect("a listed state"), state),
-            None => bail!("tree {tree} is not the tree of an imported state"),
-        },
-        Err(_) => {
-            let state = crate::revs::resolve_state(&h.repo, h.line.as_ref(), &a.pos[0])?;
-            match store.state_ref(&state)? {
-                Some(r) => (r, state),
-                None => bail!("state {} is not imported: run layr objects import {}", ids::short(&state), a.pos[0]),
+        Ok(tree) => {
+            let Some(store) = &store else {
+                bail!("tree {tree} is not the tree of an imported state");
+            };
+            match store.states_of(&tree)?.into_iter().next() {
+                Some(state) => (store.state_ref(&state)?, state),
+                None => bail!("tree {tree} is not the tree of an imported state"),
             }
         }
+        Err(_) => {
+            let state = crate::revs::resolve_state(&h.repo, h.line.as_ref(), &a.pos[0])?;
+            let refs = store.as_ref().map(|s| s.state_ref(&state)).transpose()?.flatten();
+            (refs, state)
+        }
+    };
+    let Some((store, refs)) = store.zip(refs) else {
+        // Native states use export's copy, permissions and secret checks, without importing.
+        // Keep checkout's absent-or-empty destination rule, even for a previous export.
+        let _pin = h.repo.pin(&[&state])?;
+        let empty = crate::privs::as_caller_fs(ctx, || {
+            Ok(match std::fs::read_dir(&dst) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&dst)?;
+                    true
+                }
+                Err(e) => return Err(e.into()),
+            })
+        })
+        .with_context(|| format!("cannot use {}", dst.display()))?;
+        if !empty {
+            bail!("{} is not empty", dst.display());
+        }
+        // --all retains every saved file, including files now covered by ignore rules.
+        return super::transfer::export(ctx, &["--all".into(), "--".into(), state, a.pos[1].clone()]);
     };
     let tree = refs.tree;
     // The same rule as `layr export`: a folder outside the store gets no secret file.
     crate::secrets::check_contents(ctx, &h.repo, &state)?;
-    let dst = if a.pos[1].starts_with('/') { std::path::PathBuf::from(&a.pos[1]) } else { ctx.cwd.join(&a.pos[1]) };
     let started = Instant::now();
     let r = match &caller {
         Some(c) => layr_objects::checkout_as(&store, &tree, Some(&refs.times), &dst, &|step| c.run(step))?,
