@@ -887,7 +887,20 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
     let (states, plan) = match preflight.filter(|p| all_confirmed(&confirmed, &p.left)) {
         Some(plan) => (BTreeMap::new(), plan),
         None => {
-            listed = store.backend.list("states/")?;
+            let before = crate::trace::enabled().then(|| store.backend.gateway_transfer_stats()).flatten();
+            let listing = {
+                let _listing = crate::trace::span("store list states");
+                store.backend.list("states/")
+            };
+            if let Some(before) = before {
+                let after = store.backend.transfer_stats();
+                eprintln!(
+                    "trace store list states HTTP: {} attempt(s), {} response body bytes",
+                    after.requests - before.requests,
+                    after.control_received - before.control_received,
+                );
+            }
+            listed = listing?;
             let states = attempts_of(&listed);
             let plan = local.fetch_selection(
                 &records.lines,

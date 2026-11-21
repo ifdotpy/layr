@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]
-struct FakeLocal {
+pub(super) struct FakeLocal {
     records: Vec<String>,
     states: Vec<StateRec>,
     root: PathBuf,
@@ -29,6 +29,13 @@ struct FakeLocal {
     /// Stages that fail with a full disk before one succeeds.
     full_stages: usize,
     _coordinator_only: std::rc::Rc<()>,
+    git_imports: BTreeSet<String>,
+    pub(super) git_packs: std::cell::RefCell<Option<Vec<Vec<u8>>>>,
+}
+impl FakeLocal {
+    pub(super) fn with_git_imports(git_imports: Vec<String>) -> Self {
+        Self { git_imports: git_imports.into_iter().collect(), git_packs: Some(Vec::new()).into(), ..Self::default() }
+    }
 }
 impl LocalReplica for FakeLocal {
     type State = StateRec;
@@ -179,16 +186,16 @@ impl LocalReplica for FakeLocal {
         error
     }
     fn git_has_store(&self) -> bool {
-        false
+        self.git_packs.borrow().is_some()
     }
     fn git_init(&self) -> Result<()> {
         Ok(())
     }
     fn git_imported(&self) -> Result<Vec<String>> {
-        Ok(Vec::new())
+        Ok(self.git_imports.iter().cloned().collect())
     }
     fn git_has_commits(&self, commits: &[String]) -> Result<Vec<bool>> {
-        Ok(vec![false; commits.len()])
+        Ok(commits.iter().map(|commit| self.git_imports.contains(commit)).collect())
     }
     fn git_outside(&self, _: &[String], _: &[String]) -> Result<Vec<String>> {
         bail!("no Git history")
@@ -196,8 +203,9 @@ impl LocalReplica for FakeLocal {
     fn git_pack(&self, _: &[String], _: &[String]) -> Result<Vec<u8>> {
         bail!("no Git history")
     }
-    fn git_install(&self, _: &[u8]) -> Result<()> {
-        bail!("no Git history")
+    fn git_install(&self, pack: &[u8]) -> Result<()> {
+        self.git_packs.borrow_mut().as_mut().context("no Git history")?.push(pack.to_vec());
+        Ok(())
     }
 }
 struct FakeRead {
