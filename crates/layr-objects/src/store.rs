@@ -450,7 +450,10 @@ impl Store {
                 Some(p) => p.clone(),
                 None => {
                     let data_path = self.root.join("packs").join(format!("{name}.pack"));
-                    let data = File::open(&data_path).with_context(|| format!("pack {name} has an index but no data"))?;
+                    let data = File::open(&data_path).with_context(|| match data_path.exists() {
+                        true => format!("open pack {name}"),
+                        false => format!("pack {name} has an index but no data"),
+                    })?;
                     let index_path = self.root.join("packs").join(format!("{name}.idx"));
                     Arc::new(LoadedPack { id, data, index: OnceLock::new(), index_path })
                 }
