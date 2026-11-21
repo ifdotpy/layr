@@ -30,7 +30,15 @@ pub fn has_store(repo: &Repo) -> bool {
     store(repo).join("objects").is_dir()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The git commands this thread made through `base_cmd`, for tests that count them.
+    static GIT_COMMANDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn base_cmd(git_dir: &Path) -> Command {
+    #[cfg(test)]
+    GIT_COMMANDS.with(|n| n.set(n.get() + 1));
     let mut c = Command::new("git");
     c.arg("-c").arg(format!("safe.directory={}", git_dir.display()));
     c.arg("-c").arg("safe.directory=*");
@@ -488,29 +496,77 @@ struct TreeEntry {
 }
 
 impl TreeEntry {
+    /// The entry of a tree record (`tree_records`): its canonical mode and its ID.
+    fn new(mode: u32, oid: &[u8]) -> Self {
+        Self { mode: format!("{mode:o}"), oid: hex::encode(oid) }
+    }
     fn is_tree(&self) -> bool {
         self.mode == "40000"
     }
     fn is_link(&self) -> bool {
         self.mode == "160000"
     }
+    /// A file or a symbolic link: not a folder, not a submodule.
+    fn is_blob(&self) -> bool {
+        !self.is_tree() && !self.is_link()
+    }
+}
+
+/// The mode Git reads for the raw octal mode of a tree record (`decode_tree_entry`, `canon_mode`):
+/// the file type bits decide, so `040000` and `40755` are folders, `120777` is a symbolic link and
+/// `160755` a submodule; a regular file is 100755 when its owner may execute it, else 100644.
+/// Like Git, a long mode keeps its low 32 bits. `None` for an empty mode or one that is not octal.
+fn canon_mode(raw: &[u8]) -> Option<u32> {
+    if raw.is_empty() {
+        return None;
+    }
+    let mut mode = 0u32;
+    for digit in raw {
+        if !(b'0'..=b'7').contains(digit) {
+            return None;
+        }
+        mode = (mode << 3) | u32::from(digit - b'0');
+    }
+    Some(match mode & 0o170000 {
+        0o100000 if mode & 0o100 != 0 => 0o100755,
+        0o100000 => 0o100644,
+        kind @ (0o040000 | 0o120000) => kind,
+        _ => 0o160000,
+    })
+}
+
+/// The records of a raw Git tree in order: canonical mode (`canon_mode`), name and the 20 bytes of
+/// the object ID. A bad record is the last item.
+fn tree_records(data: &[u8]) -> impl Iterator<Item = Result<(u32, &[u8], &[u8])>> {
+    let mut rest = data;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let record = match (rest.iter().position(|b| *b == b' '), rest.iter().position(|b| *b == 0)) {
+            (Some(space), Some(nul)) if space < nul && nul + 21 <= rest.len() => {
+                let (record, tail) = rest.split_at(nul + 21);
+                rest = tail;
+                canon_mode(&record[..space])
+                    .map(|mode| (mode, &record[space + 1..nul], &record[nul + 1..]))
+                    .context("bad Git tree mode")
+            }
+            _ => Err(anyhow!("bad Git tree")),
+        };
+        if record.is_err() {
+            rest = &[];
+        }
+        Some(record)
+    })
 }
 
 fn parse_tree(data: &[u8]) -> Result<BTreeMap<String, TreeEntry>> {
-    let mut out = BTreeMap::new();
-    let mut rest = data;
-    while !rest.is_empty() {
-        let space = rest.iter().position(|b| *b == b' ').context("bad Git tree")?;
-        let nul = rest.iter().position(|b| *b == 0).context("bad Git tree")?;
-        if nul < space || rest.len() < nul + 21 {
-            bail!("bad Git tree");
-        }
-        let mode = String::from_utf8_lossy(&rest[..space]).into_owned();
-        let name = String::from_utf8_lossy(&rest[space + 1..nul]).into_owned();
-        out.insert(name, TreeEntry { mode, oid: hex::encode(&rest[nul + 1..nul + 21]) });
-        rest = &rest[nul + 21..];
-    }
-    Ok(out)
+    tree_records(data)
+        .map(|record| {
+            let (mode, name, oid) = record?;
+            Ok((String::from_utf8_lossy(name).into_owned(), TreeEntry::new(mode, oid)))
+        })
+        .collect()
 }
 
 /// What one commit changes against its first parent, read from the Git trees that differ.
@@ -1761,43 +1817,45 @@ fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>
             None => export_commit(repo, state)?,
         },
     };
-    let mut cat = CatFile::new(&s)?;
-    let raw = cat.object(&commit, "commit")?;
-    let mut oid = tree_id(&raw)?.to_string();
-    let mut kind = "tree";
-    for component in path.trim_end_matches('/').split('/').filter(|_| !path.is_empty()) {
-        if kind != "tree" {
-            return Ok(None);
-        }
-        let bytes = cat.object(&oid, "tree")?;
-        let mut rest = bytes.as_slice();
-        let mut found = None;
-        while !rest.is_empty() {
-            let space = rest.iter().position(|b| *b == b' ').context("bad Git tree mode")?;
-            let nul = rest.iter().position(|b| *b == 0).context("bad Git tree name")?;
-            let end = nul.checked_add(21).filter(|end| *end <= rest.len()).context("short Git tree ID")?;
-            if rest.get(space + 1..nul) == Some(component.as_bytes()) {
-                let kind = match &rest[..space] {
-                    b"40000" | b"040000" => "tree",
-                    b"160000" => "commit",
-                    _ => "blob",
-                };
-                found = Some((hex::encode(&rest[nul + 1..end]), kind));
-                break;
-            }
-            rest = &rest[end..];
-        }
-        let Some((next, next_kind)) = found else {
+    with_objects(repo, |cat| {
+        let Some(found) = path_entry(cat, &commit, path)? else {
             return Ok(None);
         };
-        oid = next;
-        kind = next_kind;
+        // Gitlinks name commits in another repository; their containing tree authenticates the ID.
+        if !found.is_link() {
+            check_object(&s, cat, &found.oid, if found.is_tree() { "tree" } else { "blob" })?;
+        }
+        Ok(Some(found.oid))
+    })
+}
+
+/// The tree entry at `path` of `commit` (the root tree for ""), read through `cat`: only the trees
+/// on the path, one per component; each costs O(its entries). `None` when no entry is there.
+fn path_entry(cat: &mut CatFile, commit: &str, path: &str) -> Result<Option<TreeEntry>> {
+    let raw = cat.object(commit, "commit")?;
+    let mut found = TreeEntry { mode: "40000".into(), oid: tree_id(&raw)?.to_string() };
+    let path = path.trim_matches('/');
+    for component in path.split('/').filter(|_| !path.is_empty()) {
+        if !found.is_tree() {
+            return Ok(None);
+        }
+        match tree_find(&cat.object(&found.oid, "tree")?, component.as_bytes())? {
+            Some(next) => found = next,
+            None => return Ok(None),
+        }
     }
-    // Gitlinks name commits in another repository; their containing tree authenticates the ID.
-    if kind != "commit" {
-        check_object(&s, &mut cat, &oid, kind)?;
+    Ok(Some(found))
+}
+
+/// The entry `name` of the raw Git tree `tree`, scanning up to it.
+fn tree_find(tree: &[u8], name: &[u8]) -> Result<Option<TreeEntry>> {
+    for record in tree_records(tree) {
+        let (mode, found, oid) = record?;
+        if found == name {
+            return Ok(Some(TreeEntry::new(mode, oid)));
+        }
     }
-    Ok(Some(oid))
+    Ok(None)
 }
 
 /// The commit of a state in the git store, if it has one: the commit a record names (import,
@@ -2866,39 +2924,41 @@ pub enum Entry {
     Link(Vec<u8>),
 }
 
-/// The entry at `path` of `commit` ("" is the root), read from the git objects.
+/// The entry at `path` of `commit` ("" is the root), read from the git objects through the
+/// object reader of the command.
 pub fn entry(repo: &Repo, commit: &str, path: &str) -> Result<Entry> {
-    let s = store(repo);
-    let path = path.trim_matches('/');
-    if path.is_empty() {
-        return Ok(Entry::Dir(folder_names(&s, &format!("{commit}^{{tree}}"))?));
-    }
-    let out = git_out_bytes(&s, &["ls-tree", "-z", "--full-tree", commit, "--", path])?;
-    let Some(rec) = out.split(|b| *b == 0).find(|r| !r.is_empty()) else {
-        return Ok(Entry::Missing);
-    };
-    let rec = String::from_utf8_lossy(rec).into_owned();
-    let (meta, _) = rec.split_once('\t').context("bad Git tree entry")?;
-    let fields: Vec<&str> = meta.split(' ').collect();
-    match (fields[0], fields[1]) {
-        ("040000", _) | (_, "tree") => Ok(Entry::Dir(folder_names(&s, fields[2])?)),
-        (_, "commit") => Ok(Entry::Dir(Vec::new())),
-        ("120000", _) => Ok(Entry::Link(git_out_bytes(&s, &["cat-file", "blob", fields[2]])?)),
-        _ => Ok(Entry::File(git_out_bytes(&s, &["cat-file", "blob", fields[2]])?)),
-    }
+    with_objects(repo, |cat| {
+        let Some(found) = path_entry(cat, commit, path)? else {
+            return Ok(Entry::Missing);
+        };
+        Ok(if found.is_tree() {
+            let mut names = tree_records(&cat.object(&found.oid, "tree")?)
+                .map(|record| {
+                    let (mode, name, _) = record?;
+                    Ok((String::from_utf8_lossy(name).into_owned(), matches!(mode, 0o040000 | 0o160000)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            names.sort();
+            Entry::Dir(names)
+        } else if found.is_link() {
+            Entry::Dir(Vec::new())
+        } else if found.mode == "120000" {
+            Entry::Link(cat.object(&found.oid, "blob")?)
+        } else {
+            Entry::File(cat.object(&found.oid, "blob")?)
+        })
+    })
 }
 
-fn folder_names(s: &Path, tree: &str) -> Result<Vec<(String, bool)>> {
-    let out = git_out_bytes(s, &["ls-tree", "-z", tree])?;
-    let mut names = Vec::new();
-    for rec in out.split(|b| *b == 0).filter(|r| !r.is_empty()) {
-        let rec = String::from_utf8_lossy(rec).into_owned();
-        let (meta, name) = rec.split_once('\t').context("bad Git tree entry")?;
-        let is_dir = meta.split(' ').nth(1).is_some_and(|t| t == "tree" || t == "commit");
-        names.push((name.to_string(), is_dir));
-    }
-    names.sort();
-    Ok(names)
+/// The blob id of the file or symbolic link at `path` of `commit`; `None` when the path is
+/// missing, a folder or a submodule. Reads only the trees on the path.
+pub fn file_blob(repo: &Repo, commit: &str, path: &str) -> Result<Option<String>> {
+    with_objects(repo, |cat| Ok(path_entry(cat, commit, path)?.filter(TreeEntry::is_blob).map(|e| e.oid)))
+}
+
+/// The bytes of a blob, through the object reader of the command.
+pub fn blob(repo: &Repo, oid: &str) -> Result<Vec<u8>> {
+    with_objects(repo, |cat| cat.object(oid, "blob"))
 }
 
 /// Every regular file of `commit` (no links, no submodules): path and blob id.
@@ -3066,7 +3126,13 @@ fn with_objects<T>(repo: &Repo, f: impl FnOnce(&mut CatFile) -> Result<T>) -> Re
             *slot = Some((s.clone(), CatFile::new(&s)?));
         }
         let (_, cat) = slot.as_mut().context("object reader")?;
-        f(cat)
+        let result = f(cat);
+        // A failed read can leave the reader out of step with its output (a body not read, a
+        // process that ended): the next read starts a new one.
+        if result.is_err() {
+            *slot = None;
+        }
+        result
     })
 }
 
@@ -3093,7 +3159,7 @@ pub(crate) struct Delta {
 }
 
 fn file_side(e: Option<&TreeEntry>) -> Option<(String, String)> {
-    e.filter(|e| !e.is_tree() && !e.is_link()).map(|e| (e.mode.clone(), e.oid.clone()))
+    e.filter(|e| e.is_blob()).map(|e| (e.mode.clone(), e.oid.clone()))
 }
 
 /// The files that differ between two trees, below `prefix` (`old`/`new` None: the side is empty).

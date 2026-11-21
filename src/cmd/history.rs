@@ -1432,6 +1432,14 @@ pub fn merge_base(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
 }
 
+/// The oldest version read reaches back to `state`, which has the same bytes; the working version
+/// (no state) stays the working version.
+fn reach_back(versions: &mut [(Option<StateRec>, Vec<u8>)], state: StateRec) {
+    if let Some((Some(owner), _)) = versions.last_mut() {
+        *owner = state;
+    }
+}
+
 pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .paths()
@@ -1480,16 +1488,29 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
         }
     }
     let mut cur = Some(start.clone());
+    // The blob of the version read last from git: a state with the same blob has the same bytes.
+    let mut last_blob = None;
     while let Some(id) = cur {
         let s = repo.state(&id)?;
-        // A state that is not on disk: its file is read from git. Otherwise the file is read through
-        // the layers of a thin state, with no view of each state of the history.
+        cur = s.parents.first().cloned();
+        // A state that is not on disk: its file is read from git, through one object reader for
+        // the whole walk. Otherwise the file is read through the layers of a thin state, with no
+        // view of each state of the history.
         let (size, data) = match crate::gitbridge::unbuilt_commit(repo, &id)? {
-            Some(commit) => match crate::gitbridge::entry(repo, &commit, &path)? {
-                crate::gitbridge::Entry::File(d) | crate::gitbridge::Entry::Link(d) => (Some(d.len() as u64), Some(d)),
-                _ => (None, None),
+            Some(commit) => match crate::gitbridge::file_blob(repo, &commit, &path)? {
+                Some(oid) if last_blob.as_ref() == Some(&oid) => {
+                    reach_back(&mut versions, s);
+                    continue;
+                }
+                Some(oid) => {
+                    let d = crate::gitbridge::blob(repo, &oid)?;
+                    last_blob = Some(oid);
+                    (Some(d.len() as u64), Some(d))
+                }
+                None => (None, None),
             },
             None => {
+                last_blob = None;
                 let root = match repo.state_src(&id) {
                     Ok(r) => r,
                     Err(_) => break,
@@ -1507,16 +1528,13 @@ pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
                     if held > 4 * fsutil::MAX_TEXT && !versions.is_empty() {
                         break;
                     }
-                    versions.push((Some(s.clone()), d));
-                } else if let Some(last) = versions.last_mut() {
-                    if last.0.is_some() {
-                        last.0 = Some(s.clone());
-                    }
+                    versions.push((Some(s), d));
+                } else {
+                    reach_back(&mut versions, s);
                 }
             }
             Err(()) => break,
         }
-        cur = s.parents.first().cloned();
     }
     if versions.is_empty() {
         return Err(exit(128, format!("fatal: no such path '{path}'")));
