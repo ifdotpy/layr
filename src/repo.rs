@@ -1454,10 +1454,18 @@ impl<'a> Repo<'a> {
     /// is that command's new one. Writers replace a stale index under the lock (`ensure_stage`)
     /// and a commit drops it after its own read.
     pub fn current_stage(&self, line: &Line) -> Result<Option<PathBuf>> {
+        // Keep the no-stage lookup cheap for callers that have not selected an index.
+        if self.stage(line).is_none() {
+            return Ok(None);
+        }
+        self.current_stage_of(line, &self.layers(line)?)
+    }
+
+    fn current_stage_of(&self, line: &Line, layers: &[crate::overlay::Layer]) -> Result<Option<PathBuf>> {
         match self.stage(line) {
             Some(s) => {
                 let base = std::fs::read_to_string(self.stage_base_file(line)).unwrap_or_default();
-                Ok((base.trim() == self.stage_key(line)?).then_some(s))
+                Ok((base.trim() == Self::stage_key_of(line, layers)).then_some(s))
             }
             None => Ok(None),
         }
@@ -1547,7 +1555,7 @@ impl<'a> Repo<'a> {
         // afterward too: a replacement cannot lend its token to the old semantics.
         // The layers too: an overlay switch after this makes the token stale, never wrong.
         let layers = self.layers(line)?;
-        let stage = self.current_stage(line)?.map(SelectedStage::capture).transpose()?;
+        let stage = self.current_stage_of(line, &layers)?.map(SelectedStage::capture).transpose()?;
         let head = self.head_src_of(line, &layers, false)?;
         let source = match &stage {
             Some(stage) => Snap::stage(&stage.path, head)?,
@@ -1588,12 +1596,6 @@ impl<'a> Repo<'a> {
 
     // ----- status -----
 
-    /// Changes of the working content: staged (head to index), unstaged (index to working),
-    /// untracked and ignored paths, and conflicts left by a merge.
-    pub fn status_of(&self, line: &Line, scan: &Path, index: &Snap) -> Result<Status> {
-        self.status_of_inner(line, scan, index, true)
-    }
-
     /// Add only needs paths that differ between the index and the working tree.
     /// `limit` names the paths (with their ignore files) that the caller reads: only they are
     /// scanned and compared, and the lists hold nothing else (APFS).
@@ -1602,21 +1604,31 @@ impl<'a> Repo<'a> {
             let mut status = Status::default();
             let list = changes::file_changes_of(index, scan, changes::candidates_selected(index, scan, paths)?)?;
             classify(scan, list, &mut status);
-            self.finish_status(line, scan, index, false, &mut status)?;
+            self.finish_status(line, scan, index, false, &mut status, &[])?;
             return Ok(status);
         }
-        self.status_of_inner(line, scan, index, false)
-    }
-
-    fn status_of_inner(&self, line: &Line, scan: &Path, index: &Snap, full: bool) -> Result<Status> {
-        self.status_of_with_policy(line, scan, index, full, None)
+        self.status_of_with_policy(line, scan, index, false, None)
     }
 
     fn status_of_with_policy(&self, line: &Line, scan: &Path, index: &Snap, full: bool, local: Option<&[u8]>) -> Result<Status> {
+        let layers = if full { self.layers(line)? } else { Vec::new() };
+        self.status_of_layers(line, scan, index, full, local, &layers)
+    }
+
+    /// Compare and collect conflicts against the same layers that selected the index.
+    fn status_of_layers(
+        &self,
+        line: &Line,
+        scan: &Path,
+        index: &Snap,
+        full: bool,
+        local: Option<&[u8]>,
+        layers: &[crate::overlay::Layer],
+    ) -> Result<Status> {
         let _comparison = crate::trace::span("status full comparison");
         let mut st = Status::default();
         if full {
-            let head = self.head_src(line)?;
+            let head = self.head_src_of(line, layers, false)?;
             if !same_tree(index, &head) {
                 let _t = crate::trace::span("status: head to index diff");
                 // The index holds what `add` staged, an attribute-only change included.
@@ -1633,12 +1645,20 @@ impl<'a> Repo<'a> {
             }
             None => classify(scan, list, &mut st),
         }
-        self.finish_status(line, scan, index, full, &mut st)?;
+        self.finish_status(line, scan, index, full, &mut st, layers)?;
         Ok(st)
     }
 
     /// Untracked folders and open conflicts of a status whose lists are complete.
-    fn finish_status(&self, line: &Line, scan: &Path, index: &Snap, full: bool, st: &mut Status) -> Result<()> {
+    fn finish_status(
+        &self,
+        line: &Line,
+        scan: &Path,
+        index: &Snap,
+        full: bool,
+        st: &mut Status,
+        layers: &[crate::overlay::Layer],
+    ) -> Result<()> {
         // Untracked folders: the topmost folder that does not exist in the index.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
         for f in &st.untracked {
@@ -1668,7 +1688,7 @@ impl<'a> Repo<'a> {
         }
         // Conflicts of a merge of the line's follow overlays.
         if !self.p.is_overlay() {
-            for l in self.layers(line)? {
+            for l in layers {
                 if let Some(rec) = self.overlay_repo(&l.overlay).ok().and_then(|o| o.p.db.state(&l.state).ok().flatten()) {
                     for c in &rec.conflicts {
                         if conflict_open(scan, c)? {
@@ -1802,7 +1822,7 @@ impl<'a> Repo<'a> {
     fn status_selected(&self, line: &Line, selected: &SelectedIndex) -> Result<(Status, Temp, Option<Temp>, Snap)> {
         let scan = self.scan(line)?;
         let (index, itemp) = self.snapshot_index(selected)?;
-        let st = self.status_of(line, &scan.path, &index)?;
+        let st = self.status_of_layers(line, &scan.path, &index, true, None, &selected.layers)?;
         Ok((st, scan, itemp, index))
     }
 
@@ -1843,7 +1863,7 @@ impl<'a> Repo<'a> {
         if crate::fs::prefers_captured_comparison(&selected.source) {
             let scan = self.scan(line)?;
             let (index, _itemp) = self.snapshot_index(selected)?;
-            return self.status_of_with_policy(line, &scan.path, &index, true, Some(&local));
+            return self.status_of_layers(line, &scan.path, &index, true, Some(&local), &selected.layers);
         }
         let Some(key) = self.status_key(line, &work, selected, &local).ok().flatten() else {
             return Ok(self.status_selected(line, selected)?.0);
@@ -1861,12 +1881,12 @@ impl<'a> Repo<'a> {
         // The baseline precedes the snapshot: a change during it invalidates the next read.
         let scan = self.scan(line)?;
         let (frozen_index, _itemp) = self.snapshot_index(selected)?;
-        let st = match self.status_of_with_policy(line, &scan.path, &frozen_index, true, Some(&local)) {
+        let st = match self.status_of_layers(line, &scan.path, &frozen_index, true, Some(&local), &selected.layers) {
             Ok(st) => st,
             Err(_) => return Ok(self.status_selected(line, selected)?.0),
         };
         selected.validate_stage()?;
-        let current_stage = self.current_stage(line)?;
+        let current_stage = self.current_stage_of(line, &selected.layers)?;
         if current_stage.as_deref() == selected.stage.as_ref().map(|stage| stage.path.as_path())
             && Rules::new(&work).local_policy().is_ok_and(|current| current == local)
             && self.status_key(line, &work, selected, &local).ok().flatten().as_ref() == Some(&key)
@@ -1905,7 +1925,7 @@ impl<'a> Repo<'a> {
     fn status_key(&self, line: &Line, work: &Path, selected: &SelectedIndex, local: &[u8]) -> Result<Option<String>> {
         selected.validate_stage()?;
         use layr_hashers::{Digest, GitCompatible};
-        if self.p.is_overlay() || !self.layers(line)?.is_empty() {
+        if self.p.is_overlay() || !selected.layers.is_empty() {
             return Ok(None);
         }
         let mut h = GitCompatible::new();
@@ -1977,7 +1997,7 @@ impl<'a> Repo<'a> {
         st.unstaged.sort_by(|a, b| a.path().cmp(b.path()));
         st.untracked.sort();
         st.ignored.sort();
-        self.finish_status(line, work, index, true, &mut st)?;
+        self.finish_status(line, work, index, true, &mut st, &selected.layers)?;
         if !rules.captured_matches()? {
             return Ok(None);
         }
@@ -1989,7 +2009,7 @@ impl<'a> Repo<'a> {
             return Ok(None);
         }
         selected.validate_stage()?;
-        let current_stage = self.current_stage(line)?;
+        let current_stage = self.current_stage_of(line, &selected.layers)?;
         if current_stage.as_deref() != selected.stage.as_ref().map(|stage| stage.path.as_path())
             || self.status_key(line, work, selected, local)?.as_deref() != Some(key)
         {
@@ -4924,7 +4944,7 @@ mod status_policy_tests {
     }
 
     #[test]
-    fn the_index_token_names_the_layers_selected_with_the_source() -> Result<()> {
+    fn index_token_and_status_key_use_the_layers_selected_with_the_source() -> Result<()> {
         let root = std::env::temp_dir().join(format!("layr-index-layers-{}", ids::new_id()));
         let store = crate::store::Store::open(&root.join("store"))?;
         let dir = store.project_dir("p")?;
@@ -4959,6 +4979,33 @@ mod status_policy_tests {
         assert_eq!(token(&[])?, token(&[])?);
         assert_ne!(token(&[])?, token(&["a"])?);
         assert_ne!(token(&["a"])?, token(&["b"])?);
+        let mut selected = SelectedIndex {
+            source: snap(&head),
+            stage: None,
+            layers: vec![crate::overlay::Layer { overlay: "other".into(), state: "a".into() }],
+        };
+        // The live stack is empty after an overlay switch. A comparison selected
+        // with overlays must still be excluded from the no-overlay status cache.
+        assert!(repo.layers(&line)?.is_empty());
+        assert_eq!(repo.status_key(&line, &head, &selected, b"")?, None);
+        std::fs::create_dir_all(dir.join("meta/stage"))?;
+        let stage = repo.p.stage_path(&line.id);
+        std::fs::create_dir(&stage)?;
+        let base = Repo::stage_key_of(&line, &selected.layers);
+        std::fs::write(repo.stage_base_file(&line), &base)?;
+        assert_eq!(repo.current_stage_of(&line, &selected.layers)?, Some(stage));
+        assert!(repo.current_stage(&line)?.is_none());
+        selected.layers[0].state = "b".into();
+        assert!(repo.current_stage_of(&line, &selected.layers)?.is_none());
+        selected.layers.clear();
+        assert!(repo.current_stage_of(&line, &selected.layers)?.is_none());
+        assert_eq!(Repo::stage_key_of(&line, &selected.layers), line.head);
+        repo.mark_stage(&line)?;
+        assert_eq!(repo.stage_key(&line)?, line.head);
+        assert!(repo.current_stage_of(&line, &selected.layers)?.is_some());
+        std::fs::remove_dir_all(repo.p.stage_path(&line.id))?;
+        std::fs::remove_file(repo.stage_base_file(&line))?;
+        assert!(repo.status_key(&line, &head, &selected, b"")?.is_some());
         drop(repo);
         drop(store);
         std::fs::remove_dir_all(root)?;

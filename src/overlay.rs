@@ -2596,8 +2596,15 @@ impl<'a> Repo<'a> {
 
     /// The key of the staging line: it is current while the head and the stack are.
     pub fn stage_key(&self, line: &Line) -> Result<String> {
-        let layers = self.layers(line)?;
-        Ok(if layers.is_empty() { line.head.clone() } else { format!("{}@{}", line.head, base_key(&line.head, &layers)) })
+        Ok(Self::stage_key_of(line, &self.layers(line)?))
+    }
+
+    pub(crate) fn stage_key_of(line: &Line, layers: &[Layer]) -> String {
+        if layers.is_empty() {
+            line.head.clone()
+        } else {
+            format!("{}@{}", line.head, base_key(&line.head, layers))
+        }
     }
 
     /// Files that automatic states of the line leave out: the files of its overlays (the states it
@@ -4515,6 +4522,20 @@ mod read_open_tests {
     #[test]
     #[cfg(not(feature = "overlayfs"))]
     fn removed_overlay_retirement_defers_preparations_readers_and_wrong_roots() -> Result<()> {
+        // Parallel tests fork and can retain flock descriptors after their guards drop.
+        // Check immediate release in isolation, as the preparation and try-lock tests do.
+        if std::env::var_os("LAYR_TEST_OVERLAY_RETIREMENT_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "overlay::read_open_tests::removed_overlay_retirement_defers_preparations_readers_and_wrong_roots",
+                    "--nocapture",
+                ])
+                .env("LAYR_TEST_OVERLAY_RETIREMENT_CHILD", "1")
+                .status()?;
+            anyhow::ensure!(status.success(), "isolated overlay-retirement test failed");
+            return Ok(());
+        }
         let fixture = Fixture::new()?;
         let repo = Repo::open(&fixture.ctx, "p")?;
         let old = repo.overlay_project("private")?;
@@ -4556,7 +4577,8 @@ mod read_open_tests {
         assert!(old.dir.exists());
         drop(reader);
         mark_removed(&ids::new_id())?;
-        assert!(make().unwrap_err().to_string().contains("different identity"));
+        let error = make().unwrap_err();
+        assert!(error.to_string().contains("different identity"), "{error:#}");
         assert!(old.dir.exists());
         Ok(())
     }
