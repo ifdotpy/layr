@@ -232,7 +232,7 @@ pub const HELP: &str = "usage: layr <command> [<args>]\n   store-version [--json
    schema [<name>] (JSON Schemas of --json output), store remove <path> [--force]
 
 Work in a line:
-   status [--json] [--no-overlaps] [--no-ignored]
+   status [--json] [--no-renames] [--no-overlaps] [--no-ignored]
    diff, add, rm, mv, restore, reset, save -m <message>, park, clean, apply
 Read history:
    log, show, blame, grep, ls-files, rev-parse, merge-base
