@@ -254,6 +254,24 @@ impl Status {
     pub fn clean(&self) -> bool {
         self.staged.is_empty() && self.unstaged.is_empty()
     }
+    /// The untracked entries as `status` lists them: a file inside an untracked folder is shown as
+    /// that folder with a trailing `/`. Sorted, each entry once. One set lookup per ancestor of each
+    /// file, so the work is the total path length times the depth plus the sort, not a scan of all
+    /// folders per file.
+    pub fn untracked_grouped(&self) -> Vec<String> {
+        let dirs: HashSet<&str> = self.untracked_dirs.iter().map(String::as_str).collect();
+        group_untracked(&self.untracked, |a| dirs.contains(a))
+    }
+}
+
+/// `files` with each file under a folder (`is_dir`) replaced by its outermost such folder and a `/`,
+/// sorted, each entry once. `is_dir` is asked once per visited ancestor of a file, root first, up to the first match.
+fn group_untracked(files: &[String], is_dir: impl Fn(&str) -> bool) -> Vec<String> {
+    let group = |f: &String| match fsutil::ancestors(f).find(|a| is_dir(a)) {
+        Some(d) => format!("{d}/"),
+        None => f.clone(),
+    };
+    files.iter().map(group).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 /// A write of the working folder that a command made under its line lock, before its commit. It
@@ -1666,17 +1684,8 @@ impl<'a> Repo<'a> {
         // Untracked folders: the topmost folder that does not exist in the index.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
         for f in &st.untracked {
-            let comps: Vec<&str> = f.split('/').collect();
-            let mut top = None;
-            for i in 1..comps.len() {
-                let d = comps[..i].join("/");
-                if fsutil::lmeta(index, &d).is_none() {
-                    top = Some(d);
-                    break;
-                }
-            }
-            if let Some(d) = top {
-                dirs.insert(d);
+            if let Some(d) = fsutil::ancestors(f).find(|d| fsutil::lmeta(index, d).is_none()) {
+                dirs.insert(d.to_string());
             }
         }
         st.untracked_dirs = dirs.into_iter().collect();
@@ -5347,5 +5356,64 @@ mod status_policy_tests {
         drop(store);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod untracked_group_tests {
+    use super::{group_untracked, Status};
+    use std::collections::HashSet;
+
+    fn grouped(files: &[&str], dirs: &[&str]) -> Vec<String> {
+        let own = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+        Status { untracked: own(files), untracked_dirs: own(dirs), ..Status::default() }.untracked_grouped()
+    }
+
+    /// The previous implementation: the first folder in the list that is a prefix of the file. `finish_status`
+    /// lists the folders sorted, and then the first match is the nearest ancestor to the root.
+    fn first_prefix(files: &[&str], dirs: &[&str]) -> Vec<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for f in files {
+            match dirs.iter().find(|d| f.starts_with(&format!("{d}/"))) {
+                Some(d) => out.insert(format!("{d}/")),
+                None => out.insert(f.to_string()),
+            };
+        }
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn a_sibling_that_shares_a_prefix_is_not_grouped() {
+        let files = ["a/b/1", "a/b/2", "a/bc", "a/bc.txt", "a/b.txt", "z"];
+        assert_eq!(grouped(&files, &["a/b"]), ["a/b.txt", "a/b/", "a/bc", "a/bc.txt", "z"]);
+    }
+
+    #[test]
+    fn nested_untracked_folders_group_to_the_outermost() {
+        let files = ["a/b/c/1", "a/x", "a/b/2", "k/m/1", "k/n"];
+        assert_eq!(grouped(&files, &["a", "a/b", "k/m"]), ["a/", "k/m/", "k/n"]);
+    }
+
+    #[test]
+    fn grouping_matches_the_first_prefix_scan_it_replaced_for_sorted_folders() {
+        let files = ["a/b/1", "a/bc", "a/b/c/d", "a/e", "ab/f", "g/h/i", "g/h", "top", "é/ü/1", "é/ü0/1"];
+        for dirs in [&[][..], &["a"], &["a/b"], &["a", "a/b"], &["a/b", "ab", "g/h"], &["é/ü"]] {
+            assert_eq!(grouped(&files, dirs), first_prefix(&files, dirs), "{dirs:?}");
+        }
+    }
+
+    #[test]
+    fn ten_thousand_distinct_folders_cost_one_folder_probe_per_file() {
+        let files: Vec<String> = (0..10_000).map(|i| format!("d{i}/sub/f")).collect();
+        let dirs: HashSet<String> = (0..10_000).map(|i| format!("d{i}")).collect();
+        let probes = std::cell::Cell::new(0usize);
+        let out = group_untracked(&files, |a| {
+            probes.set(probes.get() + 1);
+            dirs.contains(a)
+        });
+        assert_eq!(out.len(), 10_000);
+        assert!(out.iter().all(|p| p.ends_with('/')));
+        // The folder is the first ancestor of each file. The scan it replaced made 50,005,000 prefix comparisons here.
+        assert_eq!(probes.get(), files.len(), "folder probes");
     }
 }

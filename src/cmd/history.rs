@@ -1947,18 +1947,7 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
         if a.has("-o") && !a.has("-i") {
-            let list = if a.has("--directory") {
-                let mut v: BTreeSet<String> = BTreeSet::new();
-                for f in &st.untracked {
-                    match st.untracked_dirs.iter().find(|d| f.starts_with(&format!("{d}/"))) {
-                        Some(d) => v.insert(format!("{d}/")),
-                        None => v.insert(f.clone()),
-                    };
-                }
-                v.into_iter().collect()
-            } else {
-                st.untracked.clone()
-            };
+            let list = if a.has("--directory") { st.untracked_grouped() } else { st.untracked.clone() };
             for u in list {
                 if matches(&specs, u.trim_end_matches('/')) {
                     printed += 1;
