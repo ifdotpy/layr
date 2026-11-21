@@ -7,11 +7,14 @@
 //! <root>/packs/<id>.pack     packed objects in zstd blocks, and <id>.idx (`crate::pack`)
 //! <root>/states/<state>      the tree id of an imported state
 //! <root>/tmp/                files being written
+//! <root>/damaged/            damaged files that a repair moved aside (`Store::quarantine`)
 //! ```
 //!
-//! A write never replaces a file: it writes a temporary file and links it to its final name, and an
-//! existing name means the object is already there. So writes are idempotent, concurrent writers of
-//! the same object agree, and a reader never sees a partial object.
+//! A write never replaces a valid file: it writes and syncs a temporary file and links it to its final
+//! name, and an existing valid name means the object is already there. So writes are idempotent,
+//! concurrent writers of the same object agree, and a crash leaves no empty or partial object behind a
+//! name. A file that a crash damaged anyway (an older version wrote without a sync) counts as absent:
+//! the next write of that object replaces it (`check_loose`), and `damage` lists it for fsck.
 
 use crate::fsx;
 use crate::id::{Id, Keying, Kind};
@@ -28,9 +31,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 mod maintenance;
-pub use maintenance::{MaintenanceLimit, MaintenancePlan};
+pub use maintenance::{Damage, Damaged, MaintenanceLimit, MaintenancePlan};
 
-use layr_object_format::loose::{self, Header, CHUNKED, DELTA, MAGIC, WHOLE, WHOLE_DICT};
+use layr_object_format::loose::{self, Header, CHUNKED, DELTA, WHOLE, WHOLE_DICT};
 /// Project storage v1 uses snapshots; v2 uses content-addressed objects.
 pub const FORMAT_VERSION: u64 = 2;
 
@@ -157,6 +160,8 @@ pub struct PackReport {
     pub removed: u64,
     pub loose_bytes: u64,
     pub pack_bytes: u64,
+    /// Loose objects whose body did not decode: left loose.
+    pub unreadable: Vec<String>,
 }
 
 /// An object as the store reads it, from a loose file or from a pack.
@@ -180,8 +185,10 @@ impl LoadedPack {
         if let Some(i) = self.index.get() {
             return Ok(i);
         }
-        let parsed = LazyIndex::parse(fs::read(&self.index_path)?, &self.id, self.data.metadata()?.len())
-            .with_context(|| format!("pack {}", self.id))?;
+        let parsed = damage_of(|| {
+            LazyIndex::parse(fs::read(&self.index_path)?, &self.id, self.data.metadata()?.len())
+                .with_context(|| format!("pack {}", self.id))
+        })?;
         Ok(self.index.get_or_init(|| parsed))
     }
 }
@@ -260,6 +267,10 @@ pub struct Store {
     cache: Mutex<BlockCache>,
     /// The store dictionary for small whole blobs (`dicts/<id>`), once a repack trained one.
     dict: RwLock<Option<(Id, Arc<Vec<u8>>)>>,
+    /// Objects this handle found readable with all they need (`object_problem`), so a command checks
+    /// each at most once. Only this handle removes objects while it lives (pruning excludes other
+    /// handles), and it forgets them when it does.
+    readable: Mutex<HashSet<Id>>,
 }
 
 /// One stored form of a blob, read from the header of its object file.
@@ -299,7 +310,9 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir_all(root.join("tmp")).with_context(|| format!("cannot make {}", root.join("tmp").display()))?;
                 let tmp = root.join("tmp").join(format!("config-{}", std::process::id()));
-                fs::write(&tmp, &want)?;
+                // A file of an earlier process with this id is stale (`remove_orphans` runs later).
+                let _ = fs::remove_file(&tmp);
+                write_synced(&tmp, &[want.as_bytes()], 0o644)?;
                 if let Err(e) = fs::hard_link(&tmp, &config) {
                     let _ = fs::remove_file(&tmp);
                     if e.kind() != io::ErrorKind::AlreadyExists {
@@ -353,6 +366,7 @@ impl Store {
             last_pack: AtomicU32::new(0),
             cache: Mutex::new(BlockCache::default()),
             dict: RwLock::new(None),
+            readable: Mutex::new(HashSet::new()),
         };
         store.reload_packs()?;
         store.load_dict()?;
@@ -377,6 +391,7 @@ impl Store {
     pub fn open_hot(&self, id: &Id) -> io::Result<Option<File>> {
         if let Some(dir) = std::env::var_os("LAYR_TEST_HOT_OPEN_BARRIER") {
             let dir = PathBuf::from(dir);
+            // ast-grep-ignore: object-store-synced-writes (a test barrier, not a store file)
             fs::write(dir.join("ready"), b"")?;
             let start = std::time::Instant::now();
             while !dir.join("release").exists() && start.elapsed() < std::time::Duration::from_secs(5) {
@@ -400,13 +415,16 @@ impl Store {
         self.fan("objects", id)
     }
 
+    /// A hot blob, or an object that reads with what its form needs (`object_problem`), for readers.
     pub fn has(&self, id: &Id) -> bool {
-        self.fan("blobs", id).exists() || self.has_object(id)
+        matches!(self.object_problem(id, true), Ok(None))
     }
 
-    /// A loose or packed object (not a hot blob).
-    fn has_object(&self, id: &Id) -> bool {
-        self.object_path(id).exists() || matches!(self.pack_set().find(id, &self.last_pack), Ok(Some(_)))
+    /// Whether a writer can reuse `id` (a hot blob counts with `hot`): it reads with what its form
+    /// needs. A damaged object, or one whose chunk, delta base or dictionary is missing, is absent, so
+    /// the write makes it again; an I/O error stops the write.
+    fn present(&self, id: &Id, hot: bool) -> Result<bool> {
+        Ok(self.object_problem(id, hot)?.is_none())
     }
 
     fn pack_set(&self) -> Arc<PackSet> {
@@ -474,10 +492,33 @@ impl Store {
     /// An object from its loose file, else from a pack (the packs are read again once on a miss).
     fn payload(&self, id: &Id) -> Result<Payload> {
         match fs::read(self.object_path(id)) {
-            Ok(data) => {
-                let header = Header::decode(&data).with_context(|| format!("object {id} has no valid header"))?;
+            Ok(data) => return damage_of(|| self.loose_payload(id, &data)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("cannot read object {id}")),
+        }
+        let mut set = self.pack_set();
+        let mut found = set.find(id, &self.last_pack)?;
+        if found.is_none() {
+            set = self.reload_packs()?;
+            found = set.find(id, &self.last_pack)?;
+        }
+        let Some((pack, e)) = found else { return Err(unreadable(format!("object {id} is missing"))) };
+        self.packed(&set, pack, &e)
+    }
+
+    /// The payload of a pack entry.
+    fn packed(&self, set: &PackSet, pack: u32, e: &pack::Entry) -> Result<Payload> {
+        let block = damage_of(|| self.block(set, pack, e.block))?;
+        let bytes = block[e.offset as usize..(e.offset + e.length) as usize].to_vec();
+        Ok(Payload { kind: e.kind, form: e.form, bytes })
+    }
+
+    fn loose_payload(&self, id: &Id, data: &[u8]) -> Result<Payload> {
+        {
+            {
+                let header = Header::decode(data).with_context(|| format!("object {id} has no valid header"))?;
                 let kind = header.kind;
-                return Ok(match header.form {
+                Ok(match header.form {
                     loose::Form::Whole => {
                         Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? }
                     }
@@ -495,21 +536,9 @@ impl Store {
                     }
                     loose::Form::Delta => Payload { kind, form: pack::DELTA, bytes: data[6..].to_vec() },
                     loose::Form::Chunked => Payload { kind, form: pack::CHUNKED, bytes: data[6..].to_vec() },
-                });
+                })
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("cannot read object {id}")),
         }
-        let mut set = self.pack_set();
-        let mut found = set.find(id, &self.last_pack)?;
-        if found.is_none() {
-            set = self.reload_packs()?;
-            found = set.find(id, &self.last_pack)?;
-        }
-        let Some((pack, e)) = found else { bail!("object {id} is missing") };
-        let block = self.block(&set, pack, e.block)?;
-        let bytes = block[e.offset as usize..(e.offset + e.length) as usize].to_vec();
-        Ok(Payload { kind: e.kind, form: e.form, bytes })
     }
 
     /// A unique temporary path in `tmp/`.
@@ -517,6 +546,13 @@ impl Store {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         self.root.join("tmp").join(format!("{}-{n}", std::process::id()))
+    }
+
+    /// A new temporary file holding `parts`, synced to disk before any name points at it.
+    fn write_temp(&self, parts: &[&[u8]], mode: u32) -> Result<PathBuf> {
+        let tmp = self.temp();
+        write_synced(&tmp, parts, mode)?;
+        Ok(tmp)
     }
 
     /// Give the finished temporary file `tmp` its final name `dst`, unless `dst` is there. True
@@ -543,28 +579,35 @@ impl Store {
 
     fn write_object(&self, id: &Id, kind: Kind, form: u8, body: &[&[u8]]) -> Result<bool> {
         let dst = self.object_path(id);
-        if self.has_object(id) {
+        if self.present(id, false)? {
             return Ok(false);
         }
-        let tmp = self.temp();
-        let written = (|| -> Result<u64> {
-            let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o444).open(&tmp)?;
-            f.write_all(&Header { kind, form: loose::Form::from_byte(form)? }.encode())?;
-            let mut n = 6;
-            for part in body {
-                f.write_all(part)?;
-                n += part.len() as u64;
-            }
-            Ok(n)
-        })();
-        let n = match written {
-            Ok(n) => n,
-            Err(e) => {
+        let header = Header { kind, form: loose::Form::from_byte(form)? }.encode();
+        let parts: Vec<&[u8]> = std::iter::once(header.as_slice()).chain(body.iter().copied()).collect();
+        let n = parts.iter().map(|p| p.len() as u64).sum();
+        let tmp = self.write_temp(&parts, 0o444)?;
+        let replace = match check_loose(&dst) {
+            Ok(None) => false,
+            // A damaged file of this object (#452), or one that needs what is missing, is replaced. A
+            // valid copy that another writer published since the check reads the same, so replacing
+            // it is harmless.
+            Ok(Some(_)) => true,
+            Err(error) if is_unreadable(error.as_ref()) => true,
+            // An I/O error is no damage: nothing is replaced.
+            Err(error) => {
                 let _ = fs::remove_file(&tmp);
-                return Err(e);
+                return Err(error);
             }
         };
-        let added = self.publish(&tmp, &dst)?;
+        let added = if replace {
+            if let Err(e) = fs::rename(&tmp, &dst) {
+                let _ = fs::remove_file(&tmp);
+                return Err(e).with_context(|| format!("cannot store {}", dst.display()));
+            }
+            true
+        } else {
+            self.publish(&tmp, &dst)?
+        };
         if added {
             self.added.objects.fetch_add(1, Ordering::Relaxed);
             self.added.bytes.fetch_add(n, Ordering::Relaxed);
@@ -575,7 +618,7 @@ impl Store {
     pub fn put_tree(&self, tree: &Tree) -> Result<Id> {
         let bytes = tree.encode();
         let id = self.keying.id(Kind::Tree, &bytes);
-        if !self.has_object(&id) {
+        if !self.present(&id, false)? {
             let frame = layr_store::zst::compress(&bytes, None)?;
             self.write_object(&id, Kind::Tree, WHOLE, &[&frame])?;
         }
@@ -585,7 +628,7 @@ impl Store {
     pub fn put_times(&self, times: &crate::times::Times) -> Result<Id> {
         let bytes = times.encode();
         let id = self.keying.id(Kind::Times, &bytes);
-        if !self.has_object(&id) {
+        if !self.present(&id, false)? {
             let frame = layr_store::zst::compress(&bytes, None)?;
             self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
         }
@@ -595,8 +638,11 @@ impl Store {
     /// Raw times bytes, with type and id checked before a source-specific decoder uses them.
     pub fn times_bytes(&self, id: &Id) -> Result<Vec<u8>> {
         let p = self.payload(id)?;
-        ensure!(p.kind == Kind::Times && p.form == pack::RAW, "object {id} is not a times table");
-        ensure!(self.keying.id(Kind::Times, &p.bytes) == *id, "times {id} do not match their id");
+        damage_of(|| {
+            ensure!(p.kind == Kind::Times && p.form == pack::RAW, "object {id} is not a times table");
+            ensure!(self.keying.id(Kind::Times, &p.bytes) == *id, "times {id} do not match their id");
+            Ok(())
+        })?;
         Ok(p.bytes)
     }
 
@@ -607,7 +653,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn put_times_unchecked_for_test(&self, bytes: &[u8]) -> Result<Id> {
         let id = self.keying.id(Kind::Times, bytes);
-        if !self.has_object(&id) {
+        if !self.present(&id, false)? {
             let frame = layr_store::zst::compress(bytes, None)?;
             self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
         }
@@ -618,7 +664,7 @@ impl Store {
     pub fn put_cloud_times(&self, bytes: &[u8]) -> Result<Id> {
         crate::cloud_times::validate(bytes)?;
         let id = self.keying.id(Kind::Times, bytes);
-        if !self.has_object(&id) {
+        if !self.present(&id, false)? {
             let frame = layr_store::zst::compress(bytes, None)?;
             self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
         }
@@ -627,9 +673,11 @@ impl Store {
 
     pub fn get_tree(&self, id: &Id) -> Result<Tree> {
         let p = self.payload(id)?;
-        ensure!(p.kind == Kind::Tree && p.form == pack::RAW, "object {id} is not a tree");
-        ensure!(self.keying.id(Kind::Tree, &p.bytes) == *id, "tree {id} does not match its id");
-        Ok(Tree::decode(&p.bytes)?)
+        damage_of(|| {
+            ensure!(p.kind == Kind::Tree && p.form == pack::RAW, "object {id} is not a tree");
+            ensure!(self.keying.id(Kind::Tree, &p.bytes) == *id, "tree {id} does not match its id");
+            Ok(Tree::decode(&p.bytes)?)
+        })
     }
 
     /// The id of the file at `path`, read once.
@@ -667,7 +715,7 @@ impl Store {
         match temperature {
             Temperature::Hot if self.fan("blobs", &id).exists() => Ok((id, len)),
             Temperature::Hot => self.put_hot(path),
-            Temperature::Cold if self.has(&id) => Ok((id, len)),
+            Temperature::Cold if self.present(&id, true)? => Ok((id, len)),
             Temperature::Cold => {
                 if len < self.options.chunk_min_file || (!bases.is_empty() && len <= self.options.delta_max) {
                     self.put_cold_with(&fs::read(path)?, bases, judge)
@@ -710,6 +758,8 @@ impl Store {
                 use std::os::fd::AsFd;
                 hook(File::open(&tmp)?.as_fd())?;
             }
+            // The copy or clone reaches the disk before its name does (#452).
+            rustix::fs::fsync(File::open(&tmp)?)?;
             // A clone takes the attributes of its source; the tree keeps them per entry.
             fsx::clear_xattrs(&tmp)?;
             let (id, len) = self.hash_file(&tmp)?;
@@ -742,14 +792,7 @@ impl Store {
         if p.kind != Kind::Blob || p.form != pack::CHUNKED {
             return None;
         }
-        let mut r = Reader::new(&p.bytes);
-        let n = r.varint().ok()?;
-        let mut total = 0u64;
-        for _ in 0..n {
-            r.id().ok()?;
-            total = total.saturating_add(r.varint().ok()?);
-        }
-        Some(total)
+        Some(chunk_list(&p.bytes).ok()?.iter().fold(0u64, |total, (_, n)| total.saturating_add(*n)))
     }
 
     /// The delta depth of a stored blob: 0 for any form that decodes alone.
@@ -772,12 +815,15 @@ impl Store {
     pub fn put_cold_with(&self, data: &[u8], bases: &[Id], judge: bool) -> Result<(Id, u64)> {
         let id = self.keying.id(Kind::Blob, data);
         let len = data.len() as u64;
-        if self.has(&id) {
+        if self.present(&id, true)? {
             return Ok((id, len));
         }
         let mut best: Option<(Vec<u8>, Id, u8)> = None;
         if len <= self.options.delta_max {
-            for base_id in bases.iter().filter(|p| **p != id && self.has(p)) {
+            for base_id in bases.iter().filter(|p| **p != id) {
+                if !self.present(base_id, true)? {
+                    continue;
+                }
                 if self.known_size(base_id).is_some_and(|n| n > self.options.delta_max) {
                     continue;
                 }
@@ -829,11 +875,18 @@ impl Store {
             names.push(entry?.file_name().to_string_lossy().into_owned());
         }
         names.sort();
-        // One dictionary per store; the first one written stays.
-        if let Some(name) = names.first() {
-            let id = Id::parse(name)?;
-            let bytes = self.dict_bytes(&id)?;
-            *self.dict.write().expect("no panic holds the lock") = Some((id, bytes));
+        // One dictionary per store; the first one written that reads stays. A damaged one does not
+        // keep the store from opening: fsck reports it (`damage`).
+        for name in names {
+            let Ok(id) = Id::parse(&name) else { continue };
+            match self.dict_bytes(&id) {
+                Ok(bytes) => {
+                    *self.dict.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((id, bytes));
+                    break;
+                }
+                Err(error) if is_unreadable(error.as_ref()) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -844,9 +897,12 @@ impl Store {
                 return Ok(bytes.clone());
             }
         }
-        let bytes = fs::read(self.root.join("dicts").join(id.hex())).with_context(|| format!("dictionary {id} is missing"))?;
-        ensure!(self.keying.id(Kind::Opaque, &bytes) == *id, "dictionary {id} does not match its id");
-        Ok(Arc::new(bytes))
+        damage_of(|| {
+            let bytes =
+                fs::read(self.root.join("dicts").join(id.hex())).with_context(|| format!("dictionary {id} is missing"))?;
+            ensure!(self.keying.id(Kind::Opaque, &bytes) == *id, "dictionary {id} does not match its id");
+            Ok(Arc::new(bytes))
+        })
     }
 
     /// Train the store dictionary on small whole blobs of `order`, unless the store has one.
@@ -857,7 +913,8 @@ impl Store {
         let mut samples = Vec::new();
         let mut total = 0;
         for id in order {
-            let p = self.payload(id)?;
+            // An object that does not decode is no sample (the repack reports it).
+            let Ok(p) = self.payload(id) else { continue };
             if p.kind == Kind::Blob && p.form == pack::RAW && !p.bytes.is_empty() && p.bytes.len() <= DICT_FILE_MAX {
                 total += p.bytes.len();
                 samples.push(p.bytes);
@@ -872,8 +929,7 @@ impl Store {
         let refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
         let dict = crate::zstdx::train(&refs, DICT_SIZE)?;
         let id = self.keying.id(Kind::Opaque, &dict);
-        let tmp = self.temp();
-        fs::write(&tmp, &dict)?;
+        let tmp = self.write_temp(&[&dict], 0o444)?;
         self.publish(&tmp, &self.root.join("dicts").join(id.hex()))?;
         self.load_dict()?;
         Ok(Some(id))
@@ -881,7 +937,7 @@ impl Store {
 
     fn put_chunk(&self, chunk: &[u8]) -> Result<Id> {
         let id = self.keying.id(Kind::Chunk, chunk);
-        if !self.has_object(&id) {
+        if !self.present(&id, false)? {
             let frame = layr_store::zst::compress(chunk, None)?;
             self.write_object(&id, Kind::Chunk, WHOLE, &[&frame])?;
         }
@@ -934,7 +990,7 @@ impl Store {
             buf.drain(..used);
         }
         let id = h.finish().with_context(|| path.display().to_string())?;
-        if !self.has_object(&id) {
+        if !self.present(&id, false)? {
             let mut list = Vec::new();
             varint_into(&mut list, ids.len() as u64);
             for (chunk, n) in &ids {
@@ -966,7 +1022,10 @@ impl Store {
     /// The content of a blob, checked against its id.
     pub fn read_blob(&self, id: &Id) -> Result<Vec<u8>> {
         let data = self.read_blob_unchecked(id, 0, true)?;
-        ensure!(self.keying.id(Kind::Blob, &data) == *id, "blob {id} does not match its id");
+        damage_of(|| {
+            ensure!(self.keying.id(Kind::Blob, &data) == *id, "blob {id} does not match its id");
+            Ok(())
+        })?;
         Ok(data)
     }
 
@@ -980,30 +1039,30 @@ impl Store {
             }
         }
         let Payload { kind, form, bytes: body } = self.payload(id)?;
-        ensure!(kind == Kind::Blob, "object {id} is a {}, not a blob", kind.name());
+        damage_of(|| {
+            ensure!(kind == Kind::Blob, "object {id} is a {}, not a blob", kind.name());
+            ensure!(form != pack::DELTA || body.len() > 33, "delta object {id} is cut short");
+            Ok(())
+        })?;
         match form {
             pack::RAW => Ok(body),
             pack::DELTA => {
-                ensure!(body.len() > 33, "delta object {id} is cut short");
                 let base_id = Id(body[1..33].try_into().expect("32 bytes"));
                 let base = self.read_blob_unchecked(&base_id, depth + 1, true)?;
-                layr_store::zst::decompress(&body[33..], Some(&base))
+                damage_of(|| layr_store::zst::decompress(&body[33..], Some(&base)))
             }
             _ => {
-                let mut r = Reader::new(&body);
-                let n = r.varint()?;
                 let mut out = Vec::new();
-                for _ in 0..n {
-                    let chunk_id = r.id()?;
-                    let len = r.varint()?;
+                for (chunk_id, len) in damage_of(|| chunk_list(&body))? {
                     let p = self.payload(&chunk_id)?;
-                    ensure!(p.kind == Kind::Chunk && p.form == pack::RAW, "object {chunk_id} is not a chunk");
-                    let chunk = p.bytes;
-                    ensure!(chunk.len() as u64 == len, "chunk {chunk_id} has the wrong length");
-                    ensure!(self.keying.id(Kind::Chunk, &chunk) == chunk_id, "chunk {chunk_id} does not match its id");
-                    out.extend_from_slice(&chunk);
+                    damage_of(|| {
+                        ensure!(p.kind == Kind::Chunk && p.form == pack::RAW, "object {chunk_id} is not a chunk");
+                        ensure!(p.bytes.len() as u64 == len, "chunk {chunk_id} has the wrong length");
+                        ensure!(self.keying.id(Kind::Chunk, &p.bytes) == chunk_id, "chunk {chunk_id} does not match its id");
+                        Ok(())
+                    })?;
+                    out.extend_from_slice(&p.bytes);
                 }
-                ensure!(r.done(), "bytes after the chunk list of {id}");
                 Ok(out)
             }
         }
@@ -1013,9 +1072,15 @@ impl Store {
     /// `{"times":"<id>","tree":"<id>"}` (docs/objects.md, "States").
     pub fn set_state(&self, state: &str, r: &StateRef) -> Result<()> {
         ensure!(!state.is_empty() && state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "invalid state id {state}");
-        let tmp = self.temp();
-        fs::write(&tmp, format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree))?;
-        fs::rename(&tmp, self.root.join("states").join(state))?;
+        let text = format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree);
+        let tmp = self.write_temp(&[text.as_bytes()], 0o644)?;
+        let dir = self.root.join("states");
+        if let Err(e) = fs::rename(&tmp, dir.join(state)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        // The record of the state names it next: its name must be on disk first.
+        rustix::fs::fsync(File::open(&dir)?)?;
         Ok(())
     }
 
@@ -1023,18 +1088,22 @@ impl Store {
         if state.is_empty() || !state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Ok(None);
         }
-        let text = match fs::read_to_string(self.root.join("states").join(state)) {
-            Ok(text) => text,
+        let bytes = match fs::read(self.root.join("states").join(state)) {
+            Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
+        let text = damage_of(|| Ok(String::from_utf8(bytes)?))?;
         let field = |name: &str| -> Result<Id> {
             let key = format!("\"{name}\":\"");
             let at = text.find(&key).ok_or_else(|| anyhow::anyhow!("state {state} has no {name}"))? + key.len();
             Ok(Id::parse(text.get(at..at + 64).unwrap_or(""))?)
         };
-        let mut r = StateRef { tree: field("tree")?, times: field("times")? };
-        ensure!(text == format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree), "state {state} is not canonical");
+        let mut r = damage_of(|| {
+            let r = StateRef { tree: field("tree")?, times: field("times")? };
+            ensure!(text == format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree), "state {state} is not canonical");
+            Ok(r)
+        })?;
         if self.has(&r.tree) && self.has(&r.times) {
             let bytes = self.times_bytes(&r.times)?;
             if bytes.first() == Some(&1) {
@@ -1135,9 +1204,13 @@ impl Store {
                 if selected.is_some_and(|plan| !plan.pack.contains(&id)) {
                     continue;
                 }
-                if set.find(&id, &self.last_pack)?.is_some() {
-                    fs::remove_file(entry.path())?;
-                    report.removed += 1;
+                if let Some((pack, packed)) = set.find(&id, &self.last_pack)? {
+                    // The loose copy goes only when the packed form reads with what it needs: a copy
+                    // that a write made again over a damaged packed form stays, and is not packed again.
+                    if self.packed_problem(&set, pack, &packed)?.is_none() {
+                        fs::remove_file(entry.path())?;
+                        report.removed += 1;
+                    }
                     continue;
                 }
                 loose.insert(id, entry.metadata()?.len());
@@ -1145,7 +1218,7 @@ impl Store {
         }
         report.loose_bytes = loose.values().sum();
         let order = match selected {
-            Some(plan) => self.pack_order_roots(&loose, &plan.roots)?,
+            Some(plan) => self.pack_order_roots(&loose, &plan.roots),
             None => self.pack_order(&loose)?,
         };
         if self.options.train_dict {
@@ -1168,8 +1241,17 @@ impl Store {
             Ok(())
         };
         for batch in order.chunks(4096) {
-            let payloads = batch.par_iter().map(|id| self.payload(id)).collect::<Result<Vec<Payload>>>()?;
+            let payloads: Vec<Result<Payload>> = batch.par_iter().map(|id| self.payload(id)).collect();
             for (id, p) in batch.iter().zip(payloads) {
+                // A body that does not decode stays loose and is reported: it stops no repack.
+                let p = match p {
+                    Ok(p) => p,
+                    Err(error) if is_unreadable(error.as_ref()) => {
+                        report.unreadable.push(format!("object {id} does not decode: {error:#}"));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 builder.add(*id, p.kind, p.form, &p.bytes);
                 if builder.plain_len() >= self.options.pack_plain_max {
                     full.push(std::mem::replace(&mut builder, Builder::new(self.options.block_size)));
@@ -1241,41 +1323,39 @@ impl Store {
             .collect::<Result<_>>()?;
         states.sort();
         let mut roots = Vec::new();
-        for state in states {
-            if let Some(root) = self.state_ref(&state)? {
-                roots.push(root);
-            }
-        }
-        self.pack_order_roots(loose, &roots)
+        // The order only groups neighbors: a damaged state record leaves its objects to the rest.
+        roots.extend(states.iter().filter_map(|state| self.state_ref(state).ok().flatten()));
+        Ok(self.pack_order_roots(loose, &roots))
     }
 
-    fn pack_order_roots(&self, loose: &HashMap<Id, u64>, roots: &[StateRef]) -> Result<Vec<Id>> {
+    fn pack_order_roots(&self, loose: &HashMap<Id, u64>, roots: &[StateRef]) -> Vec<Id> {
         let mut seen = HashSet::new();
         let (mut trees, mut others) = (Vec::new(), Vec::new());
         for r in roots {
-            self.order_tree(&r.tree, loose, &mut seen, &mut trees, &mut others)?;
-            self.order_times(&r.times, loose, &mut seen, &mut trees)?;
+            self.order_tree(&r.tree, loose, &mut seen, &mut trees, &mut others);
+            self.order_times(&r.times, loose, &mut seen, &mut trees);
         }
         let mut rest: Vec<Id> = loose.keys().filter(|id| !seen.contains(*id)).copied().collect();
         rest.sort();
         trees.extend(others);
         trees.extend(rest);
-        Ok(trees)
+        trees
     }
 
     /// A times table and the tables below it. A table already in a pack ends the walk: a table
     /// is packed with or after the tables it names.
-    fn order_times(&self, id: &Id, loose: &HashMap<Id, u64>, seen: &mut HashSet<Id>, out: &mut Vec<Id>) -> Result<()> {
+    fn order_times(&self, id: &Id, loose: &HashMap<Id, u64>, seen: &mut HashSet<Id>, out: &mut Vec<Id>) {
         if !loose.contains_key(id) || !seen.insert(*id) {
-            return Ok(());
+            return;
         }
         out.push(*id);
-        for r in self.get_times(id)?.records {
+        // The order only groups neighbors: a table that cannot be read goes with the rest.
+        let Ok(times) = self.get_times(id) else { return };
+        for r in times.records {
             if let crate::times::Record::Folder(child) = r {
-                self.order_times(&child, loose, seen, out)?;
+                self.order_times(&child, loose, seen, out);
             }
         }
-        Ok(())
     }
 
     /// The times table `root` and every table below it (what a transfer of a state must send).
@@ -1296,41 +1376,33 @@ impl Store {
         Ok(out)
     }
 
-    fn order_tree(
-        &self,
-        id: &Id,
-        loose: &HashMap<Id, u64>,
-        seen: &mut HashSet<Id>,
-        trees: &mut Vec<Id>,
-        others: &mut Vec<Id>,
-    ) -> Result<()> {
+    fn order_tree(&self, id: &Id, loose: &HashMap<Id, u64>, seen: &mut HashSet<Id>, trees: &mut Vec<Id>, others: &mut Vec<Id>) {
         if !seen.insert(*id) {
-            return Ok(());
+            return;
         }
         if loose.contains_key(id) {
             trees.push(*id);
         }
-        for e in self.get_tree(id)?.entries {
+        // A tree, blob or chunk list that cannot be read goes with the rest; the repack reports it.
+        let Ok(tree) = self.get_tree(id) else { return };
+        for e in tree.entries {
             match e.node {
-                crate::tree::Node::Dir { tree } => self.order_tree(&tree, loose, seen, trees, others)?,
+                crate::tree::Node::Dir { tree } => self.order_tree(&tree, loose, seen, trees, others),
                 crate::tree::Node::File { blob, .. } if loose.contains_key(&blob) && seen.insert(blob) => {
                     others.push(blob);
-                    let p = self.payload(&blob)?;
-                    if p.form == pack::CHUNKED {
-                        let mut r = Reader::new(&p.bytes);
-                        for _ in 0..r.varint()? {
-                            let chunk = r.id()?;
-                            r.varint()?;
-                            if loose.contains_key(&chunk) && seen.insert(chunk) {
-                                others.push(chunk);
-                            }
+                    let Ok(p) = self.payload(&blob) else { continue };
+                    if p.form != pack::CHUNKED {
+                        continue;
+                    }
+                    for (chunk, _) in chunk_list(&p.bytes).unwrap_or_default() {
+                        if loose.contains_key(&chunk) && seen.insert(chunk) {
+                            others.push(chunk);
                         }
                     }
                 }
                 _ => {}
             }
         }
-        Ok(())
     }
 
     fn write_pack(&self, builder: Builder, codec: &crate::zstdx::Codec) -> Result<PackReport> {
@@ -1356,17 +1428,7 @@ impl Store {
         let index_bytes = index.encode();
         let dir = self.root.join("packs");
         for (bytes, name) in [(&data, format!("{id}.pack")), (&index_bytes, format!("{id}.idx"))] {
-            let tmp = self.temp();
-            let written = (|| -> Result<()> {
-                let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o444).open(&tmp)?;
-                f.write_all(bytes)?;
-                f.sync_all()?;
-                Ok(())
-            })();
-            if let Err(e) = written {
-                let _ = fs::remove_file(&tmp);
-                return Err(e);
-            }
+            let tmp = self.write_temp(&[bytes], 0o444)?;
             // An existing pack with this id holds the same bytes.
             self.publish(&tmp, &dir.join(name))?;
         }
@@ -1399,10 +1461,10 @@ impl Store {
                 s.hot_bytes += len;
                 continue;
             }
-            let mut head = [0u8; 6];
-            let n = read_up_to(&mut File::open(&path)?, &mut head)?;
-            ensure!(n == 6, "{} has no valid header", path.display());
-            let header = Header::decode(&head).with_context(|| format!("{} has no valid header", path.display()))?;
+            let header = check_loose(&path)
+                .with_context(|| path.display().to_string())?
+                .with_context(|| format!("{} vanished", path.display()))?
+                .header;
             let (count, bytes) = match (header.kind, header.form) {
                 (Kind::Tree, _) => (&mut s.trees, &mut s.tree_bytes),
                 (Kind::Chunk, _) => (&mut s.chunks, &mut s.chunk_bytes),
@@ -1410,7 +1472,7 @@ impl Store {
                 (Kind::Blob, loose::Form::Delta) => (&mut s.delta_blobs, &mut s.delta_bytes),
                 (Kind::Blob, loose::Form::Chunked) => (&mut s.chunked_blobs, &mut s.chunked_bytes),
                 (Kind::Times, _) => (&mut s.times, &mut s.times_bytes),
-                (Kind::Opaque, _) => bail!("{} is an opaque object, which is never loose", path.display()),
+                (Kind::Opaque, _) => unreachable!("check_loose refuses opaque objects"),
             };
             *count += 1;
             *bytes += len;
@@ -1455,16 +1517,152 @@ fn move_new(tmp: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn read_up_to(f: &mut File, buf: &mut [u8]) -> io::Result<usize> {
-    let mut n = 0;
-    while n < buf.len() {
-        let got = f.read(&mut buf[n..])?;
-        if got == 0 {
-            break;
+/// A loose object file as its first bytes show it: its header, the bytes a repack decodes from it (a
+/// whole frame's content size, else the body length), and what its form needs to read: its chunks
+/// or delta base (`needs`) and its dictionary.
+pub(crate) struct Loose {
+    pub(crate) header: Header,
+    pub(crate) input: u64,
+    pub(crate) needs: Vec<(Id, Kind)>,
+    pub(crate) dict: Option<Id>,
+}
+
+/// The loose object file at `path`, checked from its first 64 bytes (a chunk list whole); None when
+/// there is no file. `Unreadable` when the file cannot be an object: empty or cut short (a crash
+/// before its data reached the disk, #452), an unknown header, a zstd frame header or a chunk list
+/// that does not parse. Any other I/O error goes back as it is. The one check of presence
+/// (`object_problem`), writers, maintenance and fsck. A body cut after a valid frame header shows only
+/// on a read (a repack then leaves the object loose and reports it).
+pub(crate) fn check_loose(path: &Path) -> Result<Option<Loose>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    damage_of(|| {
+        let len = file.metadata()?.len();
+        let mut head = Vec::with_capacity(64);
+        (&mut file).take(64).read_to_end(&mut head)?;
+        ensure!(!head.is_empty(), "is empty");
+        ensure!(head.len() > 6, "is cut short ({} bytes)", head.len());
+        let header = Header::decode(&head).context("has no valid header")?;
+        ensure!(header.kind != Kind::Opaque, "is an opaque object, which is never loose");
+        let frame = |at: usize| zstd_safe::get_frame_content_size(head.get(at..).unwrap_or_default());
+        let (input, needs, dict) = match header.form {
+            // A whole frame names its content size: a tiny frame can decode to a very large payload.
+            loose::Form::Whole => (frame(6).ok().flatten().context("has no valid zstd frame")?, Vec::new(), None),
+            loose::Form::Dictionary => {
+                let input = frame(38).ok().flatten().context("has no valid zstd frame")?;
+                let mut dict = [0; 32];
+                dict.copy_from_slice(&head[6..38]);
+                (input, Vec::new(), Some(Id(dict)))
+            }
+            // The depth byte and the base id come first.
+            loose::Form::Delta => {
+                ensure!(frame(39).is_ok(), "has no valid zstd frame");
+                (len - 6, body_needs(pack::DELTA, &head[6..])?, None)
+            }
+            // A chunk list is small (34 bytes per chunk): it is checked whole.
+            loose::Form::Chunked => {
+                let mut body = head[6..].to_vec();
+                file.read_to_end(&mut body)?;
+                (len - 6, body_needs(pack::CHUNKED, &body)?, None)
+            }
+        };
+        Ok(Some(Loose { header, input, needs, dict }))
+    })
+}
+
+/// What a stored blob body of `form` (`pack::RAW`, `DELTA` or `CHUNKED`) needs to read: its delta
+/// base or its chunks.
+pub(crate) fn body_needs(form: u8, body: &[u8]) -> Result<Vec<(Id, Kind)>> {
+    match form {
+        pack::DELTA => {
+            ensure!(body.len() > 33, "has a delta cut short");
+            let mut base = [0; 32];
+            base.copy_from_slice(&body[1..33]);
+            Ok(vec![(Id(base), Kind::Blob)])
         }
-        n += got;
+        pack::CHUNKED => Ok(chunk_list(body)?.into_iter().map(|(chunk, _)| (chunk, Kind::Chunk)).collect()),
+        _ => Ok(Vec::new()),
     }
-    Ok(n)
+}
+
+/// An object or state record that cannot be read: missing, damaged on disk, or not what its id names.
+/// Typed, so a caller tells damage from other failures (`line delete --discard` deletes without a
+/// final save on damage only).
+#[derive(Debug)]
+pub struct Unreadable(pub String);
+
+impl std::fmt::Display for Unreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreadable {}
+
+pub(crate) fn unreadable(what: String) -> anyhow::Error {
+    anyhow::Error::new(Unreadable(what))
+}
+
+/// Run a read and check of stored bytes: a failure to decode or validate them, or a file that is not
+/// there, ends early or is not text where text belongs, is damage (`Unreadable`). Any other I/O error (EIO, EACCES, ENOSPC, ...) is
+/// operational and goes back unchanged, so no caller takes it for damage.
+pub(crate) fn damage_of<T>(check: impl FnOnce() -> Result<T>) -> Result<T> {
+    check().map_err(|error| {
+        let operational = error.chain().any(|e| {
+            e.downcast_ref::<io::Error>().is_some_and(|io| {
+                !matches!(io.kind(), io::ErrorKind::NotFound | io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData)
+            })
+        });
+        if operational || is_unreadable(error.as_ref()) {
+            error
+        } else {
+            unreadable(format!("{error:#}"))
+        }
+    })
+}
+
+/// Whether `error` comes from a damaged or missing object or state record (`Unreadable`).
+pub fn is_unreadable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(e) = next {
+        if e.is::<Unreadable>() {
+            return true;
+        }
+        next = e.source();
+    }
+    false
+}
+
+/// The chunks of a chunk list (`CHUNKED` body): ids and lengths, with no byte after them.
+pub(crate) fn chunk_list(body: &[u8]) -> Result<Vec<(Id, u64)>> {
+    let mut reader = Reader::new(body);
+    let mut out = Vec::new();
+    for _ in 0..reader.varint()? {
+        out.push((reader.id()?, reader.varint()?));
+    }
+    ensure!(reader.done(), "has bytes after its chunk list");
+    Ok(out)
+}
+
+/// Write the new file `tmp` and sync it (removed again on an error). A plain fsync on every system:
+/// it survives a kernel crash or a file system that turns read-only (#452); F_FULLFSYNC per object
+/// would make large writes on macOS very slow.
+fn write_synced(tmp: &Path, parts: &[&[u8]], mode: u32) -> Result<()> {
+    let written = (|| -> Result<()> {
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(tmp)?;
+        for part in parts {
+            f.write_all(part)?;
+        }
+        rustix::fs::fsync(&f)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    written
 }
 
 /// The fan-out folders of an area.
@@ -1693,6 +1891,69 @@ mod tests {
         let (other, _) = store.put_cold_bytes(&edited, None).unwrap();
         assert_eq!(store.read_blob(&other).unwrap(), edited);
         assert!(store.stat().unwrap().chunks - before <= 2);
+    }
+
+    #[test]
+    fn check_loose_reads_the_input_of_each_form() {
+        let dir = scratch("check-loose-forms");
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let input = |id: &Id| check_loose(&store.object_path(id)).unwrap().unwrap().input;
+        let body = |id: &Id| fs::metadata(store.object_path(id)).unwrap().len() - 6;
+        let v1 = noise(200_000, 11);
+        let (whole, _) = store.put_cold_bytes(&v1, None).unwrap();
+        assert_eq!(input(&whole), 200_000, "a whole frame names its content size");
+        let mut v2 = v1.clone();
+        v2[7] ^= 1;
+        let (delta, _) = store.put_cold_bytes(&v2, Some(whole)).unwrap();
+        assert!(matches!(store.form(&delta).unwrap(), Form::Delta { .. }));
+        assert_eq!(input(&delta), body(&delta));
+        let (chunked, _) = store.put_cold_bytes(&noise(2 << 20, 12), None).unwrap();
+        assert_eq!(store.form(&chunked).unwrap(), Form::Chunked);
+        assert_eq!(input(&chunked), body(&chunked));
+        // A dictionary frame follows the dictionary id.
+        let path = dir.join("dictionary-form");
+        let mut bytes = b"LOB1by".to_vec();
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.extend_from_slice(&layr_store::zst::compress(&[5; 3000], None).unwrap());
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(check_loose(&path).unwrap().unwrap().input, 3000);
+    }
+
+    #[test]
+    fn damage_is_a_typed_error() {
+        let dir = scratch("typed-damage");
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let tree = store.put_tree(&Tree::default()).unwrap();
+        let path = store.object_path(&tree);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&path, b"").unwrap();
+        let error = store.get_tree(&tree).unwrap_err().context("a caller's context");
+        assert!(is_unreadable(error.as_ref()), "{error:#}");
+        fs::remove_file(&path).unwrap();
+        assert!(is_unreadable(store.get_tree(&tree).unwrap_err().as_ref()), "a missing object");
+        let (chunked, _) = store.put_cold_bytes(&noise(2 << 20, 3), None).unwrap();
+        let list = store.object_path(&chunked);
+        fs::set_permissions(&list, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&list, b"LOB1bc\x01").unwrap();
+        assert!(!store.has(&chunked), "a chunk list cut short is no object");
+        assert!(is_unreadable(store.read_blob(&chunked).unwrap_err().as_ref()));
+        // An operational I/O error (here an injected EIO) is never damage, wherever a read meets it.
+        let eio = damage_of(|| -> Result<()> {
+            Err(anyhow::Error::from(io::Error::from_raw_os_error(rustix::io::Errno::IO.raw_os_error())).context("read a block"))
+        })
+        .unwrap_err();
+        assert!(!is_unreadable(eio.as_ref()), "{eio:#}");
+        assert_eq!(eio.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error), Some(rustix::io::Errno::IO.raw_os_error()));
+        let short = damage_of(|| -> Result<()> { Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()) }).unwrap_err();
+        assert!(is_unreadable(short.as_ref()), "a file that ends early is damage");
+        // Other failures are not damage, such as a file this process may not read.
+        assert!(!is_unreadable(anyhow::anyhow!("the cache setup is busy").as_ref()));
+        if !rustix::process::geteuid().is_root() {
+            let other = store.put_tree(&Tree { entries: Vec::new(), links: vec![vec![b"a".to_vec()]] }).unwrap();
+            fs::set_permissions(store.object_path(&other), fs::Permissions::from_mode(0o000)).unwrap();
+            let refused = store.get_tree(&other).unwrap_err();
+            assert!(!is_unreadable(refused.as_ref()), "{refused:#}");
+        }
     }
 
     #[test]

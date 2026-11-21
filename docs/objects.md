@@ -253,6 +253,7 @@ that the pack holds. A crash leaves at most a loose copy too many, which the nex
 <project>/meta/objects/
   config.json             {"ids":"sha256","v":2}   (or "hmac-sha256")
   blobs/ab/cdef...        hot blobs
+  damaged/                damaged files that `fsck --repair` moved aside
   dicts/<id>              the store dictionary (section 5)
   objects/ab/cdef...      loose objects
   packs/<id>.pack .idx    packs
@@ -261,10 +262,35 @@ that the pack holds. A crash leaves at most a loose copy too many, which the nex
 ```
 
 The first two hex digits of an id name a fan-out folder. A write checks for the object, writes a
-temporary file, and renames it with `RENAME_NOREPLACE` (`renameatx_np(RENAME_EXCL)` on macOS; a
-link and an unlink elsewhere). An existing name means the content is there: nothing is rewritten,
-and concurrent writers agree. A failed write removes its file; opening a store removes temporary
-files of processes that are gone.
+temporary file, syncs it (`fsync`; a hot blob's clone or copy too), and renames it with `RENAME_NOREPLACE` (`renameatx_np(RENAME_EXCL)` on macOS; a link
+and an unlink elsewhere). An existing name means the content is there: nothing is rewritten, and
+concurrent writers agree. A failed write removes its file; opening a store removes temporary files
+of processes that are gone. A state record is synced with its folder before the signed record names
+it. The folders of objects are not synced: a crash can still lose the name of an object, so full
+crash durability of object names is not claimed. A lost name leaves the object missing, never
+empty, and that heals: the next write of the object writes it again, `fsck` reports it, `gc` prunes
+nothing below it, and `line delete --discard` can delete a line that needs it.
+
+A loose file that is empty, shorter than a header and one byte, has an unknown header, or has a zstd
+frame header or a chunk list that does not parse is damaged: a crash before its data reached the
+disk (issue #452, written by versions without the sync). An object whose chunk, delta base or
+dictionary is missing cannot be read either. Both count as absent, so the next write of that object
+writes it again with what it needs. An I/O error (EIO, EACCES, ENOSPC) is never taken for damage:
+the command fails, and nothing is rewritten or moved aside.
+
+`fsck` lists loose files and dictionaries that are damaged, unreadable state records, and every
+object that a state reaches and that cannot be read with what it needs (the walk of `gc`; an object
+that no state reaches is garbage that `gc` removes). A command checks each needed object once. `fsck --repair` (with the
+store to itself) moves damaged objects and dictionaries to `damaged/` and writes a damaged state
+record again from the signed record of its state. A missing object that a state reaches comes back
+only with a full write of the same content: an incremental save reuses the subtrees it does not
+change and never reads them (it falls back to a full write only where it reads a base folder that
+cannot be read). Save the line and run `layr objects import head --full` in it, or delete the line
+with `layr line delete -D --discard`. `gc` reports what it cannot read and still packs the rest, but
+removes nothing while a kept record or object cannot be read: what it would name is unknown. A body
+cut after a valid frame header shows on a read; a repack leaves it loose and gc reports it. `line
+delete --discard` deletes a line without a final save when that save fails on content that cannot
+be read; any other failure keeps the line.
 
 ## 8. States
 

@@ -75,9 +75,12 @@ pub fn hot_states(p: &Project) -> Result<std::collections::BTreeSet<String>> {
 
 pub fn hot_trees(p: &Project, store: &Store) -> Result<Vec<Id>> {
     let mut out = Vec::new();
+    // A state record that cannot be read keeps nothing hot; the maintenance plan reports it (#453).
     for id in hot_states(p)? {
-        if let Some(tree) = store.state_tree(&id)? {
-            out.push(tree);
+        match store.state_tree(&id) {
+            Ok(tree) => out.extend(tree),
+            Err(error) if layr_objects::store::is_unreadable(error.as_ref()) => {}
+            Err(error) => return Err(error),
         }
     }
     out.sort();
@@ -138,7 +141,7 @@ pub fn maintain(p: &Project, mode: MaintenanceMode) -> Result<Option<layr_object
         store.clone_hook = Some(crate::sys::apfs_unseal_fd);
     }
     let limit = if periodic { MaintenanceLimit::PERIODIC } else { MaintenanceLimit::UNLIMITED };
-    let plan = store.plan_maintenance(&p.db.kept_state_ids()?, &hot_trees(p, &store)?, limit)?;
+    let mut plan = store.plan_maintenance(&p.db.kept_state_ids()?, &hot_trees(p, &store)?, limit)?;
     if !matches!(mode, MaintenanceMode::Preview) {
         store.prune_planned(&plan)?;
     }
@@ -154,7 +157,9 @@ pub fn maintain(p: &Project, mode: MaintenanceMode) -> Result<Option<layr_object
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        store.repack_planned(&plan)?;
+        // Bodies that did not decode stay loose; gc reports them with the rest of the damage.
+        let packed = store.repack_planned(&plan)?;
+        plan.damaged.extend(packed.unreadable);
         crate::fsutil::atomic_write(&stamp, now.to_string().as_bytes(), 0o600)?;
     }
     Ok(Some(plan))
