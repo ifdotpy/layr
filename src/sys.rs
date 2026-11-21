@@ -2381,7 +2381,17 @@ pub fn overlay_mount(
 #[cfg(feature = "overlayfs")]
 pub fn overlay_unmount(path: &std::path::Path) -> io::Result<()> {
     // Never use lazy detach for managed data that stays: `overlay_detach` is for a deleted tree only.
-    Ok(rustix::mount::unmount(path, rustix::mount::UnmountFlags::empty())?)
+    // A fork in another thread holds copies of close-on-exec descriptors until its exec,
+    // so EBUSY can be brief. Retry for up to 2 s before the caller reports a busy tree.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match rustix::mount::unmount(path, rustix::mount::UnmountFlags::empty()) {
+            Err(rustix::io::Errno::BUSY) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            result => return Ok(result?),
+        }
+    }
 }
 /// Lazy detach (MNT_DETACH) of a mount whose tree is being deleted.
 #[cfg(feature = "overlayfs")]
