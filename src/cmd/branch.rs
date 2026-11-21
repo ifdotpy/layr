@@ -292,6 +292,15 @@ pub(crate) fn prepare_deletion<'p>(
         }
         let prepared = match repo.prepare_final_state(ctx, &fresh, &lease) {
             Err(error) if error.is::<crate::repo::StalePreparation>() && attempt < 3 => continue,
+            // Content that cannot be read (#452, #453) makes no final save: with --discard the line
+            // goes without one. Any other failure keeps the line, so its work stays undoable.
+            Err(error) if discard && layr_objects::store::is_unreadable(error.as_ref()) => {
+                eprintln!("warning: line {name} goes without a final save: {error:#}");
+                drop(lease);
+                deletion_barrier()?;
+                let lock = repo.line_lock(l)?.lock(&repo.p)?;
+                return Ok((lock, check()?, None, None));
+            }
             result => result?,
         };
         // Preparation owns its inputs; management changes may invalidate the target

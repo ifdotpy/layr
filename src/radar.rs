@@ -610,6 +610,10 @@ impl Repo<'_> {
                 Ok(root) => root,
                 Err(_) => continue,
             };
+            // A line whose head cannot be read (#452) is left out, as an unreadable base is.
+            let head = self.state(&other.head)?;
+            let state = self.last_auto(&other)?.filter(|s| s.time >= head.time).unwrap_or(head);
+            let Ok(theirs) = self.state_src(&state.id) else { continue };
             if ours.is_none() {
                 ours = Some(self.radar_tree(line)?);
             }
@@ -617,9 +621,6 @@ impl Repo<'_> {
             self.our_head_live(line, ours_root, &ignored, &mut work)?;
             let our_base = self.our_base_job(line, &base, &mut work)?;
             // show <state>:<path> and try use project read access for both head and auto states.
-            let head = self.state(&other.head)?;
-            let state = self.last_auto(&other)?.filter(|s| s.time >= head.time).unwrap_or(head);
-            let theirs = self.state_src(&state.id)?;
             let their_layers = self.layers_in(&other, &hidden_overlays)?;
             let their_private = self.private_paths_in(&other, &their_layers, &hidden_overlays)?;
             let hidden = self.radar_hidden(ctx, &other, &their_layers, &their_private);

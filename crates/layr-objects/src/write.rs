@@ -220,6 +220,8 @@ pub enum FullReason {
     Requested,
     NoCheckedDelta,
     IncompleteHardLinks,
+    /// The base tree or a folder of it that this write reads cannot be read (#452).
+    UnreadableBase,
 }
 
 #[derive(Debug)]
@@ -299,6 +301,26 @@ pub fn write_changed_from(
 }
 
 pub fn write_changed_with_dirty_from(
+    store: &Store,
+    source: &dyn Source,
+    base: &Base,
+    changed: &[Vec<u8>],
+    dirty_folders: &[Vec<u8>],
+    options: &WriteOptions,
+) -> Result<WriteReport> {
+    match write_changed_over(store, source, base, changed, dirty_folders, options) {
+        // Where this write reads its base, the base cannot be read (#452): a full write makes again
+        // what the tree needs. A base folder that it does not read is not checked (fsck finds it).
+        Err(error) if crate::store::is_unreadable(error.as_ref()) => {
+            let mut report = write_tree_from(store, source, options)?;
+            report.mode = WriteMode::Full { reason: FullReason::UnreadableBase };
+            Ok(report)
+        }
+        result => result,
+    }
+}
+
+fn write_changed_over(
     store: &Store,
     source: &dyn Source,
     base: &Base,
@@ -558,6 +580,58 @@ impl Walk<'_> {
 mod tests {
     use super::*;
     use crate::{testutil::scratch, Keying};
+
+    #[test]
+    fn an_io_error_in_the_base_stops_an_incremental_write() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let dir = scratch("io-error-base");
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub/f"), b"one").unwrap();
+        let opts = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: Vec::new(), similar: false };
+        let first = write_tree(&store, &src, &opts).unwrap();
+        let base = Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        let root = store.root().join("objects").join(&base.tree.hex()[..2]).join(&base.tree.hex()[2..]);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::write(src.join("sub/f"), b"two").unwrap();
+        let error = write_changed(&store, &src, &base, &[b"sub/f".to_vec()], &opts).unwrap_err();
+        assert!(!crate::store::is_unreadable(error.as_ref()), "{error:#}");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o444)).unwrap();
+    }
+
+    #[test]
+    fn an_incremental_write_over_an_unreadable_base_folder_writes_in_full() {
+        let dir = scratch("unreadable-base");
+        let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub/f"), b"one").unwrap();
+        let opts = WriteOptions { temperature: Temperature::Hot, previous: None, exclude: Vec::new(), similar: false };
+        let first = write_tree(&store, &src, &opts).unwrap();
+        let base = Base { tree: first.tree.unwrap(), times: first.times.unwrap() };
+        let sub = match store.get_tree(&base.tree).unwrap().entries[0].node {
+            Node::Dir { tree } => tree,
+            _ => unreachable!("sub is a folder"),
+        };
+        crate::testutil::make_writable(&dir.join("store"));
+        fs::remove_file(store.root().join("objects").join(&sub.hex()[..2]).join(&sub.hex()[2..])).unwrap();
+        fs::write(src.join("sub/f"), b"two").unwrap();
+        let report = write_changed(&store, &src, &base, &[b"sub/f".to_vec()], &opts).unwrap();
+        assert_eq!(report.mode, WriteMode::Full { reason: FullReason::UnreadableBase });
+        let tree = store.get_tree(&report.tree.unwrap()).unwrap();
+        let Node::Dir { tree: sub } = tree.entries[0].node else { unreachable!("sub is a folder") };
+        assert!(store.get_tree(&sub).is_ok(), "the full write wrote the folder");
+        // A base root that cannot be read too.
+        let base = Base { tree: report.tree.unwrap(), times: report.times.unwrap() };
+        fs::remove_file(store.root().join("objects").join(&base.tree.hex()[..2]).join(&base.tree.hex()[2..])).unwrap();
+        fs::write(src.join("sub/f"), b"three").unwrap();
+        let report = write_changed(&store, &src, &base, &[b"sub/f".to_vec()], &opts).unwrap();
+        assert_eq!(report.mode, WriteMode::Full { reason: FullReason::UnreadableBase });
+    }
 
     #[test]
     fn a_directory_time_change_keeps_its_files_and_updates_times() {

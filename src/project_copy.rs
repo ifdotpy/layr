@@ -25,6 +25,69 @@ pub const MARKER: &str = ".layr-copy-in-progress";
 /// Temporary snapshots of the source (backends only), removed by the copy.
 pub(crate) const TMP: &str = ".layr-copy-tmp";
 
+/// Allocated extents identify file content only together with its logical length.
+#[cfg(target_os = "linux")]
+pub(crate) type FileSharingKey = (u64, Vec<(u64, u64, u64)>);
+
+/// Exercise each Linux copier's file sharing without privileged send or mounts.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn sparse_sharing_regression(mut copy: impl FnMut(&Path, &Path) -> Result<usize>) -> Result<()> {
+    use rand::{RngCore, SeedableRng};
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!("layr-copy-sparse-{}", crate::ids::new_id())));
+    fs::create_dir(&fixture.0)?;
+    let seed = fixture.0.join("seed");
+    // Repeated bytes can become encoded inline data on a compressed btrfs volume,
+    // which the production sharing paths correctly refuse to use as evidence.
+    let mut data = [0; 4096];
+    rand::rngs::StdRng::seed_from_u64(0).fill_bytes(&mut data);
+    fs::write(&seed, data)?;
+    let seed = File::open(seed)?;
+    seed.sync_all()?;
+    let mut extents = None;
+    // Shorter first, longer second, then another short file which should share.
+    for (index, size) in [32768, 65536, 32768].into_iter().enumerate() {
+        let src = fixture.0.join(format!("source-{index}"));
+        let dst = fixture.0.join(format!("copy-{index}"));
+        let file = fs::OpenOptions::new().write(true).create_new(true).open(&src)?;
+        match rustix::fs::ioctl_ficlone(&file, &seed) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::OPNOTSUPP | rustix::io::Errno::NOTTY) => {
+                eprintln!("skipped: sparse sharing needs a reflink-capable filesystem");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        file.set_len(size)?;
+        file.sync_all()?;
+        let allocated = crate::sys::fiemap_full(&file)?;
+        const LAST: u32 = 0x1;
+        const SHARED: u32 = 0x2000;
+        assert!(!allocated.is_empty(), "fixture needs allocated data");
+        assert!(allocated.iter().all(|e| e.3 & !(LAST | SHARED) == 0), "fixture needs plain extents: {allocated:?}");
+        assert!(
+            allocated.iter().all(|(logical, _, len, _)| logical.saturating_add(*len) < size),
+            "fixture needs a trailing hole: {allocated:?}"
+        );
+        let current: Vec<_> = allocated.into_iter().map(|(l, p, n, _)| (l, p, n)).collect();
+        if let Some(first) = &extents {
+            assert_eq!(&current, first, "fixture files must share the same allocated data");
+        } else {
+            extents = Some(current);
+        }
+        let seen = copy(&src, &dst)?;
+        assert_eq!(fs::metadata(&dst)?.len(), size, "copy-{index}: trailing hole length changed");
+        assert_eq!(fs::read(&dst)?, fs::read(&src)?, "copy-{index}: contents changed");
+        assert_eq!(seen, (index + 1).min(2), "equal-length copies should still share");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
