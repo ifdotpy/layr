@@ -190,7 +190,34 @@ pub struct TransferStats {
     pub requests: u64,
     pub downloaded: u64,
     pub uploaded: u64,
-    pub control: u64,
+    pub control_received: u64,
+    pub control_sent: u64,
+    pub cdn_hits: u64,
+    pub cdn_fallbacks: u64,
+}
+
+/// Command totals for the encrypted gateway. Body bytes are counted at the application boundary.
+#[derive(Debug, serde::Serialize)]
+pub struct GatewayReport {
+    /// Calls to reqwest, including Layr retries. A protocol retry within reqwest is opaque here.
+    pub http_attempts: u64,
+    pub request_body_bytes: u64,
+    pub response_body_bytes: u64,
+    /// Signed CDN requests that returned HTTP 200; reading the body can still fail.
+    pub cdn_hits: u64,
+    pub cdn_fallbacks: u64,
+}
+
+impl From<TransferStats> for GatewayReport {
+    fn from(stats: TransferStats) -> Self {
+        Self {
+            http_attempts: stats.requests,
+            request_body_bytes: stats.uploaded + stats.control_sent,
+            response_body_bytes: stats.downloaded + stats.control_received,
+            cdn_hits: stats.cdn_hits,
+            cdn_fallbacks: stats.cdn_fallbacks,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -198,7 +225,10 @@ pub(super) struct Counters {
     pub requests: std::sync::atomic::AtomicU64,
     pub downloaded: std::sync::atomic::AtomicU64,
     pub uploaded: std::sync::atomic::AtomicU64,
-    pub control: std::sync::atomic::AtomicU64,
+    pub control_received: std::sync::atomic::AtomicU64,
+    pub control_sent: std::sync::atomic::AtomicU64,
+    pub cdn_hits: std::sync::atomic::AtomicU64,
+    pub cdn_fallbacks: std::sync::atomic::AtomicU64,
 }
 
 impl Counters {
@@ -207,7 +237,10 @@ impl Counters {
             requests: self.requests.load(Ordering::Relaxed),
             downloaded: self.downloaded.load(Ordering::Relaxed),
             uploaded: self.uploaded.load(Ordering::Relaxed),
-            control: self.control.load(Ordering::Relaxed),
+            control_received: self.control_received.load(Ordering::Relaxed),
+            control_sent: self.control_sent.load(Ordering::Relaxed),
+            cdn_hits: self.cdn_hits.load(Ordering::Relaxed),
+            cdn_fallbacks: self.cdn_fallbacks.load(Ordering::Relaxed),
         }
     }
 }
@@ -226,7 +259,7 @@ impl<R: std::io::Read> std::io::Read for Counted<R> {
         } else if self.payload {
             &self.counters.downloaded
         } else {
-            &self.counters.control
+            &self.counters.control_received
         };
         counter.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)

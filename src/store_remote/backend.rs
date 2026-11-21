@@ -90,7 +90,8 @@ fn epoch_object(key: &str) -> bool {
             .iter()
             .any(|p| key.starts_with(p))
 }
-type ReadVisitor<'a> = dyn FnMut(usize, Option<Vec<u8>>, &str) -> Result<()> + 'a;
+pub(super) type ObjectRead = Result<Option<Vec<u8>>>;
+type ReadVisitor<'a> = dyn FnMut(usize, ObjectRead, &str) -> Result<()> + 'a;
 
 impl Backend {
     pub fn set_epoch(&self, epoch: Option<&str>) -> Result<()> {
@@ -382,6 +383,16 @@ impl Backend {
         sizes: &[Option<u64>],
         mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>,
     ) -> Result<()> {
+        self.visit_many_results(keys, sizes, |i, body| visit(i, body?))
+    }
+
+    /// Keep individual read errors for a consumer that processes objects in key order.
+    pub(super) fn visit_many_results(
+        &self,
+        keys: &[String],
+        sizes: &[Option<u64>],
+        mut visit: impl FnMut(usize, ObjectRead) -> Result<()>,
+    ) -> Result<()> {
         self.visit_reads(keys, sizes, "", &mut |i, body, _| visit(i, body))
     }
 
@@ -395,7 +406,7 @@ impl Backend {
         mut visit: impl FnMut(usize, Vec<u8>) -> Result<()>,
     ) -> Result<()> {
         self.visit_reads(keys, sizes, identity, &mut |i, body, selected| {
-            let body = body.with_context(|| format!("missing remote object {}", keys[i]))?;
+            let body = body?.with_context(|| format!("missing remote object {}", keys[i]))?;
             visit(i, super::keys::decrypt(selected, &body)?)
         })
     }
@@ -410,13 +421,17 @@ impl Backend {
         Ok(out)
     }
 
-    /// Shared across Gateway clones/views. Non-HTTP backends have no gateway transport counters.
     pub fn transfer_stats(&self) -> TransferStats {
+        self.gateway_transfer_stats().unwrap_or_default()
+    }
+
+    /// Shared across Gateway clones and views.
+    pub(super) fn gateway_transfer_stats(&self) -> Option<TransferStats> {
         match self {
-            Self::Gateway(g) => g.transfer_stats(),
-            Self::Prefix(base, _) => base.transfer_stats(),
-            Self::Epoch(e) => e.root.transfer_stats(),
-            _ => Default::default(),
+            Self::Gateway(g) => Some(g.transfer_stats()),
+            Self::Prefix(base, _) => base.gateway_transfer_stats(),
+            Self::Epoch(e) => e.root.gateway_transfer_stats(),
+            _ => None,
         }
     }
 
@@ -445,7 +460,7 @@ impl Backend {
                 route(&epoch.root, &root, false, identity, visit)?;
                 let mut missing = Vec::new();
                 route(&epoch.current, &current, true, identity, &mut |i, body, id| {
-                    if body.is_none() && historical_object(&keys[i]) {
+                    if matches!(&body, Ok(None)) && historical_object(&keys[i]) {
                         missing.push(i);
                         Ok(())
                     } else {
@@ -458,7 +473,7 @@ impl Backend {
                     }
                     let mut next = Vec::new();
                     route(backend, &missing, false, old_identity, &mut |i, body, id| {
-                        if body.is_none() {
+                        if matches!(&body, Ok(None)) {
                             next.push(i);
                             Ok(())
                         } else {
@@ -468,7 +483,7 @@ impl Backend {
                     missing = next;
                 }
                 for i in missing {
-                    visit(i, None, identity)?;
+                    visit(i, Ok(None), identity)?;
                 }
                 Ok(())
             }
@@ -489,7 +504,7 @@ impl Backend {
                     super::download::BYTE_BUDGET,
                     |j| sizes[order[j]].unwrap_or(unknown),
                     |j| self.get_within(&keys[order[j]], sizes[order[j]]),
-                    |j, body| visit(order[j], body, identity),
+                    |j, body| visit(order[j], Ok(body), identity),
                 )
             }
         }
@@ -1242,7 +1257,7 @@ struct Io(Option<(String, std::time::Instant)>);
 
 impl Io {
     fn start(op: &str, key: &str, leaf: bool) -> Self {
-        if !leaf || std::env::var_os("LAYR_TRACE").is_none() {
+        if !leaf || !crate::trace::enabled() {
             return Self(None);
         }
         // The kind is the folder that names the object: `records`, `states`, `chunks`, `keys`, `slots`, `git`.
@@ -1268,7 +1283,7 @@ impl Drop for Io {
 
 /// With `LAYR_TRACE`, prints the requests of this process by kind, and forgets them.
 pub fn trace_requests() {
-    if std::env::var_os("LAYR_TRACE").is_none() {
+    if !crate::trace::enabled() {
         return;
     }
     let mut io = IO.lock().unwrap_or_else(|e| e.into_inner());

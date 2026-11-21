@@ -19,7 +19,7 @@ pub fn set_request_enabled(enabled: bool) {
     REQUEST_TRACE.store(if enabled { ENABLED } else { DISABLED }, Ordering::Relaxed);
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     match REQUEST_TRACE.load(Ordering::Relaxed) {
         INHERIT_ENV => std::env::var_os("LAYR_TRACE").is_some(),
         ENABLED => true,

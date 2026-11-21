@@ -1,6 +1,10 @@
 //! HTTPS object transport. Read proofs and write grants exist only in memory.
 
-use super::{backend::Object, keys};
+use super::{
+    backend::{Object, ObjectRead},
+    gitpack::is_commit_list,
+    keys,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use reqwest::{
@@ -20,16 +24,99 @@ pub(super) const OBJECT_LIMIT: usize = 32 << 20;
 const CDN_CAPABILITY: &str = "x-layr-cdn";
 const CDN_CONTENT_TYPE: &str = "application/vnd.layr.cdn+json";
 /// The most keys of one `POST batch`, and the most bytes of its reply (32 MiB of bodies and the index).
-const BATCH_KEYS: usize = 256;
+pub(super) const BATCH_KEYS: usize = 256;
 const BATCH_LIMIT: usize = (32 << 20) + (1 << 20);
 
-/// The objects of a `POST batch` reply of `count` keys, in their order: `Some(Some(bytes))` for 200, `Some(None)`
-/// for 404, `None` for a key to read alone (a streamed object or the byte limit of the reply).
-fn batch_objects(
-    response: Response,
-    count: usize,
-    counters: Arc<super::download::Counters>,
-) -> Result<Vec<Option<Option<Vec<u8>>>>> {
+enum BatchObject {
+    Read(ObjectRead),
+    Overflow,
+    Direct,
+}
+
+struct BatchReply {
+    items: Vec<BatchObject>,
+    trailer_error: Option<anyhow::Error>,
+}
+
+impl From<Vec<BatchObject>> for BatchReply {
+    fn from(items: Vec<BatchObject>) -> Self {
+        Self { items, trailer_error: None }
+    }
+}
+
+/// An error from a batch route. The status is kept separately from its diagnostic.
+struct RouteFailure {
+    status: Option<u64>,
+    error: anyhow::Error,
+}
+
+impl RouteFailure {
+    fn http(route: &str, status: u16) -> Self {
+        Self { status: Some(u64::from(status)), error: anyhow!("gateway {route}: HTTP {status}") }
+    }
+}
+
+impl From<anyhow::Error> for RouteFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self { status: None, error }
+    }
+}
+
+fn transient_read_status(status: u64) -> bool {
+    matches!(status, 408 | 429 | 502 | 503 | 504)
+}
+
+fn is_manifest(key: &str) -> bool {
+    let key = epoch_path(key).map_or(key, |(_, inner)| inner);
+    let key = key.strip_prefix("overlays/").and_then(|path| path.split_once('/')).map_or(key, |(_, inner)| {
+        inner.strip_prefix("epochs/").and_then(|path| path.split_once('/')).map_or(inner, |(_, key)| key)
+    });
+    is_commit_list(key)
+}
+
+// Git pack consumers handle manifest failures in listing order. Other consumers stop the transfer.
+fn manifest_read(key: &str, body: ObjectRead) -> Result<ObjectRead> {
+    if is_manifest(key) {
+        Ok(body)
+    } else {
+        body.map(Ok)
+    }
+}
+
+fn get_status_error(status: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("gateway get: HTTP {status}")
+}
+
+fn is_missing_project(error: &str) -> bool {
+    error.contains("no such project")
+}
+
+fn missing_project_error() -> anyhow::Error {
+    anyhow!("gateway: HTTP 404 (no such project) for an open project; the gateway did not load it, try again")
+}
+
+/// Both batch routes send transient manifest failures to the authenticated object GET. A permanent failure
+/// occupies the item's ordered result slot. Ordinary object reads still propagate their first failure.
+fn failed_item(key: &str, status: Option<u64>, error: anyhow::Error) -> Result<BatchObject> {
+    let error = match status.filter(|_| is_manifest(key)) {
+        Some(status) if transient_read_status(status) => return Ok(BatchObject::Direct),
+        Some(status) => get_status_error(status),
+        None => error,
+    };
+    Ok(BatchObject::Read(manifest_read(key, Err(error))?))
+}
+
+fn failed_request(keys: &[(usize, &str)], failure: RouteFailure) -> Result<Vec<BatchObject>> {
+    if keys.iter().any(|(_, key)| !is_manifest(key)) {
+        return Err(failure.error);
+    }
+    let error: Arc<dyn std::error::Error + Send + Sync> = failure.error.into_boxed_dyn_error().into();
+    keys.iter().map(|(_, key)| failed_item(key, failure.status, anyhow::Error::new(error.clone()))).collect()
+}
+
+/// Decode one batch envelope and retain ordered Git manifest item errors.
+fn batch_objects(response: Response, keys: &[(usize, &str)], counters: Arc<super::download::Counters>) -> Result<BatchReply> {
+    let count = keys.len();
     if response.content_length().is_some_and(|n| n > BATCH_LIMIT as u64) {
         bail!("batch response is too large");
     }
@@ -50,31 +137,52 @@ fn batch_objects(
     reader.payload = true;
     let mut total = 0;
     let mut out = Vec::with_capacity(count);
-    for item in items {
-        out.push(match item["status"].as_u64() {
-            Some(200) => {
-                let n = usize::try_from(item["length"].as_u64().context("batch entry has no length")?)?;
-                if n > OBJECT_LIMIT - total {
-                    bail!("batch bodies exceed 32 MiB");
+    for (item, (_, key)) in items.iter().zip(keys) {
+        let object = match item["status"].as_u64() {
+            Some(200) => match batch_body(&mut reader, item, OBJECT_LIMIT - total) {
+                Ok(body) => {
+                    total += body.len();
+                    BatchObject::Read(Ok(Some(body)))
                 }
-                total += n;
-                let mut body = vec![0; n];
-                reader.read_exact(&mut body).context("short batch body")?;
-                Some(Some(body))
+                Err(error) => {
+                    let (completed, unread) = keys.split_at(out.len());
+                    if completed.iter().any(|(_, key)| !is_manifest(key)) {
+                        return Err(error);
+                    }
+                    out.extend(failed_request(unread, error.into())?);
+                    return Ok(out.into());
+                }
+            },
+            Some(404) if item["error"].as_str().is_some_and(is_missing_project) => {
+                let error = if is_manifest(key) { missing_project_error() } else { anyhow!("gateway batch: no such project") };
+                failed_item(key, None, error)?
             }
-            Some(404) if item["error"].as_str().is_some_and(|e| e.contains("no such project")) => {
-                bail!("gateway batch: no such project")
-            }
-            Some(404) => Some(None),
-            Some(501 | 507) => None,
-            status => bail!("gateway batch object: HTTP {status:?}"),
-        });
+            Some(404) => BatchObject::Read(Ok(None)),
+            Some(501 | 507) => BatchObject::Overflow,
+            status => failed_item(key, status, anyhow!("gateway batch object: HTTP {status:?}"))?,
+        };
+        out.push(object);
     }
-    if reader.read(&mut [0])? != 0 {
-        bail!("batch reply has bytes after its bodies");
+    let error = match reader.read(&mut [0]) {
+        Ok(0) => return Ok(out.into()),
+        Ok(_) => anyhow!("batch reply has bytes after its bodies"),
+        Err(error) => error.into(),
+    };
+    if keys.iter().any(|(_, key)| !is_manifest(key)) {
+        return Err(error);
     }
-    Ok(out)
+    Ok(BatchReply { items: out, trailer_error: Some(error) })
 }
+fn batch_body(reader: &mut impl Read, item: &serde_json::Value, remaining: usize) -> Result<Vec<u8>> {
+    let n = usize::try_from(item["length"].as_u64().context("batch entry has no length")?)?;
+    if n > remaining {
+        bail!("batch bodies exceed 32 MiB");
+    }
+    let mut body = vec![0; n];
+    reader.read_exact(&mut body).context("short batch body")?;
+    Ok(body)
+}
+
 const SLOTS_LIMIT: usize = 8 << 20;
 const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 /// A cached read proof is renewed when it expires within this time: a long push or a CI clock that runs behind the
@@ -207,13 +315,14 @@ pub fn unreachable(e: &anyhow::Error) -> bool {
 /// a GET, a conditional PUT and a DELETE may go again. Other answers return at once.
 /// `send_busy` for a request that a repeat cannot harm (GET, HEAD, a create-only PUT that answers 412 when the first
 /// one landed): it is sent again also on 502 and 504 and when the connection fails, as when the gateway restarts
-/// for a release or a project change (about 2 s).
+/// for a release or a project change (about 2 s). Authenticated Git manifest GETs also retry a deadline (408).
 pub(super) fn send_again(idempotent: bool, send: impl FnMut() -> Result<Response>) -> Result<Response> {
-    send_again_with(idempotent, send, |_| {})
+    send_again_with(idempotent, false, send, |_| {})
 }
 
 fn send_again_with(
     idempotent: bool,
+    manifest_get: bool,
     mut send: impl FnMut() -> Result<Response>,
     mut discard: impl FnMut(Response),
 ) -> Result<Response> {
@@ -230,8 +339,10 @@ fn send_again_with(
             }
             Err(e) => return Err(e),
         };
-        let again =
-            matches!(response.status().as_u16(), 429 | 503) || (idempotent && matches!(response.status().as_u16(), 502 | 504));
+        let status = response.status().as_u16();
+        let again = matches!(status, 429 | 503)
+            || (idempotent && matches!(status, 502 | 504))
+            || (manifest_get && transient_read_status(u64::from(status)));
         if !again || attempt >= BUSY_TRIES {
             return Ok(response);
         }
@@ -271,7 +382,11 @@ impl Gateway {
     }
 
     fn retry(&self, idempotent: bool, send: impl FnMut() -> Result<Response>) -> Result<Response> {
-        send_again_with(idempotent, send, |response| {
+        self.retry_with(idempotent, false, send)
+    }
+
+    fn retry_with(&self, idempotent: bool, manifest_get: bool, send: impl FnMut() -> Result<Response>) -> Result<Response> {
+        send_again_with(idempotent, manifest_get, send, |response| {
             let _ = self.bytes(response, 1 << 20);
         })
     }
@@ -281,11 +396,39 @@ impl Gateway {
     fn execute(&self, builder: reqwest::blocking::RequestBuilder, upload: bool) -> Result<Response> {
         let request = builder.build().map_err(reqwest::Error::without_url)?;
         if let Some(length) = request.body().and_then(reqwest::blocking::Body::as_bytes).map(<[u8]>::len) {
-            let counter = if upload { &self.counters.uploaded } else { &self.counters.control };
+            let counter = if upload { &self.counters.uploaded } else { &self.counters.control_sent };
             counter.fetch_add(length as u64, Ordering::Relaxed);
         }
         self.counters.requests.fetch_add(1, Ordering::Relaxed);
+        let _attempt = crate::trace::named(|| format!("gateway HTTP {} {}", request.method(), self.trace_route(request.url())));
         self.http.execute(request).map_err(reqwest::Error::without_url).map_err(Into::into)
+    }
+
+    // Route names only: never print the host, identifiers, or signed URLs.
+    fn trace_route(&self, url: &reqwest::Url) -> &'static str {
+        let path = url.path();
+        if path.starts_with("/o/") {
+            return "CDN body";
+        }
+        let action = path.strip_prefix(self.base.path()).unwrap_or(path);
+        match action {
+            "objects" => match url.query_pairs().find(|(key, _)| key == "prefix") {
+                Some((_, prefix)) => match epoch_path(&prefix).map_or(prefix.as_ref(), |(_, inner)| inner).split('/').next() {
+                    Some("states") => "list states",
+                    Some("records") => "list records",
+                    Some("git") => "list Git",
+                    _ => "list",
+                },
+                _ => "list",
+            },
+            "batch" => "batch",
+            "cdn" => "CDN URLs",
+            "challenge" | "token" => "proof",
+            "store.json" | "public.json" => "descriptor",
+            _ if action.strip_prefix("objects/").is_some_and(is_manifest) => "Git manifest",
+            _ if action.ends_with(".pack.age") => "Git pack",
+            _ => "object or metadata",
+        }
     }
 
     fn read_body(&self, response: Response, limit: usize, payload: bool) -> Result<Vec<u8>> {
@@ -319,8 +462,8 @@ impl Gateway {
 
     fn absent<T>(&self, response: Response) -> Result<Option<T>> {
         let body = self.bytes(response, 4096)?;
-        if String::from_utf8_lossy(&body).contains("no such project") {
-            bail!("gateway: HTTP 404 (no such project) for an open project; the gateway did not load it, try again");
+        if is_missing_project(&String::from_utf8_lossy(&body)) {
+            return Err(missing_project_error());
         }
         Ok(None)
     }
@@ -624,8 +767,10 @@ impl Gateway {
             if let Some(token) = token {
                 request = request.bearer_auth(token);
             }
-            let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE);
-            self.retry(idempotent, || {
+            let idempotent = matches!(method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE)
+                || (method == Method::POST && matches!(action, "batch" | "cdn"));
+            let manifest_get = method == Method::GET && action.strip_prefix("objects/").is_some_and(is_manifest);
+            self.retry_with(idempotent, manifest_get, || {
                 self.execute(
                     request.try_clone().context("gateway request cannot be sent again")?,
                     method == Method::PUT && action.starts_with("objects/"),
@@ -796,7 +941,6 @@ impl Gateway {
             Some(r) => Ok(r),
             None => {
                 let _t = crate::trace::span("gateway object: the CDN failed, read through the gateway");
-                self.cdn_off.store(true, Ordering::SeqCst);
                 self.send_query_headers(method, action, Some(token), query, data, &[])
             }
         }
@@ -986,7 +1130,7 @@ impl Gateway {
             404 if key == "store.json" => Ok(None),
             404 => self.absent(response),
             200 => Ok(Some(self.read_body(response, if key == "store.json" { 16 << 10 } else { limit }, key != "store.json")?)),
-            status => { let _ = self.bytes(response, 4096); bail!("gateway get: HTTP {status}"); },
+            status => { let _ = self.bytes(response, 4096); Err(get_status_error(status)) },
         }
     }
 
@@ -1005,12 +1149,13 @@ impl Gateway {
         &self,
         keys: &[String],
         sizes: &[Option<u64>],
-        mut visit: impl FnMut(usize, Option<Vec<u8>>) -> Result<()>,
+        mut visit: impl FnMut(usize, ObjectRead) -> Result<()>,
     ) -> Result<()> {
         for key in keys {
             super::backend::check_key(key)?;
         }
-        if sizes.len() != keys.len() || sizes.iter().flatten().any(|&n| n > OBJECT_LIMIT as u64) {
+        let oversized = |size: Option<u64>| size.is_some_and(|n| n > OBJECT_LIMIT as u64);
+        if sizes.len() != keys.len() || keys.iter().zip(sizes).any(|(key, &size)| oversized(size) && !is_manifest(key)) {
             bail!("invalid download size bounds (maximum 32 MiB per object)");
         }
         // Cap bookkeeping and URL answers too. Completed bodies go straight to the consumer.
@@ -1018,8 +1163,15 @@ impl Gateway {
             let offset = window * BATCH_KEYS * 2;
             let lengths = &sizes[offset..offset + names.len()];
             let mut done = vec![false; names.len()];
+            let mut direct = vec![false; names.len()];
+            let mut trailer_error = None;
             let mut groups: std::collections::BTreeMap<&str, Vec<(usize, &str)>> = Default::default();
             for (i, key) in names.iter().enumerate() {
+                if oversized(lengths[i]) {
+                    done[i] = true;
+                    visit(offset + i, manifest_read(key, Err(anyhow!("{key} exceeds the 32 MiB gateway object limit")))?)?;
+                    continue;
+                }
                 if self.batchable(key) && !self.batch_off.load(Ordering::SeqCst) {
                     let (epoch, inner) = epoch_path(key).unwrap_or(("root", key));
                     groups.entry(epoch).or_default().push((i, inner));
@@ -1056,52 +1208,72 @@ impl Gateway {
                             self.batch_off.store(true, Ordering::SeqCst);
                             return Ok(None);
                         }
-                        response => response?,
+                        Ok(response) => response,
+                        Err(error) => return Ok(Some(failed_request(items, error.into())?.into())),
                     };
                     match response.status().as_u16() {
                         200 => {
                             self.batch_ready.store(true, Ordering::SeqCst);
                             // Parse directly from the response: no second 32 MiB copy of the envelope.
-                            Ok(Some(batch_objects(response, items.len(), self.counters.clone())?))
+                            Ok(Some(batch_objects(response, items, self.counters.clone())?))
                         }
                         404 | 405 => {
                             // A project disappearing after restart is not an old route.
-                            let body = self.bytes(response, 4096)?;
+                            let body = match self.bytes(response, 4096) {
+                                Ok(body) => body,
+                                Err(error) => return Ok(Some(failed_request(items, error.into())?.into())),
+                            };
                             if String::from_utf8_lossy(&body).contains("no such project") {
-                                bail!("gateway batch: no such project");
+                                return Ok(Some(failed_request(items, anyhow!("gateway batch: no such project").into())?.into()));
                             }
                             self.batch_off.store(true, Ordering::SeqCst);
                             Ok(None)
                         }
                         status => {
                             let _ = self.bytes(response, 4096);
-                            bail!("gateway batch: HTTP {status}");
+                            Ok(Some(failed_request(items, RouteFailure::http("batch", status))?.into()))
                         }
                     }
                 },
-                |batch, objects| {
-                    if let Some(objects) = objects {
-                        for ((i, _), object) in batches[batch].1.iter().zip(objects) {
-                            if let Some(body) = object {
-                                let length = body.as_ref().map_or(0, |body| body.len() as u64);
-                                if lengths[*i].is_some_and(|bound| length > bound) {
-                                    bail!("gateway batch: {} exceeds its listed size", names[*i]);
+                |batch, reply| {
+                    if let Some(reply) = reply {
+                        if trailer_error.is_none() {
+                            trailer_error = reply.trailer_error;
+                        }
+                        for ((i, _), object) in batches[batch].1.iter().zip(reply.items) {
+                            match object {
+                                BatchObject::Read(body) => {
+                                    let body = match body {
+                                        Ok(Some(bytes)) if lengths[*i].is_some_and(|bound| bytes.len() as u64 > bound) => {
+                                            manifest_read(
+                                                &names[*i],
+                                                Err(anyhow!("gateway batch: {} exceeds its listed size", names[*i])),
+                                            )?
+                                        }
+                                        body => body,
+                                    };
+                                    done[*i] = true;
+                                    visit(offset + *i, body)?;
                                 }
-                                done[*i] = true;
-                                visit(offset + *i, body)?;
+                                BatchObject::Direct => direct[*i] = true,
+                                BatchObject::Overflow => {}
                             }
                         }
                     }
                     Ok(())
                 },
             )?;
-            let pending: Vec<_> = (0..names.len()).filter(|&i| !done[i]).collect();
+            let mut pending: Vec<_> = (0..names.len()).filter(|&i| !done[i]).collect();
             // Large known bodies and overflow entries share the same whole-object scheduler.
             let urls = if self.batch_off.load(Ordering::SeqCst) && lengths.iter().all(Option::is_none) {
                 vec![None; names.len()]
             } else {
-                self.cdn_urls(names, &pending)?
+                self.cdn_urls(names, pending.iter().copied().filter(|&i| !direct[i]), |i, body| {
+                    done[i] = true;
+                    visit(offset + i, body)
+                })?
             };
+            pending.retain(|&i| !done[i]);
             super::download::run(
                 pending.len(),
                 super::download::JOBS,
@@ -1109,52 +1281,70 @@ impl Gateway {
                 |j| lengths[pending[j]].unwrap_or(OBJECT_LIMIT as u64).max(1),
                 |j| {
                     let i = pending[j];
-                    let limit = lengths[i].map_or(Ok(OBJECT_LIMIT), usize::try_from)?;
-                    // A CDN failure in an earlier job sends the rest of this window straight to the gateway.
-                    if let Some(url) = urls[i].as_deref().filter(|_| !self.cdn_off.load(Ordering::SeqCst)) {
-                        if let Some(response) = self.cdn_fetch(url)? {
-                            return Ok(Some(self.read_body(response, limit, true)?));
+                    let read = || {
+                        let limit = lengths[i].map_or(Ok(OBJECT_LIMIT), usize::try_from)?;
+                        // A CDN failure in an earlier job sends the rest of this window straight to the gateway.
+                        if let Some(url) = urls[i].as_deref().filter(|_| !self.cdn_off.load(Ordering::SeqCst)) {
+                            if let Some(response) = self.cdn_fetch(url)? {
+                                return Ok(Some(self.read_body(response, limit, true)?));
+                            }
                         }
-                        self.cdn_off.store(true, Ordering::SeqCst);
-                    }
-                    self.get_limited(&names[i], limit)
+                        self.get_limited(&names[i], limit)
+                    };
+                    manifest_read(&names[i], read())
                 },
                 |j, body| visit(offset + pending[j], body),
             )?;
+            if let Some(error) = trailer_error {
+                return Err(error);
+            }
         }
         Ok(())
     }
 
     fn cdn_fetch(&self, signed: &str) -> Result<Option<Response>> {
         let url = reqwest::Url::parse(signed).context("invalid CDN URL from the gateway")?;
-        if url.scheme() != "https"
-            || url.host_str() != self.base.host_str()
-            || !url.path().starts_with("/o/")
-            || !url.username().is_empty()
-            || url.password().is_some()
+        let fetched = if url.scheme() == "https"
+            && url.host_str() == self.base.host_str()
+            && url.path().starts_with("/o/")
+            && url.username().is_empty()
+            && url.password().is_none()
         {
-            return Ok(None);
-        }
-        match self
-            .retry(true, || self.execute(self.http.get(url.clone()).header(reqwest::header::ACCEPT_ENCODING, "identity"), false))
-        {
-            Ok(response) if response.status().as_u16() == 200 => Ok(Some(response)),
-            Ok(response) => {
-                let _ = self.bytes(response, 1 << 20);
-                Ok(None)
+            match self.retry(true, || {
+                self.execute(self.http.get(url.clone()).header(reqwest::header::ACCEPT_ENCODING, "identity"), false)
+            }) {
+                Ok(response) if response.status().as_u16() == 200 => Some(response),
+                Ok(response) => {
+                    let _ = self.bytes(response, 1 << 20);
+                    None
+                }
+                Err(_) => None,
             }
-            Err(_) => Ok(None),
+        } else {
+            None
+        };
+        if fetched.is_some() {
+            self.counters.cdn_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.counters.cdn_fallbacks.fetch_add(1, Ordering::Relaxed);
+            self.cdn_off.store(true, Ordering::SeqCst);
         }
+        Ok(fetched)
     }
 
     /// Optional POST cdn returns metadata only. Public access never probes authenticated batch routes.
-    fn cdn_urls(&self, keys: &[String], pending: &[usize]) -> Result<Vec<Option<String>>> {
+    fn cdn_urls(
+        &self,
+        keys: &[String],
+        pending: impl IntoIterator<Item = usize>,
+        mut finished: impl FnMut(usize, ObjectRead) -> Result<()>,
+    ) -> Result<Vec<Option<String>>> {
         let mut urls = vec![None; keys.len()];
         if self.cdn_off.load(Ordering::SeqCst) || self.cdn_batch_off.load(Ordering::SeqCst) || self.is_public() {
             return Ok(urls);
         }
         let mut groups: std::collections::BTreeMap<&str, Vec<(usize, &str)>> = Default::default();
-        for &i in pending {
+        for i in pending {
             if self.batchable(&keys[i]) {
                 let (epoch, inner) = epoch_path(&keys[i]).unwrap_or(("root", &keys[i]));
                 groups.entry(epoch).or_default().push((i, inner));
@@ -1162,46 +1352,77 @@ impl Gateway {
         }
         for (epoch, items) in groups {
             for chunk in items.chunks(BATCH_KEYS) {
-                let keys: Vec<_> = chunk.iter().map(|(_, key)| *key).collect();
-                let body = serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":keys}))?;
-                let response = match self.proof_request(Method::POST, "cdn", &[], Some(body), &[]) {
-                    Err(error) if error.is::<super::download::ProofRejected>() => {
-                        self.cdn_batch_off.store(true, Ordering::SeqCst);
-                        return Ok(urls);
-                    }
-                    response => response?,
-                };
-                match response.status().as_u16() {
-                    404 | 405 => {
-                        let body = self.bytes(response, 4096)?;
-                        if String::from_utf8_lossy(&body).contains("no such project") {
-                            bail!("gateway cdn: no such project");
-                        }
-                        self.cdn_batch_off.store(true, Ordering::SeqCst);
-                        return Ok(urls);
-                    }
-                    200 => {
-                        let reply: serde_json::Value = self.json(response, 1 << 20)?;
-                        let objects = reply["objects"].as_array().context("CDN reply has no objects")?;
-                        if objects.len() != chunk.len() {
-                            bail!("CDN reply has wrong object count");
-                        }
-                        for ((i, _), object) in chunk.iter().zip(objects) {
-                            match object["status"].as_u64() {
-                                Some(200) => urls[*i] = object["url"].as_str().map(str::to_owned),
-                                Some(404 | 501) => {}
-                                status => bail!("gateway cdn object: HTTP {status:?}"),
+                let objects = match self.cdn_objects(epoch, chunk) {
+                    Ok(Some(objects)) => objects,
+                    Ok(None) => return Ok(urls),
+                    Err(failure) => {
+                        for ((i, _), item) in chunk.iter().zip(failed_request(chunk, failure)?) {
+                            if let BatchObject::Read(body) = item {
+                                finished(*i, body)?;
                             }
                         }
+                        continue;
                     }
-                    status => {
-                        let _ = self.bytes(response, 4096);
-                        bail!("gateway cdn: HTTP {status}");
+                };
+                for ((i, key), object) in chunk.iter().zip(objects) {
+                    match object["status"].as_u64() {
+                        Some(200) => urls[*i] = object["url"].as_str().map(str::to_owned),
+                        Some(404) if is_manifest(key) && object["error"].as_str().is_some_and(is_missing_project) => {
+                            finished(*i, Err(missing_project_error()))?;
+                        }
+                        Some(404 | 501) => {}
+                        status => {
+                            if let BatchObject::Read(body) =
+                                failed_item(key, status, anyhow!("gateway cdn object: HTTP {status:?}"))?
+                            {
+                                finished(*i, body)?;
+                            }
+                        }
                     }
                 }
             }
         }
         Ok(urls)
+    }
+
+    fn cdn_objects(
+        &self,
+        epoch: &str,
+        items: &[(usize, &str)],
+    ) -> std::result::Result<Option<Vec<serde_json::Value>>, RouteFailure> {
+        let keys: Vec<_> = items.iter().map(|(_, key)| *key).collect();
+        let body = serde_json::to_vec(&serde_json::json!({"epoch":epoch,"keys":keys})).context("encode CDN request")?;
+        let response = match self.proof_request(Method::POST, "cdn", &[], Some(body), &[]) {
+            Err(error) if error.is::<super::download::ProofRejected>() => {
+                self.cdn_batch_off.store(true, Ordering::SeqCst);
+                return Ok(None);
+            }
+            response => response?,
+        };
+        match response.status().as_u16() {
+            404 | 405 => {
+                let body = self.bytes(response, 4096)?;
+                if String::from_utf8_lossy(&body).contains("no such project") {
+                    return Err(anyhow!("gateway cdn: no such project").into());
+                }
+                self.cdn_batch_off.store(true, Ordering::SeqCst);
+                Ok(None)
+            }
+            200 => {
+                let mut reply: serde_json::Value = self.json(response, 1 << 20)?;
+                let Some(serde_json::Value::Array(objects)) = reply.get_mut("objects").map(serde_json::Value::take) else {
+                    return Err(anyhow!("CDN reply has no objects").into());
+                };
+                if objects.len() != items.len() {
+                    return Err(anyhow!("CDN reply has wrong object count").into());
+                }
+                Ok(Some(objects))
+            }
+            status => {
+                let _ = self.bytes(response, 4096);
+                Err(RouteFailure::http("cdn", status))
+            }
+        }
     }
 
     pub fn list(&self, prefix: &str) -> Result<Vec<Object>> {
@@ -1392,7 +1613,7 @@ impl Gateway {
             404 => self.absent(response),
             status => {
                 let _ = self.bytes(response, 4096);
-                bail!("gateway get: HTTP {status}");
+                Err(get_status_error(status))
             }
         }
     }
@@ -2330,7 +2551,7 @@ pub(super) mod tests {
         server.join().unwrap();
         assert!(result.unwrap().is_empty(), "a 503 and a 429 are asked again");
         assert_eq!(gateway.transfer_stats().requests, 3);
-        assert_eq!(gateway.transfer_stats().control, 8 + LISTING.len() as u64);
+        assert_eq!(gateway.transfer_stats().control_received, 8 + LISTING.len() as u64);
     }
 
     #[test]
@@ -2900,9 +3121,24 @@ pub(super) mod tests {
         }
     }
     /// Reuse the binary peer and TCP/Unix selection for reader and end-to-end tests.
-    #[allow(clippy::unwrap_used)]
     pub(crate) fn file_transport(
         files: crate::store_remote::backend::Backend,
+    ) -> (crate::store_remote::backend::Backend, FileTransport) {
+        file_transport_with_status(files, |_, _| None)
+    }
+
+    pub(in crate::store_remote) fn file_transport_with_status(
+        files: crate::store_remote::backend::Backend,
+        status: impl Fn(&str, Option<&str>) -> Option<u16> + Send + 'static,
+    ) -> (crate::store_remote::backend::Backend, FileTransport) {
+        file_transport_with_batch_trailer(files, status, &[])
+    }
+
+    #[allow(clippy::unwrap_used)]
+    pub(in crate::store_remote) fn file_transport_with_batch_trailer(
+        files: crate::store_remote::backend::Backend,
+        status: impl Fn(&str, Option<&str>) -> Option<u16> + Send + 'static,
+        trailer: &'static [u8],
     ) -> (crate::store_remote::backend::Backend, FileTransport) {
         let (mut gateway, endpoint, server) = transport_tests::transport_fixture(move |request, value, body| {
             if let Some(key) = request.strip_prefix("put /v1/p/project/objects/") {
@@ -2910,16 +3146,24 @@ pub(super) mod tests {
                 return (if created { 201 } else { 412 }, Vec::new());
             }
             if request.ends_with("/batch") {
+                if let Some(status) = status("batch", None) {
+                    return (status, vec![]);
+                }
                 let items = value["keys"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .map(|name| {
-                        let body = files.get(name.as_str().unwrap()).unwrap();
-                        body.map_or((404, vec![]), |body| (200, body))
+                        let name = name.as_str().unwrap();
+                        if let Some(status) = status("batch", Some(name)) {
+                            return (status, vec![]);
+                        }
+                        files.get(name).unwrap().map_or((404, vec![]), |body| (200, body))
                     })
                     .collect();
-                return (200, transport_tests::envelope(items));
+                let mut reply = transport_tests::envelope(items);
+                reply.extend_from_slice(trailer);
+                return (200, reply);
             }
             let path = request.split_whitespace().nth(1).unwrap();
             let path = path.strip_prefix("/v1/p/project/").unwrap();
@@ -2940,6 +3184,16 @@ pub(super) mod tests {
                 return (200, serde_json::to_vec(&serde_json::json!({"objects":objects,"continuation":null})).unwrap());
             }
             if action == "cdn" {
+                if let Some(status) = status("cdn", None) {
+                    let body = if status == 200 { b"[]".to_vec() } else { Vec::new() };
+                    return (status, body);
+                }
+                let items: Vec<_> =
+                    value["keys"].as_array().unwrap().iter().map(|key| status("cdn", Some(key.as_str().unwrap()))).collect();
+                if items.iter().any(Option::is_some) {
+                    let objects: Vec<_> = items.iter().map(|&item| serde_json::json!({"status":item.unwrap_or(501)})).collect();
+                    return (200, serde_json::to_vec(&serde_json::json!({"objects":objects})).unwrap());
+                }
                 return (404, b"unsupported".to_vec());
             }
             let name = action.strip_prefix("objects/").unwrap_or(action);
@@ -2969,6 +3223,13 @@ pub(super) mod tests {
         pub(super) fn transport_fixture(
             answer: impl Fn(&str, &serde_json::Value, &[u8]) -> (u16, Vec<u8>) + Send + 'static,
         ) -> (Gateway, TestEndpoint, std::thread::JoinHandle<Vec<(String, serde_json::Value)>>) {
+            transport_fixture_with_length(answer, 0)
+        }
+
+        fn transport_fixture_with_length(
+            answer: impl Fn(&str, &serde_json::Value, &[u8]) -> (u16, Vec<u8>) + Send + 'static,
+            extra_length: usize,
+        ) -> (Gateway, TestEndpoint, std::thread::JoinHandle<Vec<(String, serde_json::Value)>>) {
             use std::io::{Read, Write};
             let (listener, endpoint) = test_listener();
             let server = std::thread::spawn(move || {
@@ -2991,8 +3252,12 @@ pub(super) mod tests {
                     let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
                     let (status, reply) = answer(&request, &value, &body);
                     requests.push((request, value));
-                    write!(stream, "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len())
-                        .unwrap();
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} Reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        reply.len() + extra_length
+                    )
+                    .unwrap();
                     stream.write_all(&reply).unwrap();
                 }
             });
@@ -3037,6 +3302,249 @@ pub(super) mod tests {
             let log = stop_transport(&endpoint, server);
             assert_eq!(log.len(), 259);
             assert_eq!(log.iter().filter(|(r, _)| r.ends_with("/batch")).count(), 1);
+        }
+
+        #[test]
+        fn transport_retries_git_manifests_directly_after_a_batch_deadline_or_transient_item() {
+            for deadline in [false, true] {
+                let batches = std::sync::atomic::AtomicUsize::new(0);
+                let gets = std::sync::atomic::AtomicUsize::new(0);
+                let (gateway, endpoint, server) = transport_fixture(move |request, _, _| {
+                    if request.ends_with("/batch") {
+                        match batches.fetch_add(1, Ordering::Relaxed) {
+                            0 => (502, b"busy".to_vec()),
+                            1 if deadline => (408, b"deadline".to_vec()),
+                            1 => (200, envelope(vec![(503, vec![])])),
+                            _ => (200, envelope(vec![(200, b"manifest".to_vec())])),
+                        }
+                    } else if request.ends_with("/cdn") {
+                        (200, br#"{"objects":[{"status":503}]}"#.to_vec())
+                    } else {
+                        assert!(request.rsplit_once("/objects/").is_some_and(|(_, key)| is_manifest(key)));
+                        if gets.fetch_add(1, Ordering::Relaxed) == 0 {
+                            (502, b"busy".to_vec())
+                        } else {
+                            (200, b"manifest".to_vec())
+                        }
+                    }
+                });
+                let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+                let key = "git/fixture.commits.age".to_owned();
+                let mut got = None;
+                let result = backend.visit_many(std::slice::from_ref(&key), &[Some(8)], |_, body| {
+                    got = body;
+                    Ok(())
+                });
+                let next = backend.get_many(std::slice::from_ref(&key));
+                let log = stop_transport(&endpoint, server);
+                result.unwrap();
+                assert_eq!(got.as_deref(), Some(b"manifest".as_slice()));
+                assert_eq!(next.unwrap(), [Some(b"manifest".to_vec())]);
+                assert_eq!(
+                    log.iter().map(|(request, _)| request.as_str()).collect::<Vec<_>>(),
+                    [
+                        "post /v1/p/project/batch",
+                        "post /v1/p/project/batch",
+                        &format!("get /v1/p/project/objects/{key}"),
+                        &format!("get /v1/p/project/objects/{key}"),
+                        "post /v1/p/project/batch",
+                    ]
+                );
+                assert_eq!(backend.transfer_stats().requests, 5);
+            }
+        }
+
+        #[test]
+        fn transport_retries_a_manifest_after_batch_overflow_and_a_transient_cdn_item() {
+            for cdn_deadline in [false, true] {
+                let gets = std::sync::atomic::AtomicUsize::new(0);
+                let (gateway, endpoint, server) = transport_fixture(move |request, _, _| {
+                    if request.ends_with("/batch") {
+                        (200, envelope(vec![(507, vec![])]))
+                    } else if request.ends_with("/cdn") {
+                        if cdn_deadline {
+                            (408, vec![])
+                        } else {
+                            (200, br#"{"objects":[{"status":503}]}"#.to_vec())
+                        }
+                    } else if cdn_deadline && gets.fetch_add(1, Ordering::Relaxed) == 0 {
+                        (408, vec![])
+                    } else {
+                        (200, b"manifest".to_vec())
+                    }
+                });
+                let key = "git/test.commits.age".to_owned();
+                let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+                let result = backend.get_many(std::slice::from_ref(&key));
+                let log = stop_transport(&endpoint, server);
+                assert_eq!(result.unwrap(), [Some(b"manifest".to_vec())]);
+                let get = format!("get /v1/p/project/objects/{key}");
+                let mut expected = vec!["post /v1/p/project/batch", "post /v1/p/project/cdn", &get];
+                if cdn_deadline {
+                    expected.push(&get);
+                }
+                assert_eq!(log.iter().map(|(request, _)| request.as_str()).collect::<Vec<_>>(), expected);
+            }
+        }
+
+        #[test]
+        fn a_release_filename_with_a_manifest_suffix_keeps_ordinary_get_and_size_rules() {
+            let gets = std::sync::atomic::AtomicUsize::new(0);
+            let (gateway, endpoint, server) = transport_fixture(move |request, _, _| {
+                assert!(request.ends_with("public/release/v1.2.3/archive.commits.age"));
+                if gets.fetch_add(1, Ordering::Relaxed) == 0 {
+                    (408, vec![])
+                } else {
+                    (200, b"release".to_vec())
+                }
+            });
+            let key = "public/release/v1.2.3/archive.commits.age".to_owned();
+            let got = gateway.get(&key);
+            let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+            let oversized = backend.visit_many(&[key], &[Some(33 << 20)], |_, _| Ok(()));
+            let log = stop_transport(&endpoint, server);
+            assert!(got.is_err_and(|error| error.to_string().contains("408")));
+            assert!(oversized.is_err_and(|error| error.to_string().contains("invalid download size bounds")));
+            assert_eq!(log.len(), 1);
+        }
+
+        #[test]
+        fn transport_late_batch_body_failure_preserves_completed_manifests() {
+            for (first, length, expected, bytes) in [
+                ("git/a.commits.age", Some(6), "short batch body", &b"firstsec"[..]),
+                ("git/a.commits.age", None, "batch entry has no length", &b"first"[..]),
+                ("git/a.commits.age", Some(OBJECT_LIMIT), "batch bodies exceed 32 MiB", &b"first"[..]),
+                ("states/a", Some(6), "short batch body", &b"firstsec"[..]),
+            ] {
+                let (gateway, endpoint, server) = transport_fixture(move |request, _, _| {
+                    assert!(request.ends_with("/batch"));
+                    let index = serde_json::to_vec(&serde_json::json!({"objects": [
+                        {"status":200,"length":5}, {"status":200,"length":length}, {"status":200,"length":5}
+                    ]}))
+                    .unwrap();
+                    let mut body = u32::try_from(index.len()).unwrap().to_be_bytes().to_vec();
+                    body.extend(index);
+                    body.extend_from_slice(bytes);
+                    (200, body)
+                });
+                let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+                let names = [first.into(), "git/sub/b.commits.age".into(), "git/sub/c.commits.age".into()];
+                let mut bodies: Vec<_> = (0..names.len()).map(|_| None).collect();
+                let result = backend.visit_many_results(&names, &[None; 3], |i, body| {
+                    bodies[i] = Some(body.map_err(|error| error.to_string()));
+                    Ok(())
+                });
+                let log = stop_transport(&endpoint, server);
+                if first == "states/a" {
+                    assert_eq!(result.unwrap_err().to_string(), expected);
+                    assert!(bodies.iter().all(Option::is_none));
+                } else {
+                    result.unwrap();
+                    assert_eq!(bodies[0], Some(Ok(Some(b"first".to_vec()))));
+                    assert_eq!(bodies[1], Some(Err(expected.into())));
+                    assert_eq!(bodies[2], Some(Err(expected.into())));
+                }
+                assert_eq!(backend.transfer_stats().downloaded, bytes.len() as u64);
+                assert_eq!(log.len(), 1);
+            }
+        }
+
+        #[test]
+        fn transport_batch_deadline_stops_ordinary_reads() {
+            for keys in [vec!["states/a"], vec!["records/a"], vec!["states/a", "git/a.commits.age"]] {
+                let (gateway, endpoint, server) =
+                    transport_fixture(
+                        |request, _, _| {
+                            if request.ends_with("/batch") {
+                                (408, vec![])
+                            } else {
+                                (200, b"object".to_vec())
+                            }
+                        },
+                    );
+                let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+                let keys: Vec<_> = keys.into_iter().map(str::to_owned).collect();
+                let result = backend.get_many(&keys);
+                let log = stop_transport(&endpoint, server);
+                assert_eq!(result.unwrap_err().to_string(), "gateway batch: HTTP 408");
+                assert_eq!(log.len(), 1);
+                assert!(log[0].0.ends_with("/batch"));
+            }
+        }
+
+        #[test]
+        fn transport_manifest_batch_eof_error_follows_decoded_items() {
+            for first in ["git/a.commits.age", "states/a"] {
+                let (gateway, endpoint, server) =
+                    transport_fixture_with_length(|_, _, _| (200, envelope(vec![(200, b"first".to_vec()), (403, vec![])])), 1);
+                let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+                let keys = [first.into(), "git/b.commits.age".into()];
+                let mut bodies = [None, None];
+                let result = backend.visit_many_results(&keys, &[None; 2], |i, body| {
+                    bodies[i] = Some(body.map_err(|error| error.to_string()));
+                    Ok(())
+                });
+                let log = stop_transport(&endpoint, server);
+                if first == "states/a" {
+                    assert_eq!(bodies, [None, None]);
+                } else {
+                    assert_eq!(bodies, [Some(Ok(Some(b"first".to_vec()))), Some(Err("gateway get: HTTP 403".into()))]);
+                }
+                assert!(result.is_err());
+                assert_eq!(log.len(), 1);
+            }
+        }
+
+        #[test]
+        fn transport_manifest_missing_project_matches_get_without_fallback() {
+            for (cdn, missing) in [(false, true), (true, true), (false, false), (true, false)] {
+                let (gateway, endpoint, server) = transport_fixture(move |request, _, _| {
+                    let item = if missing {
+                        serde_json::json!({"status":404,"error":"no such project"})
+                    } else {
+                        serde_json::json!({"status":404})
+                    };
+                    if request.ends_with("/batch") && cdn {
+                        (200, envelope(vec![(507, vec![])]))
+                    } else if request.ends_with("/batch") {
+                        let index = serde_json::to_vec(&serde_json::json!({"objects":[item]})).unwrap();
+                        let mut body = u32::try_from(index.len()).unwrap().to_be_bytes().to_vec();
+                        body.extend(index);
+                        (200, body)
+                    } else if request.ends_with("/cdn") {
+                        (200, serde_json::to_vec(&serde_json::json!({"objects":[item]})).unwrap())
+                    } else if missing {
+                        (404, b"no such project".to_vec())
+                    } else {
+                        (404, vec![])
+                    }
+                });
+                let key = "git/a.commits.age";
+                let expected = gateway.get(key).map_err(|error| error.to_string());
+                let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+                let mut item = None;
+                let result = backend.visit_many_results(&[key.into()], &[None], |_, body| {
+                    item = Some(body.map_err(|error| error.to_string()));
+                    Ok(())
+                });
+                let log = stop_transport(&endpoint, server);
+                result.unwrap();
+                assert_eq!(item, Some(expected));
+                assert_eq!(log.len(), 2 + usize::from(cdn) + usize::from(cdn && !missing));
+            }
+        }
+
+        #[test]
+        fn transport_manifest_route_denial_matches_get() {
+            let (gateway, endpoint, server) = transport_fixture(|_, _, _| (403, vec![]));
+            let key = "overlays/fixture/epochs/version/git/sub/pack.commits.age";
+            let direct = gateway.get(key);
+            let backend = crate::store_remote::backend::Backend::Gateway(gateway);
+            let batch = backend.get_many(&[key.into()]);
+            let log = stop_transport(&endpoint, server);
+            assert_eq!(direct.unwrap_err().to_string(), "gateway get: HTTP 403");
+            assert_eq!(batch.unwrap_err().to_string(), "gateway get: HTTP 403");
+            assert_eq!(log.len(), 2);
         }
 
         #[test]
@@ -3108,15 +3616,14 @@ pub(super) mod tests {
             assert_eq!(stats.requests, 2);
             assert_eq!(stats.downloaded, 257);
             assert_eq!(stats.uploaded, 0);
-            let expected_control: usize = log
+            let expected_sent: usize = log.iter().map(|(_, value)| serde_json::to_vec(value).unwrap().len()).sum();
+            let expected_received: usize = log
                 .iter()
-                .map(|(_, value)| {
-                    serde_json::to_vec(value).unwrap().len()
-                        + envelope(value["keys"].as_array().unwrap().iter().map(|_| (200, b"x".to_vec())).collect()).len()
-                        - value["keys"].as_array().unwrap().len()
-                })
+                .map(|(_, value)| envelope(vec![(200, b"x".to_vec()); value["keys"].as_array().unwrap().len()]).len())
                 .sum();
-            assert_eq!(stats.control, expected_control as u64);
+            let report = crate::store_remote::download::GatewayReport::from(stats);
+            assert_eq!(report.request_body_bytes, expected_sent as u64);
+            assert_eq!(report.response_body_bytes, expected_received as u64);
         }
 
         #[test]
@@ -3214,7 +3721,20 @@ pub(super) mod tests {
         fn transport_known_sizes_batch_cdn_metadata_and_reject_oversized_bodies() {
             let (gateway, endpoint, server) = transport_fixture(|request, value, _| {
                 if request.ends_with("/cdn") {
-                    (200, serde_json::to_vec(&serde_json::json!({"objects":value["keys"].as_array().unwrap().iter().map(|_| serde_json::json!({"status":200,"url":"https://elsewhere.example/o/untrusted","bytes":1})).collect::<Vec<_>>()})).unwrap())
+                    let objects: Vec<_> = value["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            if i == 0 {
+                                serde_json::json!({"status":200,"url":"https://elsewhere.example/o/untrusted","bytes":1})
+                            } else {
+                                serde_json::json!({"status":501})
+                            }
+                        })
+                        .collect();
+                    (200, serde_json::to_vec(&serde_json::json!({"objects":objects})).unwrap())
                 } else if request.ends_with("/batch") {
                     // A gateway without the batch route: the reads go one at a time.
                     (404, Vec::new())
@@ -3240,6 +3760,8 @@ pub(super) mod tests {
             assert_eq!(log.iter().filter(|(r, _)| r.ends_with("/batch")).count(), 1);
             assert_eq!(log.iter().filter(|(r, _)| r.ends_with("/cdn")).count(), 1);
             assert_eq!(stats.downloaded, 6);
+            assert_eq!(stats.cdn_fallbacks, 1);
+            assert_eq!(stats.cdn_hits, 0);
         }
 
         #[test]
@@ -3400,5 +3922,11 @@ pub(super) mod tests {
             "the first read asks for the CDN; after a CDN failure the read goes through the gateway"
         );
         assert!(gateway.cdn_off.load(Ordering::SeqCst), "later reads of the command skip the CDN");
+        let stats = gateway.transfer_stats();
+        assert_eq!(stats.requests, 2);
+        assert_eq!(stats.cdn_fallbacks, 1);
+        assert_eq!(stats.cdn_hits, 0);
+        assert_eq!(stats.downloaded, body.len() as u64);
+        assert_eq!(stats.control_received, body.len() as u64);
     }
 }

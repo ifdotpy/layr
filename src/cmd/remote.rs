@@ -1134,17 +1134,28 @@ fn exchange(ctx: &Ctx, args: &[String], op: &str) -> Result<i32> {
                 crate::store::check_name("line", line)?;
             }
             let mut store = store_remote::open_named(&a.pos[0], &h.repo)?;
-            store.configure(ctx, &store_remote::ConfigureOptions::default())?;
-            {
-                let _lock = h.repo.p.lock_maintenance()?;
-                store.save_pin(&_lock, ctx, &h.repo, &a.pos[0])?;
-            }
-            let report =
-                if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+            let transfer = (|| {
+                {
+                    let _configure = crate::trace::span("store configure and pin");
+                    store.configure(ctx, &store_remote::ConfigureOptions::default())?;
+                    let lock = h.repo.p.lock_maintenance()?;
+                    store.save_pin(&lock, ctx, &h.repo, &a.pos[0])?;
+                }
+                let report =
+                    if op == "push" { store.push(ctx, &mut h.repo, &opts)? } else { store.fetch(ctx, &mut h.repo, &opts)? };
+                if a.has("--index") {
+                    let _index = crate::trace::span("store write index");
+                    store.write_index(ctx, &h.repo)?;
+                }
+                Ok::<_, anyhow::Error>(report)
+            })();
             store_remote::backend::trace_requests();
-            if a.has("--index") {
-                store.write_index(ctx, &h.repo)?;
+            let gateway = store.gateway_report();
+            if let Some(stats) = gateway.as_ref().filter(|_| crate::trace::enabled()) {
+                eprintln!("trace gateway {op} {}", json!(stats));
             }
+            let mut report = transfer?;
+            report.gateway = gateway;
             if !report.missing_lines.is_empty() {
                 print_store_report(ctx, &report, op, a.has("--json"), a.has("-q"))?;
                 // A line whose head tree is not on the remote yet fails the fetch only when the caller asked for that

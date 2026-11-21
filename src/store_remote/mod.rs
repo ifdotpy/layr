@@ -104,6 +104,8 @@ pub struct Report {
     pub states: usize,
     /// Git packs (`git/`) that a push wrote or a fetch installed.
     pub git_packs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<download::GatewayReport>,
     #[serde(skip)]
     pub state_ids: Vec<String>,
     #[serde(skip)]
@@ -803,6 +805,10 @@ fn open_with_pin(url: &str, repo: &Repo, pin: Option<StorePin>) -> Result<Store>
 }
 
 impl Store {
+    pub(crate) fn gateway_report(&self) -> Option<download::GatewayReport> {
+        self.backend.gateway_transfer_stats().map(Into::into)
+    }
+
     /// The folder whose lock lets one push or sweep of this store (or of a layer of it) run at a time on this machine:
     /// `dir`, under the store's identity rather than its URL, so that two URLs of one store share it. The local state of
     /// the store stays under its URL.
