@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.51.0](https://github.com/ifdotpy/layr/compare/v0.50.0...v0.51.0) (2026-11-21)
+
+
+### Performance Improvements
+
+* **push:** Skip idle cache sweeps and slots that exist
+* **fetch:** Filter overlay discovery before reading remote keys
+* **save:** Reuse checked comparisons and avoid duplicate warnings
+* **fetch:** Batch local history and presence checks
+* **commands:** Avoid inherited cleanup and repeated path reads
+* **changes:** Consume rename candidates in content queues
+* **add:** Compare only the named paths, before the project lock, on Linux too
+* **status:** Combine renames in overlap compares instead of comparing the folder again
+
+
+### Bug Fixes
+
+* **objects:** Check out native states through export
+* **cache:** Initialize empty regenerable folders as cold output
+* **save:** Save a line when a build-output overlay is not on this machine
+* **ids:** Draw temporary names from the OS after the service forks
+
 ## [0.50.0](https://github.com/ifdotpy/layr/compare/v0.49.0...v0.50.0) (2026-11-19)
 
 
