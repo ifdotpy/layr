@@ -2986,18 +2986,75 @@ pub fn conflict_open(root: &(impl fsutil::Src + ?Sized), c: &Conflict) -> Result
     Ok(true)
 }
 
+/// True if a line that starts with `<<<<<<< ` is followed, on a later line, by one that starts with `>>>>>>> `
+/// (the ends of a conflict block; the `=======` line between them is not required). Lines end at `\n`, so the
+/// bytes of a line may be anything. Two searches of `memchr` for byte strings, each stopping at its first hit:
+/// returns on the first ordered pair, in O(n) worst-case time and O(1) extra space.
 pub fn has_markers(data: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(data);
-    let mut a = false;
-    let mut b = false;
-    for l in s.lines() {
-        if l.starts_with("<<<<<<< ") {
-            a = true;
-        } else if l.starts_with(">>>>>>> ") && a {
-            b = true;
+    use memchr::memmem::find;
+    // A line start is the buffer start or the byte after `\n`; a closing line needs the `\n` of the opening one.
+    let open = if data.starts_with(b"<<<<<<< ") { Some(0) } else { find(data, b"\n<<<<<<< ") };
+    open.is_some_and(|at| find(&data[at..], b"\n>>>>>>> ").is_some())
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::has_markers;
+
+    #[test]
+    fn a_closing_line_needs_an_opening_line_before_it() {
+        let table: [(&[u8], bool); 18] = [
+            (b"", false),
+            (b"<<<<<<< a\n=======\n>>>>>>> b\n", true),
+            (b"<<<<<<< \n>>>>>>> ", true),
+            (b"x\r\n<<<<<<< a\r\n>>>>>>> b", true),
+            (b"<<<<<<< >>>>>>> ", false),
+            (b">>>>>>> \n<<<<<<< \n", false),
+            (b">>>>>>> \n<<<<<<< \n>>>>>>> ", true),
+            (b"<<<<<<< a\n", false),
+            (b"a\n>>>>>>> b\n", false),
+            (b" <<<<<<< a\n>>>>>>> b", false),
+            (b"<<<<<<<\n>>>>>>> b", false),
+            (b"<<<<<<<\t\n>>>>>>>\t", false),
+            (b"<<<<<<< a\r>>>>>>> b", false),
+            (b"\xff<<<<<<< a\n>>>>>>> b", false),
+            (b"<<<<<<< \xff\n\xff>>>>>>> ", false),
+            (b"<<<<<<< \xff\n>>>>>>> \xff", true),
+            (b"<<<<<<<< a\n>>>>>>>> b\n", false),
+            (b"<<<<<<< \n>>>>>>>", false),
+        ];
+        for (data, want) in table {
+            assert_eq!(has_markers(data), want, "{:?}", String::from_utf8_lossy(data));
         }
     }
-    a && b
+
+    /// A 2 MiB file with the pair on its first two lines, then padding and a last byte that is no UTF-8.
+    #[test]
+    #[ignore = "subprocess helper for the_scan_allocates_no_copy_of_the_file"]
+    fn scan_memory_process() {
+        use std::sync::atomic::Ordering::SeqCst;
+        // CI runs ignored tests too; without the variable this is not the measuring subprocess.
+        if std::env::var_os("LAYR_TEST_PART_MEMORY").is_none() {
+            return;
+        }
+        let mut data = b"<<<<<<< a\n>>>>>>> b\n".to_vec();
+        data.resize(2 << 20, b'x');
+        data.push(0xff);
+        crate::store_remote::large_blocks::ON.store(true, SeqCst);
+        let found = has_markers(&data);
+        crate::store_remote::large_blocks::ON.store(false, SeqCst);
+        assert!(found);
+        // A leading newline: a serial test run has printed `test <name> ... ` without one.
+        println!("\npart memory {}", crate::store_remote::large_blocks::MOST.load(SeqCst));
+    }
+
+    /// The lossy conversion of a file with invalid UTF-8 (a binary file) copied all of it; the scan copies nothing.
+    #[test]
+    fn the_scan_allocates_no_copy_of_the_file() -> anyhow::Result<()> {
+        let most = crate::store_remote::large_blocks_of("repo::marker_tests::scan_memory_process")?;
+        assert_eq!(most, 0, "blocks of at least 1 MiB held during the scan");
+        Ok(())
+    }
 }
 
 /// Remove parent folders of `rel` in `target` that became empty and do not exist in `to`.
