@@ -129,6 +129,7 @@ use std::collections::HashMap;
 mod cache_hook;
 
 fn main() {
+    crate::sys::raise_open_files_limit();
     // Started as `rg` or `find` (a link on an agent's PATH): LayrFS answers from its index.
     let argv0 = std::env::args_os().next().map(std::path::PathBuf::from);
     if let Some(tool) = argv0.as_deref().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {

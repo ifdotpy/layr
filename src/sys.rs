@@ -367,6 +367,39 @@ pub fn check_limits_before_exec(cmd: &mut Command, memory: u64, processes: u64, 
     Ok(())
 }
 
+/// Raise the soft limit of open files to the hard limit, at most 10240 (OPEN_MAX of macOS).
+/// launchd starts jobs with 256; a reset over many packs failed with EMFILE (2026-11-21).
+pub fn raise_open_files_limit() {
+    let now = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    if let Some(wanted) = raised_open_files(now.current, now.maximum) {
+        let _ = rustix::process::setrlimit(
+            rustix::process::Resource::Nofile,
+            rustix::process::Rlimit { current: Some(wanted), maximum: now.maximum },
+        );
+    }
+}
+
+/// The new soft limit, or None when the current one is enough (None is unlimited).
+fn raised_open_files(current: Option<u64>, maximum: Option<u64>) -> Option<u64> {
+    let wanted = maximum.map_or(10240, |maximum| maximum.min(10240));
+    current.filter(|&current| current < wanted).map(|_| wanted)
+}
+
+#[cfg(test)]
+mod open_files_limit_tests {
+    use super::raised_open_files;
+
+    #[test]
+    fn the_soft_open_files_limit_rises_to_the_hard_limit_at_most_10240() {
+        assert_eq!(raised_open_files(Some(256), None), Some(10240));
+        assert_eq!(raised_open_files(Some(256), Some(1024)), Some(1024));
+        assert_eq!(raised_open_files(Some(256), Some(1 << 20)), Some(10240));
+        assert_eq!(raised_open_files(Some(1024), Some(1024)), None);
+        assert_eq!(raised_open_files(Some(65536), Some(1 << 20)), None);
+        assert_eq!(raised_open_files(None, None), None);
+    }
+}
+
 // ----- btrfs ioctls -----
 
 #[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
