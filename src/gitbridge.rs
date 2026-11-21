@@ -3040,25 +3040,34 @@ pub fn has_commits(repo: &Repo, commits: &[String]) -> Result<Vec<bool>> {
 /// A pack of the objects of `new` that `covered` does not reach: the objects of the commits a remote
 /// store lacks, without the ones it already has.
 pub fn pack_commits(repo: &Repo, new: &[String], covered: &[String]) -> Result<Vec<u8>> {
-    let s = store(repo);
-    let mut child = base_cmd(&s)
-        .args(["pack-objects", "--stdout", "--revs", "-q"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut input = child.stdin.take().context("pack-objects has no input")?;
-    let lines: Vec<String> = new.iter().cloned().chain(covered.iter().map(|c| format!("^{c}"))).collect();
-    let writer = std::thread::spawn(move || -> std::io::Result<()> {
-        for line in lines {
-            writeln!(input, "{line}")?;
-        }
-        Ok(())
-    });
-    let out = child.wait_with_output()?;
-    writer.join().map_err(|_| anyhow!("pack-objects writer failed"))??;
+    revision_output(&store(repo), "pack-objects", &["--stdout", "--revs", "-q"], new, covered)
+}
+
+fn revision_output(git_dir: &Path, subcommand: &str, args: &[&str], new: &[String], covered: &[String]) -> Result<Vec<u8>> {
+    let mut command = base_cmd(git_dir);
+    command.arg(subcommand).args(args);
+    let mut child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let input = child.stdin.take().with_context(|| format!("{subcommand} has no input"))?;
+    // Drain both output pipes while the writer streams revisions and closes stdin.
+    let out = std::thread::scope(|scope| -> Result<_> {
+        let writer = scope.spawn(move || {
+            let mut input = std::io::BufWriter::new(input);
+            for id in new {
+                writeln!(input, "{id}")?;
+            }
+            for id in covered {
+                writeln!(input, "^{id}")?;
+            }
+            input.flush()
+        });
+        let out = child.wait_with_output();
+        let written = writer.join();
+        let out = out?;
+        written.map_err(|_| anyhow!("{subcommand} writer failed"))??;
+        Ok(out)
+    })?;
     if !out.status.success() {
-        bail!("git pack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!("git {subcommand} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(out.stdout)
 }
@@ -3069,23 +3078,8 @@ pub fn commits_outside(repo: &Repo, new: &[String], covered: &[String]) -> Resul
     if new.is_empty() {
         return Ok(Vec::new());
     }
-    let s = store(repo);
-    let mut child =
-        base_cmd(&s).args(["rev-list", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let mut input = child.stdin.take().context("rev-list has no input")?;
-    let lines: Vec<String> = new.iter().cloned().chain(covered.iter().map(|c| format!("^{c}"))).collect();
-    let writer = std::thread::spawn(move || -> std::io::Result<()> {
-        for line in lines {
-            writeln!(input, "{line}")?;
-        }
-        Ok(())
-    });
-    let out = child.wait_with_output()?;
-    writer.join().map_err(|_| anyhow!("rev-list writer failed"))??;
-    if !out.status.success() {
-        bail!("git rev-list failed: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    let listed: std::collections::BTreeSet<&str> = std::str::from_utf8(&out.stdout)?.lines().collect();
+    let stdout = revision_output(&store(repo), "rev-list", &["--stdin"], new, covered)?;
+    let listed: std::collections::BTreeSet<&str> = std::str::from_utf8(&stdout)?.lines().collect();
     Ok(new.iter().filter(|c| listed.contains(c.as_str())).cloned().collect())
 }
 
@@ -3301,6 +3295,61 @@ mod export_tests {
         let root = std::env::temp_dir().join(format!("layr-export-test-{}", ids::new_id()));
         std::fs::create_dir(&root)?;
         Ok(root)
+    }
+
+    #[test]
+    fn git_packs_and_commit_lists_exclude_covered_history() -> Result<()> {
+        let root = scratch()?;
+        let result = (|| -> Result<()> {
+            let store = crate::store::Store::open(&root)?;
+            let p = crate::store::Project {
+                lease: Default::default(),
+                store: &store,
+                name: "pack-test".into(),
+                dir: root.clone(),
+                id: ids::new_id(),
+                db: crate::db::Db::open(&root.join("pack-test.sqlite"))?,
+            };
+            let repo = Repo { p, ctx: None, restore_from_remote: false };
+            let git = super::store(&repo);
+            assert!(Command::new("git").args(["init", "--bare", "-q"]).arg(&git).status()?.success());
+            let tree = git_out(&git, &["mktree"])?.trim().to_owned();
+            let commit = |args: &[&str]| -> Result<String> {
+                let mut command = vec![
+                    "-c",
+                    "user.name=Pack Test",
+                    "-c",
+                    "user.email=test@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    &tree,
+                ];
+                command.extend_from_slice(args);
+                Ok(git_out(&git, &command)?.trim().to_owned())
+            };
+            let first = commit(&["-m", "first"])?;
+            let second = commit(&["-p", &first, "-m", "second"])?;
+            let third = commit(&["-p", &second, "-m", "third"])?;
+            let new = [second.clone(), first.clone(), third.clone(), second.clone()];
+            let covered = [first];
+            assert_eq!(commits_outside(&repo, &new, &covered)?, [second.clone(), third, second]);
+            let pack = pack_commits(&repo, &new, &covered)?;
+            assert!(pack.starts_with(b"PACK"));
+            assert_eq!(&pack[8..12], &2_u32.to_be_bytes(), "only the two uncovered commits");
+            let invalid = ["missing-revision".into()];
+            assert!(commits_outside(&repo, &[], &invalid)?.is_empty());
+            for (subcommand, error) in [
+                ("rev-list", commits_outside(&repo, &invalid, &[]).err()),
+                ("pack-objects", pack_commits(&repo, &invalid, &[]).err()),
+            ] {
+                let error = error.context("Git accepted an unknown revision")?.to_string();
+                assert!(error.starts_with(&format!("git {subcommand} failed: ")) && error.contains(&invalid[0]), "{error}");
+            }
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 
     #[test]

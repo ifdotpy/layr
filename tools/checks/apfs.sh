@@ -81,6 +81,9 @@ step save-unsettled bash tests/save-unsettled.sh
 # Bash 4.3 for the runner of the list: macOS has 3.2, Homebrew a newer one. 8 at once ran 40 macos tests in 113 s,
 # one at a time in 349 s, with the same results (2026-11-14).
 tests=(bash tests/run.sh)
+# Each test prints its time, and the run its slowest tests: the macos step took 999 of 1611 s with 233 tests
+# (2026-11-21), and the log did not show which ones.
+export LAYR_TEST_TIMES=1
 if /opt/homebrew/bin/bash -c '((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3)))' 2>/dev/null; then
     tests=(/opt/homebrew/bin/bash tests/run.sh)
     cpus=$(sysctl -n hw.ncpu)

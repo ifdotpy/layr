@@ -13,7 +13,7 @@
 //! `states/<id>` of a thin state is a view: a complete tree made when a command needs one.
 //! `layr gc` removes views that were not used recently.
 use crate::apfs::{self, ScanEntry, SubvolInfo};
-use crate::fsutil::FType;
+use crate::fsutil::{ancestors, FType};
 use crate::store::Project;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -208,11 +208,6 @@ pub(crate) fn clone_from_source(from: &Path, to: &Path) -> Result<()> {
 
 fn parent_of(rel: &str) -> &str {
     rel.rfind('/').map(|i| &rel[..i]).unwrap_or("")
-}
-
-/// The ancestors of `rel`, nearest to the root first, without the root.
-fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
-    rel.match_indices('/').map(move |(i, _)| &rel[..i])
 }
 
 fn hides(layer: &Layer, rel: &str) -> bool {

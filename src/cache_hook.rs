@@ -505,10 +505,10 @@ pub fn worker_with(adapters: &'static [Box<dyn CacheAdapter>]) -> i32 {
     let folder = PathBuf::from(var(ENV_FOLDER));
     let limit = Duration::from_millis(var(ENV_LIMIT_MS).parse().unwrap_or(0));
     let report = match var(ENV_MODE).as_str() {
-        "recover" => recover_here(adapters, setting.as_deref(), &folder),
+        "recover" => run_adapter(adapters, setting.as_deref(), &folder, RECOVER_LIMIT, AdapterAction::Recover),
         "relocate" => relocate_here(adapters, setting.as_deref(), &folder, Path::new(&var(ENV_AT))),
-        "warm" => warm_here(adapters, setting.as_deref(), &folder, limit),
-        "repair" => repair_here(adapters, setting.as_deref(), &folder, limit),
+        "warm" => run_adapter(adapters, setting.as_deref(), &folder, limit, AdapterAction::Warm),
+        "repair" => run_adapter(adapters, setting.as_deref(), &folder, limit, AdapterAction::Repair),
         _ => prune_here(adapters, setting.as_deref(), &folder, limit),
     };
     println!("{REPORT_MARK}{}", serde_json::to_string(&report).unwrap_or_default());
@@ -618,77 +618,53 @@ fn prune_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>,
     }
 }
 
-/// Runs the adapter's `warm` on `folder` within `limit`. `pruned` in the report means the build ran.
-fn warm_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, limit: Duration) -> Report {
-    let found = match find(adapters, setting, folder) {
-        Ok(a) => a,
+enum AdapterAction {
+    Warm,
+    Repair,
+    Recover,
+}
+
+/// `pruned` means the build completed for warm, or the folder is whole for repair.
+fn run_adapter(
+    adapters: &[Box<dyn CacheAdapter>],
+    setting: Option<&str>,
+    folder: &Path,
+    limit: Duration,
+    action: AdapterAction,
+) -> Report {
+    let mut report =
+        Report { adapter: String::new(), pruned: false, freed: 0, restored: false, folder_ok: true, reason: String::new() };
+    let adapter = match find(adapters, setting, folder) {
+        Ok(adapter) => adapter,
         Err(reason) => {
-            return Report {
-                adapter: setting.unwrap_or("-").into(),
-                pruned: false,
-                freed: 0,
-                restored: false,
-                folder_ok: true,
-                reason,
+            report.adapter = match action {
+                AdapterAction::Warm => {
+                    report.reason = reason;
+                    setting.unwrap_or("-")
+                }
+                // Without an adapter the hook did not change the folder.
+                AdapterAction::Repair => {
+                    report.pruned = true;
+                    "-"
+                }
+                AdapterAction::Recover => "-",
             }
+            .into();
+            return report;
         }
     };
     let host = WorkerHost::new(limit);
-    let (pruned, reason) = match found.warm(&host, folder) {
-        Ok(()) => (true, String::new()),
-        Err(reason) => (false, reason),
+    let result = match action {
+        AdapterAction::Warm => adapter.warm(&host, folder).map(|()| report.pruned = true),
+        AdapterAction::Repair => adapter.repair(&host, folder).map(|()| report.pruned = true),
+        AdapterAction::Recover => adapter.recover(&host, folder).map(|restored| report.restored = restored),
     };
-    Report { adapter: found.name().into(), pruned, freed: 0, restored: false, folder_ok: true, reason }
-}
-
-/// Runs the adapter's `repair` on `folder` within `limit`. `pruned` in the report means the folder is whole.
-fn repair_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path, limit: Duration) -> Report {
-    let found = match find(adapters, setting, folder) {
-        Ok(a) => a,
-        // Without an adapter nothing changed the folder: it is as whole as it can be.
-        Err(_) => {
-            return Report {
-                adapter: "-".into(),
-                pruned: true,
-                freed: 0,
-                restored: false,
-                folder_ok: true,
-                reason: String::new(),
-            }
-        }
-    };
-    let host = WorkerHost::new(limit);
-    let (pruned, reason) = match found.repair(&host, folder) {
-        Ok(()) => (true, String::new()),
-        Err(reason) => (false, reason),
-    };
-    Report { adapter: found.name().into(), pruned, freed: 0, restored: false, folder_ok: pruned, reason }
-}
-
-/// Runs the adapter's `recover` on `folder` (after its processes were stopped at the hard limit).
-fn recover_here(adapters: &'static [Box<dyn CacheAdapter>], setting: Option<&str>, folder: &Path) -> Report {
-    let found = match find(adapters, setting, folder) {
-        Ok(a) => a,
-        // Without an adapter nothing changed the folder under this hook.
-        Err(_) => {
-            return Report {
-                adapter: "-".into(),
-                pruned: false,
-                freed: 0,
-                restored: false,
-                folder_ok: true,
-                reason: String::new(),
-            }
-        }
-    };
-    match found.recover(&WorkerHost::new(RECOVER_LIMIT), folder) {
-        Ok(restored) => {
-            Report { adapter: found.name().into(), pruned: false, freed: 0, restored, folder_ok: true, reason: String::new() }
-        }
-        Err(reason) => {
-            Report { adapter: found.name().into(), pruned: false, freed: 0, restored: false, folder_ok: false, reason }
-        }
+    if let Err(reason) = result {
+        report.folder_ok = matches!(action, AdapterAction::Warm);
+        report.reason = reason;
     }
+    report.adapter = adapter.name().into();
+    report
 }
 
 /// Runs the adapter's `relocated` on `folder`, used at `at`. `freed` in the report is the number of changed units.
@@ -919,6 +895,31 @@ mod tests {
         assert!(dir.join("repaired.txt").exists());
         let done = repair_with(&launch(), &TEST_ENV, Some("hard-stuck"), &dir, me(), ms(5000), ms(20000));
         assert!(!done.folder_ok && done.log.contains("stays marked damaged"), "{}", done.log);
+    }
+
+    #[test]
+    fn missing_adapters_produce_mode_specific_reports() {
+        for (action, setting, adapter, pruned, reason) in [
+            (AdapterAction::Warm, Some("missing"), "missing", false, "unknown prune adapter 'missing'"),
+            (AdapterAction::Warm, None, "-", false, "no adapter matches the folder"),
+            (AdapterAction::Repair, Some("missing"), "-", true, ""),
+            (AdapterAction::Recover, Some("missing"), "-", false, ""),
+        ] {
+            assert_eq!(
+                run_adapter(&[], setting, Path::new("unused"), HOOK_LIMIT, action),
+                Report { adapter: adapter.into(), pruned, freed: 0, restored: false, folder_ok: true, reason: reason.into() },
+            );
+        }
+    }
+
+    #[test]
+    fn failed_adapter_actions_report_whether_the_folder_is_whole() {
+        for (action, name, folder_ok) in [(AdapterAction::Warm, "fail", true), (AdapterAction::Repair, "hard-stuck", false)] {
+            let adapters: [Box<dyn CacheAdapter>; 1] = [Box::new(Fake(name))];
+            let report = run_adapter(&adapters, Some(name), Path::new("unused"), HOOK_LIMIT, action);
+            assert!(!report.pruned && !report.reason.is_empty());
+            assert_eq!(report.folder_ok, folder_ok);
+        }
     }
 
     #[cfg(target_os = "macos")]
