@@ -265,11 +265,11 @@ fn local_fetch_reader_decodes_linearly_and_preserves_order() {
         .collect::<Vec<_>>();
     super::tests::segment(&backend, &identity, 1, 256, &lines);
     let seen = root.join("seen-records");
-    records_with_local(&backend, &identity, super::tests::PROJECT, &[], Some(&seen)).unwrap();
+    records_with_local(&backend, &identity, super::tests::PROJECT, &[], Some((&seen, &key))).unwrap();
     let mut expected = lines.clone();
     expected.sort_by_cached_key(|line| oplog::parse_line(line).unwrap().record.time);
     let before = oplog::DECODE_COUNT.with(std::cell::Cell::get);
-    let records = records_with_local(&backend, &identity, super::tests::PROJECT, &lines, Some(&seen)).unwrap();
+    let records = records_with_local(&backend, &identity, super::tests::PROJECT, &lines, Some((&seen, &key))).unwrap();
     let decodes = oplog::DECODE_COUNT.with(std::cell::Cell::get) - before;
     assert_eq!(records.lines, expected);
     assert!(decodes <= 2 * records.lines.len() + 2, "{decodes} decodes for {} records", records.lines.len());
@@ -299,5 +299,180 @@ fn local_fetch_noop_file_remote() {
         let report = fetch(&mut remote, &ctx, &mut repo, &Options::default()).unwrap();
         assert_eq!((report.records, report.states), (0, 0));
         eprintln!("local file remote, {count} records, 256 states: {:?}", started.elapsed());
+    }
+}
+
+/// The signature checks and decodes of `run`.
+fn counted<T>(run: impl FnOnce() -> T) -> (T, usize, usize) {
+    let counters = || (oplog::VERIFY_COUNT.with(std::cell::Cell::get), oplog::DECODE_COUNT.with(std::cell::Cell::get));
+    let before = counters();
+    let value = run();
+    let after = counters();
+    (value, after.0 - before.0, after.1 - before.1)
+}
+
+/// A no-op push or fetch verifies no signature that an earlier command verified, and decodes each record at most once
+/// per pass that needs it (push: the selection; fetch: the local index, the import and the selection). One new record
+/// is the one verified. The same on a Secret store and on a Private one (no vault identity).
+#[test]
+fn noop_push_and_fetch_verify_only_records_that_are_new() {
+    for (count, plain) in [(8, false), (64, false), (8, true)] {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let ctx = super::super::writer::tests::context(&root);
+        let mut remote = super::super::writer::tests::remote(&root, &ctx);
+        let mut repo = fixture(&ctx, &remote.project, count);
+        if plain {
+            super::super::writer::initialize_plain(&remote, format::Mode::Private).unwrap();
+        } else {
+            let options = crate::store_remote::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() };
+            remote.configure(&ctx, &options).unwrap();
+        }
+        let records = repo.p.export_jsonl().unwrap().lines().count();
+        let (_, verifies, _) = counted(|| super::super::writer::push(&remote, &ctx, &repo, &Options::default()).unwrap());
+        assert_eq!(verifies, records, "the first push verifies the history once");
+        let (_, verifies, _) = counted(|| fetch(&mut remote, &ctx, &mut repo, &Options::default()).unwrap());
+        assert_eq!(verifies, records, "the first fetch verifies the history once");
+        let (report, verifies, decodes) =
+            counted(|| super::super::writer::push(&remote, &ctx, &repo, &Options::default()).unwrap());
+        assert_eq!((report.records, report.states, verifies), (0, 0, 0));
+        assert!(decodes <= records + 1, "push: {decodes} decodes for {records} records");
+        let (report, verifies, decodes) = counted(|| fetch(&mut remote, &ctx, &mut repo, &Options::default()).unwrap());
+        assert_eq!((report.records, report.states, verifies), (0, 0, 0));
+        assert!(decodes <= 3 * records + 3, "fetch: {decodes} decodes for {records} records");
+        let mut record = DraftRecord::new("config");
+        record.data = serde_json::json!({"config": {"note": "one more"}});
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
+        let (report, verifies, _) = counted(|| super::super::writer::push(&remote, &ctx, &repo, &Options::default()).unwrap());
+        assert_eq!((report.records, verifies), (1, 1));
+        let (_, verifies, _) = counted(|| fetch(&mut remote, &ctx, &mut repo, &Options::default()).unwrap());
+        assert_eq!(verifies, 1);
+        crate::free::finish(&ctx);
+    }
+}
+
+/// One derived state with a `derived/` ref and one automatic state per commit of `repo`. The automatic states are
+/// here only as objects (`layr migrate` retired their copies): their tree and times are in the object store.
+fn add_refs_and_object_only_autos(ctx: &Ctx, repo: &Repo) {
+    let commits: Vec<String> = repo.p.db.state_rows().unwrap().into_iter().map(|(state, _)| state.id).collect();
+    let objects = crate::objstore::open(&repo.p).unwrap();
+    let tree = objects.put_tree(&Default::default()).unwrap().hex();
+    let times = objects.put_times(&layr_objects::times::Times { own: 0, records: Vec::new() }).unwrap().hex();
+    let author = serde_json::json!({"name":"Test","email":"test@example.test"});
+    let mut drafts = Vec::new();
+    let mut autos = Vec::new();
+    for commit in &commits {
+        let (derived, auto) = (crate::ids::new_id(), crate::ids::new_id());
+        std::fs::create_dir(repo.p.state_path(&derived)).unwrap();
+        let mut record = DraftRecord::new("attest");
+        record.states.push(
+            serde_json::from_value(serde_json::json!({"id":derived,"kind":"derived","derived_from":commit,
+                "context":"check-v1","subvol":"","author":author,"time":1700000000001i64}))
+            .unwrap(),
+        );
+        let name = format!("derived/check-v1/{derived}");
+        record.data = serde_json::json!({"ref_change":{"name":name,"before":null,"after":{"name":name,"target":derived}}});
+        drafts.push(record);
+        let mut record = DraftRecord::new("save");
+        record.states.push(
+            serde_json::from_value(serde_json::json!({"id":auto,"kind":"auto","parents":[commit],"subvol":"",
+                "author":author,"time":1700000000002i64,"tree":tree,"times":times}))
+            .unwrap(),
+        );
+        drafts.push(record);
+        autos.push(auto);
+    }
+    repo.p.lock_maintenance().unwrap().append_batch(&mut drafts, &ctx.actor()).unwrap();
+    for auto in autos {
+        repo.p.db.test_connection().execute("UPDATE states SET present=0, deleted=0 WHERE id=?1", [&auto]).unwrap();
+    }
+}
+
+/// A no-op push selects its candidates from one read of the state catalog and one open of the object store, whatever
+/// the number of states, refs and object-only states: before, it read each ref target, each state of the history and
+/// each candidate again, and opened the object store once per object-only state.
+#[test]
+fn noop_push_selection_reads_the_state_catalog_once() {
+    for count in [8, 64] {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let _cleanup = crate::repo::Temp::plain(root.clone());
+        let ctx = super::super::writer::tests::context(&root);
+        let mut remote = super::super::writer::tests::remote(&root, &ctx);
+        let repo = fixture(&ctx, &remote.project, count);
+        add_refs_and_object_only_autos(&ctx, &repo);
+        // One more automatic state names a times table that this machine never had: it is no candidate.
+        let tree = crate::objstore::open(&repo.p).unwrap().put_tree(&Default::default()).unwrap().hex();
+        let elsewhere = crate::ids::new_id();
+        let mut record = DraftRecord::new("save");
+        record.states.push(
+            serde_json::from_value(serde_json::json!({"id":elsewhere,"kind":"auto","parents":[],"subvol":"",
+                "author":{"name":"Test","email":"test@example.test"},"time":1700000000003i64,
+                "tree":tree,"times":"12".repeat(32)}))
+            .unwrap(),
+        );
+        repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
+        repo.p.db.test_connection().execute("UPDATE states SET present=0 WHERE id=?1", [&elsewhere]).unwrap();
+        let options = crate::store_remote::ConfigureOptions { paper_key_out: Some(root.join("paper")), ..Default::default() };
+        remote.configure(&ctx, &options).unwrap();
+        // The options of `layr push <remote> --overlay main`.
+        let opts = Options { caches: true, overlays: Some(["main".to_string()].into()), ..Default::default() };
+        let first = super::super::writer::push(&remote, &ctx, &repo, &opts).unwrap();
+        assert_eq!(first.states, 2 * count, "the commits and the derived states go up");
+        let counters = || {
+            (
+                crate::db::STATE_READS.with(std::cell::Cell::get),
+                crate::db::CATALOG_READS.with(std::cell::Cell::get),
+                crate::objstore::OPENS.with(std::cell::Cell::get),
+            )
+        };
+        let before = counters();
+        let report = super::super::writer::push(&remote, &ctx, &repo, &opts).unwrap();
+        let after = counters();
+        let (reads, catalogs, opens) = (after.0 - before.0, after.1 - before.1, after.2 - before.2);
+        assert_eq!((report.records, report.states), (0, 0));
+        let autos: Vec<String> = repo
+            .p
+            .db
+            .object_only_states()
+            .unwrap()
+            .into_iter()
+            .filter(|id| *id != elsewhere)
+            .map(|id| format!("{id} \"auto\""))
+            .collect();
+        assert_eq!((autos.len(), &report.omitted, &first.omitted), (count, &autos, &autos), "omitted in catalog order");
+        assert!(reads <= 2, "{reads} state reads for {} states and {count} refs", 3 * count);
+        assert_eq!(catalogs, 1, "one read of the whole state catalog");
+        assert!(opens <= 1, "{opens} object store opens for {count} object-only states");
+        // Every state on the remote: no object-only state is left to look up, and the object store stays closed.
+        let lines: Vec<String> = repo.p.export_jsonl().unwrap().lines().map(str::to_owned).collect();
+        let every = repo.p.db.state_rows().unwrap().into_iter().map(|(state, _)| state.id).collect();
+        let opens = crate::objstore::OPENS.with(std::cell::Cell::get);
+        let local = crate::sync_local::Local::read(&ctx, &repo);
+        assert!(local.push_candidates(&lines, &opts, &every, &mut Vec::new()).unwrap().is_empty());
+        assert_eq!(crate::objstore::OPENS.with(std::cell::Cell::get), opens);
+        // An object-only state counts only with both its tree and its times table here.
+        let held = repo.p.db.object_only_states().unwrap().into_iter().find(|id| *id != elsewhere).unwrap();
+        assert!(crate::objstore::verified(&repo.p, &held).unwrap().is_some());
+        assert!(crate::objstore::verified(&repo.p, &elsewhere).unwrap().is_none());
+        let objects = crate::objstore::open(&repo.p).unwrap();
+        let record = |id: &str| repo.p.db.state(id).unwrap().unwrap();
+        assert!(crate::objstore::recorded(&objects, &record(&held)).unwrap().is_some());
+        assert!(crate::objstore::recorded(&objects, &record(&elsewhere)).unwrap().is_none());
+        // `--line main` sends the history of main only: the commits, not the derived states that the refs keep.
+        let line = Options { lines: vec!["main".into()], ..opts.clone() };
+        let commits: std::collections::BTreeSet<String> = repo
+            .p
+            .db
+            .state_rows()
+            .unwrap()
+            .into_iter()
+            .filter(|(state, _)| state.kind == crate::model::StateKind::Commit)
+            .map(|(state, _)| state.id)
+            .collect();
+        let selected = local.push_candidates(&lines, &line, &Default::default(), &mut Vec::new()).unwrap();
+        assert_eq!(selected.into_iter().map(|state| state.id).collect::<std::collections::BTreeSet<_>>(), commits);
+        crate::free::finish(&ctx);
     }
 }

@@ -150,12 +150,12 @@ impl Local<'_, '_> {
         }
         let opts = &selected;
         let mut omitted = omitted_cache_refs(repo, opts)?;
-        let mut required = required_states_in(repo, records, opts, Some(&states))?;
+        let mut required = required_states(repo, records, opts, &states)?;
         if let Some(lines) = &clone_lines {
             required.extend(ancestries(repo, Some(&states), lines.iter().map(|line| line.head.clone()))?);
         }
         // `--heads`: the heads of the lines and what an undo of a line delete needs; the other states stay on the remote.
-        let lines_keep = base_selection_in(repo, records, opts, Some(&states))?;
+        let lines_keep = base_selection(repo, records, opts, &states)?;
         let heads: Option<BTreeSet<String>> = opts
             .heads
             .then(|| -> Result<BTreeSet<String>> {
@@ -361,7 +361,8 @@ pub(crate) fn state_ancestries(repo: &Repo, tips: impl IntoIterator<Item = Strin
     ancestries(repo, None, tips)
 }
 
-fn state_catalog(repo: &Repo) -> Result<BTreeMap<String, StateRec>> {
+/// Every state record by id: one query, for a selection that looks at many states.
+pub(crate) fn state_catalog(repo: &Repo) -> Result<BTreeMap<String, StateRec>> {
     Ok(repo.p.db.state_rows()?.into_iter().map(|(state, _)| (state.id.clone(), state)).collect())
 }
 
@@ -399,45 +400,35 @@ pub(crate) fn state_ancestry(repo: &Repo, id: &str) -> Result<Vec<String>> {
     state_ancestries(repo, [id.to_string()])
 }
 
-pub(crate) fn required_states(repo: &Repo, lines: &[String], opts: &Options) -> Result<BTreeSet<String>> {
-    required_states_in(repo, lines, opts, None)
-}
-
-fn required_states_in(
+/// The states that the line heads and refs reach, and what an undo of a line delete needs, from the catalog `states`.
+pub(crate) fn required_states(
     repo: &Repo,
     lines: &[String],
     opts: &Options,
-    states: Option<&BTreeMap<String, StateRec>>,
+    states: &BTreeMap<String, StateRec>,
 ) -> Result<BTreeSet<String>> {
     let mut required = deletion_dependencies(lines)?;
     let mut tips: Vec<String> = repo.p.db.lines()?.into_iter().map(|line| line.head).collect();
     for reference in repo.p.db.refs("", crate::ids::now_ms())? {
-        let state = match states {
-            Some(states) => states.get(&reference.target).cloned(),
-            None => repo.p.db.state(&reference.target)?,
-        }
-        .with_context(|| format!("state {} not found", crate::ids::short(&reference.target)))?;
+        let state =
+            states.get(&reference.target).with_context(|| format!("state {} not found", crate::ids::short(&reference.target)))?;
         if state.kind == crate::model::StateKind::Cache && !opts.caches {
             continue;
         }
         tips.push(reference.target);
     }
-    required.extend(ancestries(repo, states, tips)?);
+    required.extend(ancestries(repo, Some(states), tips)?);
     Ok(required)
 }
 
 /// The base states that `fetch --line` and `--overlay` take, or None for every state. Without `base` in `--overlay`
 /// no base state comes; with `--line`, the history of those lines (only their heads with `--heads`) and what an undo of
 /// a line delete needs.
-pub(crate) fn base_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
-    base_selection_in(repo, records, opts, None)
-}
-
-fn base_selection_in(
+fn base_selection(
     repo: &Repo,
     records: &[String],
     opts: &Options,
-    states: Option<&BTreeMap<String, StateRec>>,
+    states: &BTreeMap<String, StateRec>,
 ) -> Result<Option<BTreeSet<String>>> {
     if repo.p.is_overlay() {
         return Ok(None);
@@ -465,20 +456,25 @@ fn base_selection_in(
         return Ok(None);
     }
     let mut keep: BTreeSet<String> =
-        if opts.heads { tips.into_iter().collect() } else { ancestries(repo, states, tips)?.into_iter().collect() };
+        if opts.heads { tips.into_iter().collect() } else { ancestries(repo, Some(states), tips)?.into_iter().collect() };
     keep.extend(deletion_dependencies(records)?);
     Ok(Some(keep))
 }
 
 /// The states that `push --line` and `--overlay` send, or None for every state: on the base as for a fetch, in an
 /// overlay the selection of its layer (`only_states`).
-pub(crate) fn push_selection(repo: &Repo, records: &[String], opts: &Options) -> Result<Option<BTreeSet<String>>> {
+pub(crate) fn push_selection(
+    repo: &Repo,
+    records: &[String],
+    opts: &Options,
+    states: &BTreeMap<String, StateRec>,
+) -> Result<Option<BTreeSet<String>>> {
     if repo.p.is_overlay() {
         return Ok(opts.only_states.clone());
     }
     let mut base = opts.clone();
     base.heads = false;
-    base_selection(repo, records, &base)
+    base_selection(repo, records, &base, states)
 }
 
 pub(crate) fn wanted(state: &crate::model::StateRec, opts: &Options) -> bool {

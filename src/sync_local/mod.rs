@@ -69,7 +69,7 @@ impl LocalReplica for Local<'_, '_> {
         self.repo().p.db.record_line(machine, seq)
     }
     fn verify_records(&self) -> Result<()> {
-        self.repo().p.verify_records().map(|_| ())
+        self.repo().p.check_records().map(|_| ())
     }
     fn import_records(
         &mut self,
@@ -88,6 +88,7 @@ impl LocalReplica for Local<'_, '_> {
         available: &[String],
         clone: bool,
     ) -> Result<layr_store::sync::FetchSelection<StateRec, Line>> {
+        let _stage = crate::trace::span("store fetch selection");
         let lines = clone.then(|| fetch::source_lines(self.repo(), true)).transpose()?;
         self.select_fetch(records, selection, available, lines)
     }
@@ -97,6 +98,7 @@ impl LocalReplica for Local<'_, '_> {
         selection: &Options,
         clone: bool,
     ) -> Result<Option<layr_store::sync::FetchSelection<StateRec, Line>>> {
+        let _stage = crate::trace::span("store fetch preflight");
         // W7's presence preflight, sharing the exact selection policy with discovery.
         // A missing selected state causes full remote inventory before catalog writes.
         let lines = clone.then(|| fetch::source_lines(self.repo(), true)).transpose()?;

@@ -542,14 +542,19 @@ mod tests {
         store.set_state("s1", &store::StateRef { tree, times }).unwrap();
         let before = store.stat().unwrap();
         assert!(before.loose_bytes() > 0 && before.packs == 0);
-        // A second store object (another process) reads the packs the first one writes.
+        // A second store object (another process) reads the packs the first one writes. A third one opened then too
+        // finds them on `has` only after it lists the packs again.
         let other = Store::open(&dir.join("store"), Keying::Plain).unwrap();
+        let listing = Store::open(&dir.join("store"), Keying::Plain).unwrap();
         let report = store.pack().unwrap();
         assert_eq!(report.packs, 1);
         assert_eq!(
             report.objects,
             before.trees + before.whole_blobs + before.delta_blobs + before.chunked_blobs + before.chunks + before.times
         );
+        assert!(!listing.has(&tree), "a store lists the packs at its open");
+        assert!(listing.refresh_packs().is_ok());
+        assert!(listing.has(&tree) && listing.has(&times));
         let after = store.stat().unwrap();
         assert_eq!(after.loose_bytes(), 0, "no loose object is left");
         assert_eq!(after.packed_objects, report.objects);

@@ -420,6 +420,12 @@ impl Store {
         matches!(self.object_problem(id, true), Ok(None))
     }
 
+    /// List the packs again, as a read does after a miss: a store open since before another one packed its loose
+    /// objects then finds them (`has` does not list the packs again).
+    pub fn refresh_packs(&self) -> Result<()> {
+        self.reload_packs().map(drop)
+    }
+
     /// Whether a writer can reuse `id` (a hot blob counts with `hot`): it reads with what its form
     /// needs. A damaged object, or one whose chunk, delta base or dictionary is missing, is absent, so
     /// the write makes it again; an I/O error stops the write.

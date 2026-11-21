@@ -113,7 +113,7 @@ pub(super) fn sweep(
         &identity,
         &descriptor.project,
         local,
-        Some(&super::reader::seen_file(&store.dir)),
+        Some((&super::reader::seen_file(&store.dir), &store.key)),
     )?;
     let objects = store.backend.list("states/")?;
     let trees: Vec<(String, String)> = objects.iter().filter_map(|o| parse_tree_name(&o.key)).collect();

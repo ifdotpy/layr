@@ -49,25 +49,29 @@ pub(super) fn records_with_local(
     identity: &str,
     project: &str,
     local: &[String],
-    seen: Option<&Path>,
+    seen: Option<(&Path, &ed25519_dalek::SigningKey)>,
 ) -> Result<Records> {
-    let mut machines: BTreeMap<String, BTreeMap<u64, String>> = BTreeMap::new();
+    // Each machine's lines by number, with their record times.
+    let mut machines: BTreeMap<String, BTreeMap<u64, (String, i64)>> = BTreeMap::new();
     let mut overlaps = 0;
     let known: std::collections::BTreeSet<String> = seen
-        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|(path, _)| std::fs::read_to_string(path).ok())
         .map(|text| text.lines().map(str::to_owned).collect())
         .unwrap_or_default();
-    let mut have: BTreeMap<String, BTreeMap<u64, &str>> = BTreeMap::new();
+    let mut have: BTreeMap<String, BTreeMap<u64, (&str, i64)>> = BTreeMap::new();
+    let stage = crate::trace::span("store records local");
     for line in local {
         let record = oplog::parse_line(line)?.record;
         if record.project != project {
             bail!("local records belong to another project");
         }
         let by_seq = have.entry(record.machine.clone()).or_default();
-        if by_seq.insert(record.seq, line).is_some_and(|previous| previous != line) {
+        if by_seq.insert(record.seq, (line, record.time)).is_some_and(|(previous, _)| previous != line) {
             bail!("conflicting history of machine {}, record {}", record.machine, record.seq);
         }
     }
+    drop(stage);
+    let stage = crate::trace::span("store records list");
     let mut checked = Vec::new();
     let mut wanted = Vec::new();
     for object in backend.list("records/")? {
@@ -77,7 +81,7 @@ pub(super) fn records_with_local(
             let by_seq = have.get(&machine)?;
             let mut digest = ContentAddress::new();
             for seq in first..=last {
-                digest.update(by_seq.get(&seq)?.as_bytes());
+                digest.update(by_seq.get(&seq)?.0.as_bytes());
                 digest.update(b"\n");
             }
             Some(hex::encode(digest.finalize()))
@@ -93,6 +97,8 @@ pub(super) fn records_with_local(
     // its reservation: the bodies of a long history are never all in memory.
     let names: Vec<String> = wanted.iter().map(|(key, ..)| key.clone()).collect();
     let sizes: Vec<Option<u64>> = wanted.iter().map(|(.., size)| *size).collect();
+    drop(stage);
+    let stage = crate::trace::span("store records read");
     backend.visit_many(&names, &sizes, |i, body| {
         let (key, machine, first, last, stamp, _) = &wanted[i];
         let (first, last) = (*first, *last);
@@ -110,13 +116,13 @@ pub(super) fn records_with_local(
             crate::model::validate(&signed.record)
                 .with_context(|| format!("record {} of machine {machine} ({})", signed.record.seq, signed.record.id))?;
             let by_seq = machines.entry(machine.clone()).or_default();
-            if let Some(previous) = by_seq.get(&expected) {
+            if let Some((previous, _)) = by_seq.get(&expected) {
                 if previous != line {
                     bail!("conflicting history of machine {machine}, record {expected}");
                 }
                 overlaps += 1;
             } else {
-                by_seq.insert(expected, line.to_string());
+                by_seq.insert(expected, (line.to_string(), signed.record.time));
             }
             digest.update(line.as_bytes());
             digest.update(b"\n");
@@ -128,11 +134,13 @@ pub(super) fn records_with_local(
         checked.push(format!("{stamp} {}", hex::encode(digest.finalize())));
         Ok(())
     })?;
+    drop(stage);
+    let _verify = crate::trace::span("store verify records");
     // A fetch can continue from the reader's verified prefix when old remote segments are absent.
     for (machine, local) in have {
         let by_seq = machines.entry(machine.clone()).or_default();
-        for (seq, line) in local {
-            if let Some(existing) = by_seq.get(&seq).filter(|existing| existing.as_str() != line) {
+        for (seq, (line, time)) in local {
+            if let Some((existing, _)) = by_seq.get(&seq).filter(|(existing, _)| existing.as_str() != line) {
                 if seq == 1 {
                     let remote = oplog::parse_line(existing)?.record;
                     let local = oplog::parse_line(line)?.record;
@@ -142,40 +150,35 @@ pub(super) fn records_with_local(
                 }
                 bail!("conflicting history of machine {machine}, record {seq}");
             }
-            by_seq.entry(seq).or_insert_with(|| line.to_owned());
+            by_seq.entry(seq).or_insert_with(|| (line.to_owned(), time));
         }
     }
+    // The signatures that an earlier read verified are not checked again: the marks of the chains that it checked
+    // (`oplog::Verified`) are beside `seen`, under a MAC with this machine's key.
+    let marks = seen.map(|(path, key)| (path.with_file_name("verified-records"), key));
+    let mut verified = marks.as_ref().map_or_else(oplog::Verified::default, |(path, key)| oplog::Verified::load(path, key));
     let mut keys = BTreeMap::new();
     let mut ordered = Vec::new();
     let mut gaps = Vec::new();
     for (machine, by_seq) in machines {
-        let Some(first) = by_seq.get(&1) else {
+        if !by_seq.contains_key(&1) {
             gaps.push(format!("machine {machine}: missing record 1"));
             continue;
-        };
-        let first = oplog::parse_line(first)?;
-        if first.record.op != "machine" {
-            bail!("machine {machine}: first record is not its key");
         }
-        let key = oplog::machine_key(&first.record)?;
-        // Verify the complete segment set, including records beyond a gap. Retain the verified ordering
-        // metadata: parsing in the sort comparator used to decode the history O(n log n) times.
-        let mut seq = 1;
-        for (&number, line) in &by_seq {
-            let signed = oplog::verify_line(line, &key)?;
-            if number == seq {
-                ordered.push((signed.record.time, machine.clone(), number, line.clone()));
-                seq += 1;
-            }
+        // Verify the complete segment set, including records beyond a gap. Retain the ordering metadata of the
+        // run from record 1: parsing in the sort comparator used to decode the history O(n log n) times.
+        let (key, run) = verified.check(&machine, by_seq.iter().map(|(seq, (line, _))| (*seq, line.as_str())))?;
+        if by_seq.len() as u64 > run {
+            gaps.push(format!("machine {machine}: missing record {}", run + 1));
         }
-        if by_seq.keys().next_back().is_some_and(|last| *last >= seq) {
-            gaps.push(format!("machine {machine}: missing record {seq}"));
-        }
+        ordered.extend(
+            by_seq.into_iter().take_while(|(seq, _)| *seq <= run).map(|(seq, (line, time))| (time, machine.clone(), seq, line)),
+        );
         keys.insert(machine, key);
     }
     ordered.sort_by(|a, b| (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2)));
     let lines = ordered.into_iter().map(|(_, _, _, line)| line).collect();
-    if let Some(path) = seen {
+    if let Some((path, _)) = seen {
         // Only after every segment was checked: a failed read leaves the old file. The first fetch of an overlay
         // layer makes its folder.
         let written = path
@@ -184,6 +187,11 @@ pub(super) fn records_with_local(
             .map_err(anyhow::Error::from)
             .and_then(|_| crate::fsutil::atomic_write(path, format!("{}\n", checked.join("\n")).as_bytes(), 0o600));
         if let Err(e) = written {
+            eprintln!("warning: {}: {e:#}", path.display());
+        }
+    }
+    if let Some((path, key)) = &marks {
+        if let Err(e) = verified.save(path, key) {
             eprintln!("warning: {}: {e:#}", path.display());
         }
     }
@@ -780,7 +788,8 @@ fn fetch_legacy_api(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
     let local: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-    let records = records_with_local(&store.backend, &identity, &descriptor.project, &local, Some(&seen_file(&store.dir)))?;
+    let records =
+        records_with_local(&store.backend, &identity, &descriptor.project, &local, Some((&seen_file(&store.dir), &store.key)))?;
     let bootstrap = repo.p.id.is_empty();
     if !bootstrap {
         for (machine, key) in &records.keys {
@@ -860,16 +869,27 @@ fn fetch_legacy_api(store: &mut Store, ctx: &Ctx, repo: &mut Repo, opts: &Option
 pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>, opts: &Options) -> Result<Report> {
     let _fetch = crate::trace::span("store fetch");
     let started = store.backend.transfer_stats();
+    let stage = crate::trace::span("store descriptor");
     let descriptor = store.descriptor()?;
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
+    drop(stage);
+    let stage = crate::trace::span("store records");
     let mut records_local = Vec::new();
     local.visit_records(None, &mut |line| {
         records_local.push(line.to_owned());
         Ok(())
     })?;
-    let records =
-        records_with_local(&store.backend, &identity, &descriptor.project, &records_local, Some(&seen_file(&store.dir)))?;
+    let records = records_with_local(
+        &store.backend,
+        &identity,
+        &descriptor.project,
+        &records_local,
+        Some((&seen_file(&store.dir), &store.key)),
+    )?;
+    drop(stage);
+    let stage = crate::trace::span("store import records");
     let imported = local.import_records(&records.lines, &records.keys)?;
+    drop(stage);
     store.project = imported.project;
     if store.project != descriptor.project {
         bail!("the records do not belong to store.json's project");
@@ -911,7 +931,9 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
             (states, plan)
         }
     };
+    let stage = crate::trace::span("store git fetch");
     report.git_packs = super::gitpack::fetch(store, local, &identity)?;
+    drop(stage);
     report.clone_lines = plan.clone_lines;
     report.omitted = plan.omitted;
     let left = plan.left;
@@ -952,6 +974,7 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
         pending_states.push(state);
     }
     let missing = pending_states;
+    let stage = crate::trace::span("store prefetch trees");
     if reader.material.is_some() && missing.iter().all(|state| state.cache_of.is_none()) {
         let mut roots = Vec::new();
         let mut bases = Vec::new();
@@ -1000,6 +1023,8 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
         let roots = missing.iter().map(|state| (state.id.clone(), states[&state.id].clone())).collect();
         let _ = reader.prefetch_trees(roots);
     }
+    drop(stage);
+    let stage = crate::trace::span("store restore states");
     for state in missing {
         let id = state.id.clone();
         let cache = local.is_overlay() && state.cache_of.is_some();
@@ -1025,6 +1050,7 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
         report.states += 1;
         report.state_ids.push(id.clone());
     }
+    drop(stage);
     if failed != failed_before {
         let text: String = failed.iter().map(|(state, packs)| format!("{state} {packs}\n")).collect();
         crate::fsutil::atomic_write(&failed_path, text.as_bytes(), 0o600)?;
@@ -1687,14 +1713,14 @@ mod tests {
         segment(&backend, &identity, 1, 2, &lines);
         // The folder of the file is made by the first fetch (an overlay layer's first clone).
         let seen = root.join("layer").join("seen-records");
-        assert_eq!(records_with_local(&backend, &identity, PROJECT, &[], Some(&seen)).unwrap().lines.len(), 2);
+        assert_eq!(records_with_local(&backend, &identity, PROJECT, &[], Some((&seen, &key))).unwrap().lines.len(), 2);
         assert!(seen.is_file());
         // The records are here and the object has the same time: the next fetch does not read it.
         let object = root.join(format::segment_name(MACHINE, 1, 2));
         let time = std::fs::metadata(&object).unwrap().modified().unwrap();
         std::fs::write(&object, b"not a segment").unwrap();
         std::fs::File::options().write(true).open(&object).unwrap().set_modified(time).unwrap();
-        assert_eq!(records_with_local(&backend, &identity, PROJECT, &lines, Some(&seen)).unwrap().lines.len(), 2);
+        assert_eq!(records_with_local(&backend, &identity, PROJECT, &lines, Some((&seen, &key))).unwrap().lines.len(), 2);
         // A replaced object has another time: it is read and checked again.
         let mut other = Record::untrusted_preview("config");
         other.id = "01a12290-0000-7000-8000-0000000000ff".into();
@@ -1710,7 +1736,7 @@ mod tests {
             .unwrap()
             .set_modified(time + std::time::Duration::from_secs(10))
             .unwrap();
-        let error = records_with_local(&backend, &identity, PROJECT, &lines, Some(&seen)).unwrap_err().to_string();
+        let error = records_with_local(&backend, &identity, PROJECT, &lines, Some((&seen, &key))).unwrap_err().to_string();
         assert!(error.contains("conflicting history"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1827,7 +1853,7 @@ mod tests {
             segment(&backend, &identity, 1, 2, &original[..2]);
             let seen = root.join("metadata/seen-records");
             // Hydration checks a remote machine that has not been imported locally.
-            records_with_local(&backend, &identity, PROJECT, &[], Some(&seen)).unwrap();
+            records_with_local(&backend, &identity, PROJECT, &[], Some((&seen, &key))).unwrap();
             if legacy {
                 let stamps = std::fs::read_to_string(&seen).unwrap();
                 let old: String = stamps
@@ -1848,7 +1874,7 @@ mod tests {
             segment(&backend, &identity, 1, 3, &fork);
             let uncached = records(&backend, &identity, PROJECT).unwrap_err().to_string();
             assert!(uncached.contains("conflicting history"), "{uncached}");
-            let cached = records_with_local(&backend, &identity, PROJECT, &fork, Some(&seen));
+            let cached = records_with_local(&backend, &identity, PROJECT, &fork, Some((&seen, &key)));
             std::fs::remove_dir_all(root).unwrap();
             assert!(cached.is_err(), "cached reader accepted conflicting history rejected by the former push reader: {cached:?}");
         }
