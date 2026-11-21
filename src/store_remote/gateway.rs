@@ -2520,13 +2520,13 @@ pub(super) mod tests {
             "login": "ann@example.com",
         });
 
-        let (gateway, _, server) =
+        let (gateway, _endpoint, server) =
             conditional_fixture(vec![(200, None, challenge(crate::ids::now_ms() + 60_000 + 1_000)), (200, None, session)]);
         gateway.set_person("ann@example.com", key()).unwrap();
         assert_eq!(gateway.session_token(true).unwrap(), "session.fixture");
         assert_eq!(server.join().unwrap().len(), 2);
 
-        let (gateway, _, server) = conditional_fixture(vec![(200, None, challenge(crate::ids::now_ms()))]);
+        let (gateway, _endpoint, server) = conditional_fixture(vec![(200, None, challenge(crate::ids::now_ms()))]);
         gateway.set_person("ann@example.com", key()).unwrap();
         let error = gateway.session_token(true).unwrap_err().to_string();
         assert!(error.contains("invalid or expired gateway session challenge"), "{error}");
