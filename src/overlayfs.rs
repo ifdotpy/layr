@@ -1734,6 +1734,15 @@ fn candidates_in(
 mod tests {
     use super::*;
     #[test]
+    fn project_copy_preserves_sparse_file_lengths() -> Result<()> {
+        let mut files = Files::default();
+        crate::project_copy::sparse_sharing_regression(|src, dst| {
+            files.copy(src, dst, &fs::metadata(src)?)?;
+            Ok(files.seen.len())
+        })
+    }
+
+    #[test]
     fn candidates_reject_non_utf8_layer_entries_and_opaque_descendants() -> Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let root = std::env::temp_dir().join(format!("layr-invalid-hints-{}", crate::ids::new_id()));
@@ -2462,11 +2471,11 @@ fn set_owner(dst: &Path, m: &fs::Metadata) -> Result<()> {
     Ok(())
 }
 
-/// Regular files of a copy. A file with the same extents as an earlier copy shares that copy
+/// Regular files of a copy. A file with the same logical length and extents shares an earlier copy
 /// when the target file system can reflink (XFS, btrfs); other file systems copy the data.
 #[derive(Default)]
 struct Files {
-    seen: HashMap<Vec<(u64, u64, u64)>, PathBuf>,
+    seen: HashMap<crate::project_copy::FileSharingKey, PathBuf>,
     links: HashMap<(u64, u64), PathBuf>,
 }
 
@@ -2490,7 +2499,7 @@ impl Files {
             }
         }
         let from = File::open(src).with_context(|| format!("open {}", src.display()))?;
-        let key = plain_extents(&from);
+        let key = plain_extents(&from).map(|extents| (m.len(), extents));
         let shared = key.as_ref().and_then(|k| self.seen.get(k).cloned());
         let to =
             fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
