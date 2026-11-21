@@ -245,7 +245,7 @@ impl<'a> Hydration<'a> {
                         identity,
                         &self.descriptor.project,
                         self.record_lines,
-                        Some(&reader::seen_file(&self.store.dir)),
+                        Some((&reader::seen_file(&self.store.dir), &self.store.key)),
                     )?;
                     self.records.get_or_init(|| records)
                 }
@@ -642,6 +642,7 @@ pub(crate) fn push_with_local(store: &Store, local: &mut super::Replica<'_>, opt
     // The attempts of completed tips that the remote lacks: no chain of the journal links their parts again.
     let mut lost = BTreeMap::new();
     if !blind_layer {
+        let _probe = crate::trace::span("store probe tips");
         // A completed upload can be missing from a partial replica. Recheck advertised tips
         // without scanning historical states, so a later push can complete that replica.
         let tips: Vec<String> = local.tips()?.into_iter().filter(|tip| index.contains_key(tip)).collect();
@@ -666,8 +667,11 @@ pub(crate) fn push_with_local(store: &Store, local: &mut super::Replica<'_>, opt
     })?;
     let mut states = Vec::new();
     let mut recovered = Vec::new();
+    let part = crate::trace::span("store push candidates");
     let candidates = local.push_candidates(&record_lines, opts, &present.keys().cloned().collect(), &mut report.omitted)?;
+    drop(part);
     if !blind_layer {
+        let _probe = crate::trace::span("store probe candidates");
         attempts.discover(candidates.iter().map(|state| state.id.clone()), false)?;
     }
     for state in candidates {
@@ -951,11 +955,14 @@ pub(crate) fn push_with_local(store: &Store, local: &mut super::Replica<'_>, opt
         report.files += files;
         report.bytes += bytes;
     }
+    let stage = crate::trace::span("store push index");
     checkpoint(&store.dir, &index)?;
     let stats = journal.finish()?;
+    drop(stage);
     if std::env::var_os("LAYR_TRACE").is_some() {
         eprintln!("trace push-journal {}", serde_json::to_string(&stats)?);
     }
+    let _git = crate::trace::span("store git push");
     super::gitpack::push(store, local, opts, &mut report)?;
     Ok(report)
 }
@@ -988,12 +995,16 @@ fn prepare_push(store: &Store, local: &super::Replica<'_>, opts: &Options) -> Re
     if opts.caches && serde_json::from_value::<crate::model::StateKind>(serde_json::json!("cache")).is_err() {
         bail!("store --caches is not available until cache states exist");
     }
+    let stage = crate::trace::span("store descriptor");
     super::epochs::check_current(store)?;
     store.private_dir()?;
     let descriptor = store.descriptor()?;
+    drop(stage);
     let blind_layer = blind_layer(store);
     let mut report = Report { omitted: local.omitted_cache_refs(opts)?, ..Default::default() };
+    let stage = crate::trace::span("store verify records");
     local.verify_records()?;
+    drop(stage);
     // A list is enough for a writer without permission to read encrypted objects.
     let stage = crate::trace::span("store records");
     // A reader checks that the remote history of this machine is the local one. Another store
@@ -2042,8 +2053,14 @@ pub(super) mod tests {
             }
             let identity = store.identity(&descriptor, None).unwrap();
             let local: Vec<_> = repo.p.export_jsonl().unwrap().lines().map(str::to_owned).collect();
-            reader::records_with_local(&store.backend, &identity, &store.project, &local, Some(&reader::seen_file(&store.dir)))
-                .unwrap();
+            reader::records_with_local(
+                &store.backend,
+                &identity,
+                &store.project,
+                &local,
+                Some((&reader::seen_file(&store.dir), &store.key)),
+            )
+            .unwrap();
             let parent = repo.p.db.present_states().unwrap()[0].0.clone();
             add_state(&ctx, &repo, std::slice::from_ref(&parent), &[("payload", b"incremental payload\n")]).unwrap();
             // Exercise both a lost parent cache and discovery after an interrupted push.

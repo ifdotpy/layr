@@ -1710,23 +1710,27 @@ impl<'a> Project<'a> {
 
     /// Check every machine's chain of records: key, sequence numbers, signatures.
     pub fn verify_records(&self) -> Result<Vec<(String, u64)>> {
+        self.verify_records_with(&mut oplog::Verified::default())
+    }
+
+    /// `verify_records` that checks the signatures of each chain only after the run that it verified before
+    /// (`oplog::Verified`, beside the catalog, under a MAC with this machine's key).
+    pub fn check_records(&self) -> Result<Vec<(String, u64)>> {
+        let path = self.meta_dir().join("verified-records");
+        let mut verified = oplog::Verified::load(&path, &self.store.machine.key);
+        let out = self.verify_records_with(&mut verified)?;
+        // A cache: without it (a read-only folder), the next check verifies every signature again.
+        let _ = verified.save(&path, &self.store.machine.key);
+        Ok(out)
+    }
+
+    /// The stored lines of each machine, numbered by their order: each must carry its number.
+    fn verify_records_with(&self, verified: &mut oplog::Verified) -> Result<Vec<(String, u64)>> {
         let mut out = Vec::new();
         for m in self.db.record_machines()? {
             let lines = self.db.lines_after(&m, 0)?;
-            let first = oplog::parse_line(lines.first().ok_or_else(|| anyhow!("no records"))?)?;
-            if first.record.op != "machine" {
-                bail!("machine {m}: the first record is not its key");
-            }
-            let key = oplog::machine_key(&first.record)?;
-            let mut seq = 0;
-            for l in &lines {
-                let s = oplog::verify_line(l, &key).with_context(|| format!("machine {m}"))?;
-                if s.record.seq != seq + 1 {
-                    bail!("machine {m}: sequence gap at {}", s.record.seq);
-                }
-                seq = s.record.seq;
-            }
-            out.push((m, seq));
+            verified.check(&m, (1..).zip(lines.iter().map(String::as_str)))?;
+            out.push((m, lines.len() as u64));
         }
         Ok(out)
     }

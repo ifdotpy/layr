@@ -19,6 +19,14 @@ pub fn identity_from_secret(secret: &[u8]) -> Result<String> {
     Ok(bech32::encode::<bech32::Bech32>(hrp, secret)?.to_uppercase())
 }
 
+/// HMAC-SHA256 under HMAC-SHA256(secret, label): one key for each purpose of one secret.
+pub fn domain_mac(secret: &[u8], label: &str) -> Result<hmac::Hmac<layr_hashers::ContentAddress>> {
+    use hmac::Mac;
+    let mut derive = hmac::Hmac::<layr_hashers::ContentAddress>::new_from_slice(secret)?;
+    derive.update(label.as_bytes());
+    Ok(hmac::Hmac::new_from_slice(&derive.finalize().into_bytes())?)
+}
+
 /// The 32-byte X25519 secret of an `AGE-SECRET-KEY-1…` identity.
 pub fn secret_of_identity(identity: &str) -> Result<[u8; 32]> {
     let (hrp, data) = bech32::decode(identity.trim()).context("the identity is not bech32")?;

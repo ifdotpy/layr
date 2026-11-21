@@ -134,7 +134,13 @@ impl Store {
         } else {
             Vec::new()
         };
-        reader::records_with_local(&self.backend, &identity, &descriptor.project, &local, Some(&reader::seen_file(&self.dir)))
+        reader::records_with_local(
+            &self.backend,
+            &identity,
+            &descriptor.project,
+            &local,
+            Some((&reader::seen_file(&self.dir), &self.key)),
+        )
     }
 
     pub fn release_files(&mut self, ctx: &Ctx, repo: &Repo, name: &str) -> Result<Vec<File>> {

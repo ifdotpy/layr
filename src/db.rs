@@ -158,6 +158,7 @@ pub mod owners;
 thread_local! {
     pub(crate) static RECORD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static STATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CATALOG_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 mod queries;
 mod transaction;

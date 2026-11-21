@@ -7,7 +7,8 @@
 //! blobs, and checks each state out of the object store.
 
 use super::{writer, Options, Report, Store};
-use crate::sync_local::fetch::{publish_restored, push_selection, required_states, wanted};
+use crate::objstore::recorded;
+use crate::sync_local::fetch::{publish_restored, push_selection, required_states, state_catalog, wanted};
 use crate::{ctx::Ctx, model::StateRec, repo::Repo};
 use anyhow::{bail, Context, Result};
 use layr_objects::{transfer, Id, Keying, Kind, StateRef, Store as Objects, Temperature, WriteOptions};
@@ -28,12 +29,6 @@ fn open(repo: &Repo) -> Result<Objects> {
 /// The tree and times table of `state`, written into the object store unless it is there. When the first
 /// parent is there, only the paths that changed since are read; new blobs are cold (a delta against the
 /// parent's blob at the same path, else a zstd frame).
-fn recorded(objects: &Objects, state: &StateRec) -> Result<Option<StateRef>> {
-    let (Some(tree), Some(times)) = (state.tree.as_deref(), state.times.as_deref()) else { return Ok(None) };
-    let found = StateRef { tree: Id::parse(tree)?, times: Id::parse(times)? };
-    Ok((objects.has(&found.tree) && objects.has(&found.times)).then_some(found))
-}
-
 fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> {
     if let Some(found) = recorded(objects, state)? {
         return Ok(found);
@@ -83,8 +78,11 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     let scope = store.api_scope();
     let lines: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-    let required = required_states(repo, &lines, opts)?;
-    let selection = push_selection(repo, &lines, opts)?;
+    // The catalog and the refs and line heads that it resolves are of one version (`select_push`).
+    let (required, selection) = repo.p.db.with_read_snapshot(|| {
+        let catalog = state_catalog(repo)?;
+        Ok((required_states(repo, &lines, opts, &catalog)?, push_selection(repo, &lines, opts, &catalog)?))
+    })?;
     // Open once: loading pack indexes once per migrated state makes a large history expensive to push.
     let objects = crate::objstore::exists(&repo.p).then(|| open(repo)).transpose()?;
     let mut candidates = Vec::new();

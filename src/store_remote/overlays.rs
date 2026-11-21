@@ -383,6 +383,7 @@ fn local_key(store: &Store, id: &str, epoch: &str) -> std::path::PathBuf {
 }
 
 pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+    let stage = crate::trace::span("store overlay key list");
     let descriptor = store.root_descriptor()?;
     let trusted = trusted_keys(repo)?;
     let mut objects = Vec::new();
@@ -391,11 +392,16 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
             objects.extend(store.backend.list(&format!("overlays/{}/keys/", overlay.p.id))?);
         }
     }
+    drop(stage);
+    let stage = crate::trace::span("store overlay authorities");
     let parent_lines: Vec<_> = repo.p.export_jsonl()?.lines().map(str::to_owned).collect();
     let mut authorities = crate::overlay_managers::from_lines(&repo.p.id, &parent_lines, &trusted)?;
+    drop(stage);
     let listed = key_epochs(&objects);
+    let stage = crate::trace::span("store overlay key read");
     let (remote, refused) =
         published_objects(&store.backend, &repo.p.id, &descriptor.recipient, &trusted, &authorities, objects)?;
+    drop(stage);
     report.omitted.extend(refused);
     let paper_recipient = if let Some(paper) = &store.paper_key_text {
         Some(keys::recipient_of(&keys::identity_from_paper(paper).map_err(|_| anyhow::anyhow!("invalid paper key"))?)?)
@@ -1094,7 +1100,8 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
             let local: Vec<String> =
                 if op.id.is_empty() { Vec::new() } else { op.export_jsonl()?.lines().map(str::to_owned).collect() };
             let seen = reader::seen_file(&store.dir.join("overlays").join(&published.key.overlay).join(&published.key.epoch));
-            let records = reader::records_with_local(&backend, &identity, &published.key.overlay, &local, Some(&seen))?;
+            let records =
+                reader::records_with_local(&backend, &identity, &published.key.overlay, &local, Some((&seen, &store.key)))?;
             let trusted = trusted_keys(repo)?;
             // A machine trusted after this fetch read the project records (a long clone, while a runner that
             // was just trusted pushes) has records here before its trust record: they wait for a later fetch.

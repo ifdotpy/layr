@@ -28,6 +28,8 @@ impl Db {
     }
 
     pub fn state_rows(&self) -> Result<Vec<(crate::model::StateRec, bool)>> {
+        #[cfg(test)]
+        super::CATALOG_READS.with(|count| count.set(count.get() + 1));
         let mut stmt = self.conn.prepare_cached("SELECT rec, deleted FROM states")?;
         let rows =
             stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;

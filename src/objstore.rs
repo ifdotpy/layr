@@ -22,8 +22,13 @@ pub fn exists(p: &Project) -> bool {
     dir(p).join("config.json").is_file()
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// Open the object store of a project, made when absent.
 pub fn open(p: &Project) -> Result<Store> {
+    #[cfg(test)]
+    OPENS.with(|count| count.set(count.get() + 1));
     // Plain ids for every project in this slice; Secret projects get keyed ids when the project
     // key is available here (docs/objects.md, "Secret overlays").
     let mut store = Store::open(&dir(p), Keying::Plain)?;
@@ -48,10 +53,22 @@ pub fn verified(p: &Project, state: &str) -> Result<Option<(Store, StateRef)>> {
         return Ok(None);
     };
     let store = open(p)?;
-    if !store.has(&r.tree) || !store.has(&r.times) {
-        return Ok(None);
-    }
-    Ok(Some((store, r)))
+    Ok(holds(&store, &r).then_some((store, r)))
+}
+
+/// The tree and times table that the record of `state` names, when `objects` holds both.
+pub fn recorded(objects: &Store, state: &crate::model::StateRec) -> Result<Option<StateRef>> {
+    Ok(named(state)?.filter(|found| holds(objects, found)))
+}
+
+fn holds(objects: &Store, found: &StateRef) -> bool {
+    objects.has(&found.tree) && objects.has(&found.times)
+}
+
+/// The tree and times table that the record of `state` names, whether or not this machine has them.
+pub fn named(state: &crate::model::StateRec) -> Result<Option<StateRef>> {
+    let (Some(tree), Some(times)) = (state.tree.as_deref(), state.times.as_deref()) else { return Ok(None) };
+    Ok(Some(StateRef { tree: Id::parse(tree)?, times: Id::parse(times)? }))
 }
 
 /// The tree and times table that the signed record of `state` names, if it names them.

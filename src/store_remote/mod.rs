@@ -1457,6 +1457,7 @@ impl<'a> RemoteSync<Ctx, Repo<'a>, Options> for Store {
     fn push(&mut self, ctx: &Ctx, repo: &mut Repo<'a>, opts: &Options) -> Result<Report> {
         repo.require(ctx, "sync")?;
         repo.require(ctx, "records")?;
+        let stage = crate::trace::span("store push access");
         self.connect(ctx)?;
         if repo.p.is_overlay() {
             bail!("private overlay projects cannot be pushed to a store");
@@ -1478,7 +1479,7 @@ impl<'a> RemoteSync<Ctx, Repo<'a>, Options> for Store {
                 &identity,
                 &descriptor.project,
                 &local,
-                Some(&reader::seen_file(&self.dir)),
+                Some((&reader::seen_file(&self.dir), &self.key)),
             )?;
             manifest.verify_signer(&layr_store::public::trusted_writers_checked(&descriptor.project, &records.lines)?)?;
         } else if self.force_public {
@@ -1508,6 +1509,7 @@ impl<'a> RemoteSync<Ctx, Repo<'a>, Options> for Store {
                 }
             }
         }
+        drop(stage);
         if self.is_api() {
             self.private_dir()?;
             let mut report = writer::push(self, ctx, repo, opts)?;
@@ -1516,6 +1518,7 @@ impl<'a> RemoteSync<Ctx, Repo<'a>, Options> for Store {
             return Ok(report);
         }
         let mut report = writer::push(self, ctx, repo, opts)?;
+        let _overlays = crate::trace::span("store push overlays");
         overlays::push(self, ctx, repo, opts, &mut report)?;
         Ok(report)
     }

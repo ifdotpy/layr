@@ -208,11 +208,7 @@ impl Index {
 /// HMAC-SHA256 with the index key: HMAC-SHA256(secret, INDEX_HEADER), where `secret` is the
 /// X25519 secret of the person identity.
 fn index_mac(identity: &str) -> Result<Hmac<ContentAddress>> {
-    let secret = keys::secret_of_identity(identity)?;
-    let mut derive = Hmac::<ContentAddress>::new_from_slice(&secret).expect("any key");
-    derive.update(INDEX_HEADER.as_bytes());
-    let key = derive.finalize().into_bytes();
-    Ok(Hmac::<ContentAddress>::new_from_slice(&key).expect("any key"))
+    keys::domain_mac(&keys::secret_of_identity(identity)?, INDEX_HEADER)
 }
 
 /// The index, with its MAC, encrypted to the person recipient.
