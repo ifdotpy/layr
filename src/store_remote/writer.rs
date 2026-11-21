@@ -3587,7 +3587,7 @@ pub(super) mod tests {
 
     /// Live bytes in heap blocks of at least 1 MiB while `ON`: the part, ciphertext and request buffers of uploads.
     #[allow(unsafe_code)] // A test-only global allocator: it forwards every call to the system allocator and counts.
-    pub(in crate::store_remote) mod large_blocks {
+    pub(crate) mod large_blocks {
         use std::alloc::{GlobalAlloc, Layout, System};
         use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::SeqCst};
         pub static ON: AtomicBool = AtomicBool::new(false);
@@ -3667,7 +3667,7 @@ pub(super) mod tests {
 
     /// The most bytes of large blocks that the ignored test `name` measured in a subprocess: the allocator counts the
     /// whole process, and only that test runs there.
-    pub(in crate::store_remote) fn large_blocks_of(test: &str) -> Result<u64> {
+    pub(crate) fn large_blocks_of(test: &str) -> Result<u64> {
         large_blocks_with(test, "1")
     }
 
