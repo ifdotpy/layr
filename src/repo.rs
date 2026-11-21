@@ -2487,6 +2487,9 @@ impl<'a> Repo<'a> {
     /// (`named_cache_overlays`), taken under the lock with one rename (`save_cache_overlays`).
     pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
         self.prepare_cache_locations(line)?;
+        if self.ctx.is_none() || !crate::fs::CaptureSession::may_prepare(&self.p.work_dir()) {
+            return Ok(());
+        }
         let w = self.working(line);
         // The copies only speed up the save. An overlay that cannot be read here (one of this
         // platform that another machine made and this machine never received) must not stop the
@@ -3742,6 +3745,8 @@ pub fn holds_files_in(tree: &Snap, path: &str) -> bool {
 /// the time of the file or of its folder. It does not follow links or enter other file systems.
 pub fn folder_changed_since(root: &Path, since_ms: i64) -> bool {
     use std::os::unix::fs::MetadataExt;
+    #[cfg(test)]
+    cache_copy_tests::CACHE_COMPARISONS.set(cache_copy_tests::CACHE_COMPARISONS.get() + 1);
     let since = i128::from(since_ms) * 1_000_000;
     let newer = |m: &std::fs::Metadata| i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()) >= since;
     let Ok(top) = std::fs::symlink_metadata(root) else { return true };
@@ -3879,6 +3884,10 @@ mod cache_copy_tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
+    thread_local! {
+        pub(super) static CACHE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     fn cache_command_context(root: &Path) -> Result<crate::ctx::Ctx> {
         Ok(crate::ctx::Ctx {
             store: crate::store::Store::open(&root.join("store"))?,
@@ -3892,6 +3901,63 @@ mod cache_copy_tests {
             captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         })
+    }
+
+    #[test]
+    fn named_save_compares_a_warm_cache_for_each_capture_phase() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-named-cache-{}", ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            if !crate::fs::host().namespace.supported(&root) {
+                return Ok(());
+            }
+            let ctx = cache_command_context(&root)?;
+            let source = root.join("src");
+            std::fs::create_dir(&source)?;
+            std::fs::write(source.join(".layrattributes"), "target regenerable cache-portable\n")?;
+            std::fs::write(source.join(".gitignore"), "target/\n")?;
+            std::fs::write(source.join("src.txt"), "initial")?;
+            let run = |args: &[&str]| -> Result<()> {
+                let code = crate::cmd::run(&ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+                anyhow::ensure!(code == 0, "{args:?} returned {code}");
+                Ok(())
+            };
+            run(&["init", "concurrent", "--from", source.to_str().context("non-UTF-8 fixture path")?, "-q"])?;
+            run(&["protect", "main", "--remove"])?;
+            let target = ctx.cwd.join("target");
+            std::fs::create_dir_all(&target)?;
+            let artifact = target.join("artifact");
+            std::fs::write(&artifact, "build output")?;
+            std::fs::write(ctx.cwd.join("src.txt"), "first edit")?;
+            run(&["save", "-qam", "first part"])?;
+            let repo = Repo::open(&ctx, "concurrent")?;
+            let first = repo.state(&repo.line("main")?.head)?;
+            anyhow::ensure!(first.parts.len() == 1, "initial save must record the cache part");
+
+            for path in [&artifact, &target] {
+                std::fs::File::open(path)?.set_modified(std::time::UNIX_EPOCH)?;
+            }
+            std::fs::write(ctx.cwd.join("src.txt"), "second edit")?;
+            run(&["add", "src.txt"])?;
+            CACHE_COMPARISONS.set(0);
+            run(&["save", "-qm", "reuse part"])?;
+            let second = repo.state(&repo.line("main")?.head)?;
+            anyhow::ensure!(second.parts == first.parts, "unchanged cache must keep its part");
+            // APFS checks before preparing and again at publication. The other backends only check at publication.
+            let expected = if cfg!(target_os = "macos") { 2 } else { 1 };
+            anyhow::ensure!(CACHE_COMPARISONS.get() == expected, "warm cache compared {} times", CACHE_COMPARISONS.get());
+
+            std::fs::write(&artifact, "changed build output")?;
+            std::fs::write(ctx.cwd.join("src.txt"), "third edit")?;
+            run(&["save", "-qam", "replace changed part"])?;
+            let third = repo.state(&repo.line("main")?.head)?;
+            anyhow::ensure!(third.parts.len() == 1 && third.parts != first.parts, "changed cache must get a new part");
+            Ok(())
+        })();
+        let store = root.join("store");
+        let remove_store = if store.is_dir() { crate::fs::remove(&store) } else { Ok(()) };
+        let remove_root = std::fs::remove_dir_all(&root).context("remove named-save fixture");
+        result.and(remove_store).and(remove_root)
     }
 
     #[test]
