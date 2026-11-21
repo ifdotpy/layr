@@ -599,7 +599,7 @@ impl Gateway {
         }
         let challenge: Challenge = self.json(self.execute(self.http.get(url), false)?, 4096)?;
         let now = crate::ids::now_ms();
-        if challenge.expires <= now || challenge.expires > now + 60_000 {
+        if !valid_token_expiry(challenge.expires, now, 60_000) {
             bail!("invalid or expired gateway session challenge");
         }
         let signature = layr_store::session::sign(&person.login, &challenge.challenge, &person.key)?;
@@ -2726,6 +2726,32 @@ pub(super) mod tests {
             assert!(!valid_token_expiry(client_now, client_now, lifetime));
             assert!(!valid_token_expiry(client_now - 1, client_now, lifetime));
         }
+    }
+
+    #[test]
+    fn session_challenge_tolerates_a_gateway_clock_ahead_of_the_client() {
+        let key = || ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let challenge = |expires: i64| {
+            let bytes = base64::engine::general_purpose::STANDARD.encode([9; 32]);
+            serde_json::json!({"challenge": bytes, "expires": expires})
+        };
+        let session = serde_json::json!({
+            "token": "session.fixture",
+            "expires": crate::ids::now_ms() + 43_200_000,
+            "login": "ann@example.com",
+        });
+
+        let (gateway, _endpoint, server) =
+            conditional_fixture(vec![(200, None, challenge(crate::ids::now_ms() + 60_000 + 1_000)), (200, None, session)]);
+        gateway.set_person("ann@example.com", key()).unwrap();
+        assert_eq!(gateway.session_token(true).unwrap(), "session.fixture");
+        assert_eq!(server.join().unwrap().len(), 2);
+
+        let (gateway, _endpoint, server) = conditional_fixture(vec![(200, None, challenge(crate::ids::now_ms()))]);
+        gateway.set_person("ann@example.com", key()).unwrap();
+        let error = gateway.session_token(true).unwrap_err().to_string();
+        assert!(error.contains("invalid or expired gateway session challenge"), "{error}");
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     #[test]
