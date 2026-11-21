@@ -23,6 +23,9 @@ pub(crate) mod sweep;
 #[cfg(test)]
 mod sync_tests;
 mod writer;
+// The large-block allocator counter, for the tests of other modules.
+#[cfg(test)]
+pub(crate) use writer::tests::{large_blocks, large_blocks_of};
 
 pub(crate) use layr_store::{canonical, format, keys, s3, zst};
 

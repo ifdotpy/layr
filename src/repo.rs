@@ -237,6 +237,10 @@ impl Status {
         }
         s
     }
+    /// Show each staged move as a delete and an add (`status --no-renames`). O(n log n).
+    pub fn split_renames(&mut self) {
+        self.staged = changes::without_moves(std::mem::take(&mut self.staged));
+    }
     /// Leave out `paths` (the files of quiet overlays) from what the status shows.
     pub fn drop_paths(&mut self, paths: &BTreeSet<String>) {
         if paths.is_empty() {
@@ -250,6 +254,24 @@ impl Status {
     pub fn clean(&self) -> bool {
         self.staged.is_empty() && self.unstaged.is_empty()
     }
+    /// The untracked entries as `status` lists them: a file inside an untracked folder is shown as
+    /// that folder with a trailing `/`. Sorted, each entry once. One set lookup per ancestor of each
+    /// file, so the work is the total path length times the depth plus the sort, not a scan of all
+    /// folders per file.
+    pub fn untracked_grouped(&self) -> Vec<String> {
+        let dirs: HashSet<&str> = self.untracked_dirs.iter().map(String::as_str).collect();
+        group_untracked(&self.untracked, |a| dirs.contains(a))
+    }
+}
+
+/// `files` with each file under a folder (`is_dir`) replaced by its outermost such folder and a `/`,
+/// sorted, each entry once. `is_dir` is asked once per visited ancestor of a file, root first, up to the first match.
+fn group_untracked(files: &[String], is_dir: impl Fn(&str) -> bool) -> Vec<String> {
+    let group = |f: &String| match fsutil::ancestors(f).find(|a| is_dir(a)) {
+        Some(d) => format!("{d}/"),
+        None => f.clone(),
+    };
+    files.iter().map(group).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 /// A write of the working folder that a command made under its line lock, before its commit. It
@@ -1662,17 +1684,8 @@ impl<'a> Repo<'a> {
         // Untracked folders: the topmost folder that does not exist in the index.
         let mut dirs: BTreeSet<String> = BTreeSet::new();
         for f in &st.untracked {
-            let comps: Vec<&str> = f.split('/').collect();
-            let mut top = None;
-            for i in 1..comps.len() {
-                let d = comps[..i].join("/");
-                if fsutil::lmeta(index, &d).is_none() {
-                    top = Some(d);
-                    break;
-                }
-            }
-            if let Some(d) = top {
-                dirs.insert(d);
+            if let Some(d) = fsutil::ancestors(f).find(|d| fsutil::lmeta(index, d).is_none()) {
+                dirs.insert(d.to_string());
             }
         }
         st.untracked_dirs = dirs.into_iter().collect();
@@ -2487,6 +2500,9 @@ impl<'a> Repo<'a> {
     /// (`named_cache_overlays`), taken under the lock with one rename (`save_cache_overlays`).
     pub fn prepare_named_cache_parts(&self, line: &Line) -> Result<()> {
         self.prepare_cache_locations(line)?;
+        if self.ctx.is_none() || !crate::fs::CaptureSession::may_prepare(&self.p.work_dir()) {
+            return Ok(());
+        }
         let w = self.working(line);
         // The copies only speed up the save. An overlay that cannot be read here (one of this
         // platform that another machine made and this machine never received) must not stop the
@@ -2970,18 +2986,75 @@ pub fn conflict_open(root: &(impl fsutil::Src + ?Sized), c: &Conflict) -> Result
     Ok(true)
 }
 
+/// True if a line that starts with `<<<<<<< ` is followed, on a later line, by one that starts with `>>>>>>> `
+/// (the ends of a conflict block; the `=======` line between them is not required). Lines end at `\n`, so the
+/// bytes of a line may be anything. Two searches of `memchr` for byte strings, each stopping at its first hit:
+/// returns on the first ordered pair, in O(n) worst-case time and O(1) extra space.
 pub fn has_markers(data: &[u8]) -> bool {
-    let s = String::from_utf8_lossy(data);
-    let mut a = false;
-    let mut b = false;
-    for l in s.lines() {
-        if l.starts_with("<<<<<<< ") {
-            a = true;
-        } else if l.starts_with(">>>>>>> ") && a {
-            b = true;
+    use memchr::memmem::find;
+    // A line start is the buffer start or the byte after `\n`; a closing line needs the `\n` of the opening one.
+    let open = if data.starts_with(b"<<<<<<< ") { Some(0) } else { find(data, b"\n<<<<<<< ") };
+    open.is_some_and(|at| find(&data[at..], b"\n>>>>>>> ").is_some())
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::has_markers;
+
+    #[test]
+    fn a_closing_line_needs_an_opening_line_before_it() {
+        let table: [(&[u8], bool); 18] = [
+            (b"", false),
+            (b"<<<<<<< a\n=======\n>>>>>>> b\n", true),
+            (b"<<<<<<< \n>>>>>>> ", true),
+            (b"x\r\n<<<<<<< a\r\n>>>>>>> b", true),
+            (b"<<<<<<< >>>>>>> ", false),
+            (b">>>>>>> \n<<<<<<< \n", false),
+            (b">>>>>>> \n<<<<<<< \n>>>>>>> ", true),
+            (b"<<<<<<< a\n", false),
+            (b"a\n>>>>>>> b\n", false),
+            (b" <<<<<<< a\n>>>>>>> b", false),
+            (b"<<<<<<<\n>>>>>>> b", false),
+            (b"<<<<<<<\t\n>>>>>>>\t", false),
+            (b"<<<<<<< a\r>>>>>>> b", false),
+            (b"\xff<<<<<<< a\n>>>>>>> b", false),
+            (b"<<<<<<< \xff\n\xff>>>>>>> ", false),
+            (b"<<<<<<< \xff\n>>>>>>> \xff", true),
+            (b"<<<<<<<< a\n>>>>>>>> b\n", false),
+            (b"<<<<<<< \n>>>>>>>", false),
+        ];
+        for (data, want) in table {
+            assert_eq!(has_markers(data), want, "{:?}", String::from_utf8_lossy(data));
         }
     }
-    a && b
+
+    /// A 2 MiB file with the pair on its first two lines, then padding and a last byte that is no UTF-8.
+    #[test]
+    #[ignore = "subprocess helper for the_scan_allocates_no_copy_of_the_file"]
+    fn scan_memory_process() {
+        use std::sync::atomic::Ordering::SeqCst;
+        // CI runs ignored tests too; without the variable this is not the measuring subprocess.
+        if std::env::var_os("LAYR_TEST_PART_MEMORY").is_none() {
+            return;
+        }
+        let mut data = b"<<<<<<< a\n>>>>>>> b\n".to_vec();
+        data.resize(2 << 20, b'x');
+        data.push(0xff);
+        crate::store_remote::large_blocks::ON.store(true, SeqCst);
+        let found = has_markers(&data);
+        crate::store_remote::large_blocks::ON.store(false, SeqCst);
+        assert!(found);
+        // A leading newline: a serial test run has printed `test <name> ... ` without one.
+        println!("\npart memory {}", crate::store_remote::large_blocks::MOST.load(SeqCst));
+    }
+
+    /// The lossy conversion of a file with invalid UTF-8 (a binary file) copied all of it; the scan copies nothing.
+    #[test]
+    fn the_scan_allocates_no_copy_of_the_file() -> anyhow::Result<()> {
+        let most = crate::store_remote::large_blocks_of("repo::marker_tests::scan_memory_process")?;
+        assert_eq!(most, 0, "blocks of at least 1 MiB held during the scan");
+        Ok(())
+    }
 }
 
 /// Remove parent folders of `rel` in `target` that became empty and do not exist in `to`.
@@ -3742,6 +3815,8 @@ pub fn holds_files_in(tree: &Snap, path: &str) -> bool {
 /// the time of the file or of its folder. It does not follow links or enter other file systems.
 pub fn folder_changed_since(root: &Path, since_ms: i64) -> bool {
     use std::os::unix::fs::MetadataExt;
+    #[cfg(test)]
+    cache_copy_tests::CACHE_COMPARISONS.set(cache_copy_tests::CACHE_COMPARISONS.get() + 1);
     let since = i128::from(since_ms) * 1_000_000;
     let newer = |m: &std::fs::Metadata| i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec()) >= since;
     let Ok(top) = std::fs::symlink_metadata(root) else { return true };
@@ -3879,6 +3954,10 @@ mod cache_copy_tests {
     use super::*;
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
+    thread_local! {
+        pub(super) static CACHE_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     fn cache_command_context(root: &Path) -> Result<crate::ctx::Ctx> {
         Ok(crate::ctx::Ctx {
             store: crate::store::Store::open(&root.join("store"))?,
@@ -3892,6 +3971,63 @@ mod cache_copy_tests {
             captures: Default::default(),
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         })
+    }
+
+    #[test]
+    fn named_save_compares_a_warm_cache_for_each_capture_phase() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-named-cache-{}", ids::new_id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> Result<()> {
+            if !crate::fs::host().namespace.supported(&root) {
+                return Ok(());
+            }
+            let ctx = cache_command_context(&root)?;
+            let source = root.join("src");
+            std::fs::create_dir(&source)?;
+            std::fs::write(source.join(".layrattributes"), "target regenerable cache-portable\n")?;
+            std::fs::write(source.join(".gitignore"), "target/\n")?;
+            std::fs::write(source.join("src.txt"), "initial")?;
+            let run = |args: &[&str]| -> Result<()> {
+                let code = crate::cmd::run(&ctx, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+                anyhow::ensure!(code == 0, "{args:?} returned {code}");
+                Ok(())
+            };
+            run(&["init", "concurrent", "--from", source.to_str().context("non-UTF-8 fixture path")?, "-q"])?;
+            run(&["protect", "main", "--remove"])?;
+            let target = ctx.cwd.join("target");
+            std::fs::create_dir_all(&target)?;
+            let artifact = target.join("artifact");
+            std::fs::write(&artifact, "build output")?;
+            std::fs::write(ctx.cwd.join("src.txt"), "first edit")?;
+            run(&["save", "-qam", "first part"])?;
+            let repo = Repo::open(&ctx, "concurrent")?;
+            let first = repo.state(&repo.line("main")?.head)?;
+            anyhow::ensure!(first.parts.len() == 1, "initial save must record the cache part");
+
+            for path in [&artifact, &target] {
+                std::fs::File::open(path)?.set_modified(std::time::UNIX_EPOCH)?;
+            }
+            std::fs::write(ctx.cwd.join("src.txt"), "second edit")?;
+            run(&["add", "src.txt"])?;
+            CACHE_COMPARISONS.set(0);
+            run(&["save", "-qm", "reuse part"])?;
+            let second = repo.state(&repo.line("main")?.head)?;
+            anyhow::ensure!(second.parts == first.parts, "unchanged cache must keep its part");
+            // APFS checks before preparing and again at publication. The other backends only check at publication.
+            let expected = if cfg!(target_os = "macos") { 2 } else { 1 };
+            anyhow::ensure!(CACHE_COMPARISONS.get() == expected, "warm cache compared {} times", CACHE_COMPARISONS.get());
+
+            std::fs::write(&artifact, "changed build output")?;
+            std::fs::write(ctx.cwd.join("src.txt"), "third edit")?;
+            run(&["save", "-qam", "replace changed part"])?;
+            let third = repo.state(&repo.line("main")?.head)?;
+            anyhow::ensure!(third.parts.len() == 1 && third.parts != first.parts, "changed cache must get a new part");
+            Ok(())
+        })();
+        let store = root.join("store");
+        let remove_store = if store.is_dir() { crate::fs::remove(&store) } else { Ok(()) };
+        let remove_root = std::fs::remove_dir_all(&root).context("remove named-save fixture");
+        result.and(remove_store).and(remove_root)
     }
 
     #[test]
@@ -4824,6 +4960,33 @@ mod owner_walk_tests {
 #[cfg(test)]
 mod status_policy_tests {
     use super::*;
+    use crate::compare::DataEvidence;
+    use crate::fsutil::Meta;
+
+    #[test]
+    fn split_renames_turns_a_move_into_a_delete_and_an_add_and_keeps_the_rest() {
+        let meta = Meta { ftype: fsutil::FType::File, mode: 0o644, size: 1, ino: 0, uid: 0, gid: 0, mtime: 0 };
+        let mut st = Status {
+            staged: vec![
+                EntryChange::Modify { path: "m".into(), old: meta.clone(), new: meta.clone(), data: DataEvidence::Unknown },
+                EntryChange::Rename {
+                    path: "a".into(),
+                    old_path: "z".into(),
+                    old: meta.clone(),
+                    new: meta.clone(),
+                    data: DataEvidence::Unknown,
+                },
+            ],
+            untracked: vec!["u".into()],
+            ..Status::default()
+        };
+        st.split_renames();
+        let rows: Vec<(&str, bool, bool)> =
+            st.staged.iter().map(|c| (c.path().as_str(), c.old().is_some(), c.new().is_some())).collect();
+        assert_eq!(rows, [("a", false, true), ("m", true, true), ("z", true, false)]);
+        assert!(st.staged.iter().all(|c| c.old_path().is_none()));
+        assert_eq!(st.untracked, ["u"]);
+    }
 
     #[test]
     fn classification_uses_captured_policy_and_validates_after_consuming_it() -> Result<()> {
@@ -5250,5 +5413,64 @@ mod status_policy_tests {
         drop(store);
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod untracked_group_tests {
+    use super::{group_untracked, Status};
+    use std::collections::HashSet;
+
+    fn grouped(files: &[&str], dirs: &[&str]) -> Vec<String> {
+        let own = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+        Status { untracked: own(files), untracked_dirs: own(dirs), ..Status::default() }.untracked_grouped()
+    }
+
+    /// The previous implementation: the first folder in the list that is a prefix of the file. `finish_status`
+    /// lists the folders sorted, and then the first match is the nearest ancestor to the root.
+    fn first_prefix(files: &[&str], dirs: &[&str]) -> Vec<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for f in files {
+            match dirs.iter().find(|d| f.starts_with(&format!("{d}/"))) {
+                Some(d) => out.insert(format!("{d}/")),
+                None => out.insert(f.to_string()),
+            };
+        }
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn a_sibling_that_shares_a_prefix_is_not_grouped() {
+        let files = ["a/b/1", "a/b/2", "a/bc", "a/bc.txt", "a/b.txt", "z"];
+        assert_eq!(grouped(&files, &["a/b"]), ["a/b.txt", "a/b/", "a/bc", "a/bc.txt", "z"]);
+    }
+
+    #[test]
+    fn nested_untracked_folders_group_to_the_outermost() {
+        let files = ["a/b/c/1", "a/x", "a/b/2", "k/m/1", "k/n"];
+        assert_eq!(grouped(&files, &["a", "a/b", "k/m"]), ["a/", "k/m/", "k/n"]);
+    }
+
+    #[test]
+    fn grouping_matches_the_first_prefix_scan_it_replaced_for_sorted_folders() {
+        let files = ["a/b/1", "a/bc", "a/b/c/d", "a/e", "ab/f", "g/h/i", "g/h", "top", "é/ü/1", "é/ü0/1"];
+        for dirs in [&[][..], &["a"], &["a/b"], &["a", "a/b"], &["a/b", "ab", "g/h"], &["é/ü"]] {
+            assert_eq!(grouped(&files, dirs), first_prefix(&files, dirs), "{dirs:?}");
+        }
+    }
+
+    #[test]
+    fn ten_thousand_distinct_folders_cost_one_folder_probe_per_file() {
+        let files: Vec<String> = (0..10_000).map(|i| format!("d{i}/sub/f")).collect();
+        let dirs: HashSet<String> = (0..10_000).map(|i| format!("d{i}")).collect();
+        let probes = std::cell::Cell::new(0usize);
+        let out = group_untracked(&files, |a| {
+            probes.set(probes.get() + 1);
+            dirs.contains(a)
+        });
+        assert_eq!(out.len(), 10_000);
+        assert!(out.iter().all(|p| p.ends_with('/')));
+        // The folder is the first ancestor of each file. The scan it replaced made 50,005,000 prefix comparisons here.
+        assert_eq!(probes.get(), files.len(), "folder probes");
     }
 }
