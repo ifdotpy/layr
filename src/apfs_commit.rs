@@ -761,7 +761,18 @@ mod tests {
         assert!(!p.stage_path(&line).exists());
         assert_eq!(fs::read(p.state_path(&id).join("file"))?, b"staged bytes");
         assert!(crate::apfs::native_info(&p.state_path(&id))?.readonly);
-        assert!(p.try_reserve()?.is_some());
+        // A reservation does not wait for the lock. A process that another test of this binary starts can hold
+        // the descriptor for a moment (the apfs check of 2026-11-20 failed here once), so try for a short time.
+        let mut reserved = None;
+        for _ in 0..100 {
+            reserved = p.try_reserve()?;
+            if reserved.is_some() {
+                break;
+            }
+            assert!(!pending(&p)?, "a refused reservation after recovery must be a busy lock, not a journal");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(reserved.is_some());
         Ok(())
     }
 
