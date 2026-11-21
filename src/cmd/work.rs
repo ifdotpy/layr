@@ -37,8 +37,9 @@ fn conflict_code(details: &ConflictDetails) -> &'static str {
 }
 
 /// The status that `layr status` shows: the comparison of the working folder, minus the files of
-/// quiet overlays. `filtered` is true for a view that shows only the caller's layers.
-fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Status> {
+/// quiet overlays. `filtered` is true for a view that shows only the caller's layers. Without
+/// `renames`, staged moves are split before the quiet files are left out, which tests each path.
+fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool, renames: bool) -> Result<Status> {
     let mut st = {
         let _t = crate::trace::span("status compare");
         if filtered {
@@ -57,6 +58,9 @@ fn shown_status(ctx: &Ctx, h: &Here, line: &Line, filtered: bool) -> Result<Stat
             }
         }
     };
+    if !renames {
+        st.split_renames();
+    }
     // The files of quiet overlays are not shown (docs/cache-overlays.md, section 4.1).
     let quiet = {
         let _t = crate::trace::span("status quiet paths");
@@ -193,26 +197,30 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let filtered = if view.is_some() { None } else { h.repo.filtered_view(ctx, &line)? };
     let specs = h.specs(&a.rest())?;
     let st = match &view {
-        Some(v) => crate::views::status(&h.repo, &line, v)?,
-        None => shown_status(ctx, &h, &line, filtered.is_some())?,
+        Some(v) => {
+            let mut st = crate::views::status(&h.repo, &line, v)?;
+            if a.has("--no-renames") {
+                st.split_renames();
+            }
+            st
+        }
+        None => shown_status(ctx, &h, &line, filtered.is_some(), !a.has("--no-renames"))?,
     };
-    let overlaps = if options.overlaps == StatusOverlaps::Include
-        && view.is_none()
-        && filtered.is_none()
-        && (a.has("--json") || (!a.has("-s") && !a.has("--porcelain")))
-    {
-        let _t = crate::trace::span("status overlaps");
-        h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    // As in git, `-z` alone selects the machine-readable short format.
+    let porcelain = a.has("--porcelain");
+    let short = a.has("-s") || porcelain || (a.has("-z") && !a.has("--long"));
+    let overlaps =
+        if options.overlaps == StatusOverlaps::Include && view.is_none() && filtered.is_none() && (a.has("--json") || !short) {
+            let _t = crate::trace::span("status overlaps");
+            h.repo.overlaps(ctx, &line)?.into_iter().filter(|o| matches(&specs, &o.path)).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
     if a.has("--json") {
         let output = StatusJson::new(&line, &st, &specs, &overlaps, &options);
         outln!(ctx, "{}", serde_json::to_string(&output)?);
         return Ok(0);
     }
-    let porcelain = a.has("--porcelain");
-    let short = a.has("-s") || porcelain;
     let untracked_mode = a.get("-u").map(|s| if s.is_empty() { "all" } else { s }).unwrap_or("normal").to_string();
     let show_ignored = options.ignored == StatusIgnored::Include && a.has("--ignored");
     let nul = a.has("-z");
@@ -1504,7 +1512,7 @@ fn warn_left_out(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     let filtered = h.repo.filtered_view(ctx, &line)?.is_some();
-    let st = shown_status(ctx, &h, &line, filtered)?;
+    let st = shown_status(ctx, &h, &line, filtered, true)?;
     let conflicted: BTreeSet<String> = st.conflicts.iter().map(|c| c.path.clone()).collect();
     let untracked: Vec<String> = untracked_list(&st, "normal").iter().map(|p| h.rel(p)).collect();
     let mut modified: Vec<String> =
@@ -2421,7 +2429,7 @@ mod status_tests {
 
     #[test]
     fn status_help_lists_opt_outs() {
-        assert!(crate::cmd::HELP.contains("status [--json] [--no-overlaps] [--no-ignored]"));
+        assert!(crate::cmd::HELP.contains("status [--json] [--no-renames] [--no-overlaps] [--no-ignored]"));
     }
 
     #[test]

@@ -237,6 +237,10 @@ impl Status {
         }
         s
     }
+    /// Show each staged move as a delete and an add (`status --no-renames`). O(n log n).
+    pub fn split_renames(&mut self) {
+        self.staged = changes::without_moves(std::mem::take(&mut self.staged));
+    }
     /// Leave out `paths` (the files of quiet overlays) from what the status shows.
     pub fn drop_paths(&mut self, paths: &BTreeSet<String>) {
         if paths.is_empty() {
@@ -4890,6 +4894,33 @@ mod owner_walk_tests {
 #[cfg(test)]
 mod status_policy_tests {
     use super::*;
+    use crate::compare::DataEvidence;
+    use crate::fsutil::Meta;
+
+    #[test]
+    fn split_renames_turns_a_move_into_a_delete_and_an_add_and_keeps_the_rest() {
+        let meta = Meta { ftype: fsutil::FType::File, mode: 0o644, size: 1, ino: 0, uid: 0, gid: 0, mtime: 0 };
+        let mut st = Status {
+            staged: vec![
+                EntryChange::Modify { path: "m".into(), old: meta.clone(), new: meta.clone(), data: DataEvidence::Unknown },
+                EntryChange::Rename {
+                    path: "a".into(),
+                    old_path: "z".into(),
+                    old: meta.clone(),
+                    new: meta.clone(),
+                    data: DataEvidence::Unknown,
+                },
+            ],
+            untracked: vec!["u".into()],
+            ..Status::default()
+        };
+        st.split_renames();
+        let rows: Vec<(&str, bool, bool)> =
+            st.staged.iter().map(|c| (c.path().as_str(), c.old().is_some(), c.new().is_some())).collect();
+        assert_eq!(rows, [("a", false, true), ("m", true, true), ("z", true, false)]);
+        assert!(st.staged.iter().all(|c| c.old_path().is_none()));
+        assert_eq!(st.untracked, ["u"]);
+    }
 
     #[test]
     fn classification_uses_captured_policy_and_validates_after_consuming_it() -> Result<()> {

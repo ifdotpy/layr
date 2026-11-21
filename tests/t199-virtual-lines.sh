@@ -123,6 +123,9 @@ has "status: modified" "modified:   notes.txt" "$st"
 has "status: new file" "new file:   new.txt" "$st"
 has "status: deleted" "deleted:    dir/a.txt" "$st"
 has "status: rename" "renamed:    dir/c.txt -> moved.txt" "$st"
+st_split=$(cd "$V" && l status --no-renames)
+has "status --no-renames: the move is a delete" "deleted:    dir/c.txt" "$st_split"
+has "status --no-renames: the move is an add" "new file:   moved.txt" "$st_split"
 has "status: moved folder" "sub2/b.txt" "$st"
 case "$st" in *debug.log*|*target/*) FAIL=$((FAIL + 1)); echo "FAIL status leaves ignored files out" ;; *) PASS=$((PASS + 1)); echo "PASS status leaves ignored files out" ;; esac
 d=$(cd "$V" && l diff)
