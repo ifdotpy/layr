@@ -72,7 +72,7 @@ pub fn meta_of(m: &fs::Metadata) -> Meta {
     Meta { ftype, mode: m.mode() & 0o7777, size: m.len(), ino: m.ino(), uid: m.uid(), gid: m.gid(), mtime: m.mtime() }
 }
 
-pub use layr_store::paths::check_rel;
+pub use layr_store::paths::{ancestors, check_rel};
 
 /// Join `rel` to `root` after checking that every parent folder is a real folder (not a link).
 pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {

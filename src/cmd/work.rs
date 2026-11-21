@@ -411,18 +411,7 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
     if mode == "all" {
         return st.untracked.clone();
     }
-    let mut out: BTreeSet<String> = BTreeSet::new();
-    for f in &st.untracked {
-        match st.untracked_dirs.iter().find(|d| f.starts_with(&format!("{d}/"))) {
-            Some(d) => {
-                out.insert(format!("{d}/"));
-            }
-            None => {
-                out.insert(f.clone());
-            }
-        }
-    }
-    out.into_iter().collect()
+    st.untracked_grouped()
 }
 
 /// Lock the line and the project and save the working content (snapshot rule 2). For the commands
