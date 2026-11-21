@@ -21,15 +21,25 @@ fn source_key(path: &Path) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(parent)?.join(name))
 }
 
+fn preparation(directory: &Path) -> Result<Option<(Arc<dyn PathAdmission>, NewTreeLocation)>> {
+    std::fs::create_dir_all(directory)?;
+    let path = directory.join(format!("prepared-{}", crate::store::temp_name()));
+    let driver = composition::operation(None, &path, CapturePurpose::State)?;
+    let location = driver.location(&path)?;
+    let enabled = driver.capabilities(&location.scope()).capture_copy.is_some_and(|copy| copy.prepare_before_lock());
+    Ok(enabled.then_some((driver, location)))
+}
+
 impl CaptureSession {
+    pub(crate) fn may_prepare(directory: &Path) -> bool {
+        // Defer admission errors until a due cache actually needs a capture.
+        !matches!(preparation(directory), Ok(None))
+    }
+
     pub(crate) fn prepare(&self, source: &Path, directory: &Path) -> Result<()> {
-        std::fs::create_dir_all(directory)?;
-        let path = directory.join(format!("prepared-{}", crate::store::temp_name()));
-        let driver = composition::operation(None, &path, CapturePurpose::State)?;
-        let location = driver.location(&path)?;
-        if !driver.capabilities(&location.scope()).capture_copy.is_some_and(|copy| copy.prepare_before_lock()) {
+        let Some((driver, location)) = preparation(directory)? else {
             return Ok(());
-        }
+        };
         let key = source_key(source)?;
         let result = driver.working(source).and_then(|working| driver.freeze(FreezeSource::Working(&working), location));
         driver.release_unused();
@@ -92,6 +102,20 @@ impl Drop for CaptureSession {
             eprintln!("warning: {error:#}");
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_probe_defers_destination_errors() -> Result<()> {
+    let file = std::env::temp_dir().join(format!("capture-not-directory-{}", crate::ids::new_id()));
+    std::fs::File::create(&file)?;
+    let may_prepare = CaptureSession::may_prepare(&file);
+    let result = CaptureSession::default().prepare(&file, &file);
+    std::fs::remove_file(file)?;
+    assert!(may_prepare);
+    let io = result.err().and_then(|error| error.downcast::<std::io::Error>().ok());
+    assert_eq!(io.map(|error| error.kind()), Some(std::io::ErrorKind::AlreadyExists));
+    Ok(())
 }
 
 #[cfg(all(test, target_os = "linux", not(feature = "overlayfs")))]
