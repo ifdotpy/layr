@@ -310,9 +310,9 @@ pub(super) fn copy_flat_allocation(path: &Path) -> Result<u64> {
 /// and then its files that have the same extents as an earlier copy are reflinked from it.
 pub(crate) struct Copier {
     root: PathBuf,
-    /// The extents (logical, physical, length) of each file content already copied, with the
-    /// copy of its first file. A file with the same extents shares that copy.
-    seen: std::collections::HashMap<Vec<(u64, u64, u64)>, PathBuf>,
+    /// Logical length and extents (logical, physical, length) of each file already copied,
+    /// with its first copy. Equal extents alone do not describe trailing holes.
+    seen: std::collections::HashMap<crate::project_copy::FileSharingKey, PathBuf>,
     /// (device, inode) -> the first copy of a hard-linked file.
     links: std::collections::HashMap<(u64, u64), PathBuf>,
     serial: u64,
@@ -500,12 +500,13 @@ impl Copier {
         // Only plain extents: inline and encoded data have no physical address to compare.
         const LAST: u32 = 0x1;
         const SHARED: u32 = 0x2000;
-        let extents = crate::sys::fiemap_full(&File::open(src).with_context(|| format!("open {}", src.display()))?)
-            .with_context(|| format!("extents of {}", src.display()))?;
+        let source = File::open(src).with_context(|| format!("open {}", src.display()))?;
+        let extents = crate::sys::fiemap_full(&source).with_context(|| format!("extents of {}", src.display()))?;
         if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
             return Ok(());
         }
-        let key: Vec<(u64, u64, u64)> = extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect();
+        let key =
+            (source.metadata()?.len(), extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect());
         match self.seen.get(&key) {
             Some(first) => {
                 let (from, to) = (File::open(first)?, fs::OpenOptions::new().write(true).open(dst)?);
@@ -596,6 +597,17 @@ pub(super) fn observe_paths(
 mod placeholder_tests {
     use super::*;
     use layr_objects::{fsx::EntryKind, write::write_tree_from, Keying, Store, Temperature, WriteOptions};
+
+    #[test]
+    fn project_copy_preserves_sparse_file_lengths() -> Result<()> {
+        let mut copier = Copier { root: PathBuf::new(), seen: Default::default(), links: Default::default(), serial: 0 };
+        crate::project_copy::sparse_sharing_regression(|src, dst| {
+            // Model the independent file already received by btrfs receive.
+            fs::copy(src, dst)?;
+            copier.share_file(src, dst)?;
+            Ok(copier.seen.len())
+        })
+    }
 
     #[test]
     fn fallback_keeps_independent_changes_with_colliding_subvolume_inodes() -> Result<()> {

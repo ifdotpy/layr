@@ -2161,6 +2161,7 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
             Some(_) => {}
         }
     }
+    problems += fsck_objects(ctx, &repo.p, "", a.has("--repair"))?;
     let ids_v = repo.p.db.present_states()?.into_iter().map(|(id, _)| id);
     for id in ids_v {
         if !repo.p.has_state(&id) {
@@ -2184,6 +2185,45 @@ pub fn fsck(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     outln!(ctx, "{problems} problem(s)");
     Ok(if problems > 0 { 1 } else { 0 })
+}
+
+/// The damage of the object store of `p` (#452, #453). A repair that has something to do needs the
+/// store to itself: it moves a damaged object or dictionary to `damaged/` (the next write of that object writes it again) and
+/// writes a damaged state record again from the signed record of its state, or moves it aside when
+/// the signed record names no objects. An object that a state reaches and that is missing stays
+/// reported until a full write of the same content makes it again.
+fn fsck_objects(ctx: &Ctx, p: &crate::store::Project, label: &str, repair: bool) -> Result<usize> {
+    use layr_objects::store::Damaged;
+    if !crate::objstore::exists(p) {
+        return Ok(0);
+    }
+    let mut store = crate::objstore::open_existing(p)?;
+    let mut damage = store.damage()?;
+    // Only moving or writing files needs the store to itself; the check runs beside readers.
+    if repair && damage.iter().any(|d| !matches!(d.item, Damaged::Missing(_))) {
+        drop(store);
+        store = layr_objects::Store::try_open_for_prune(&crate::objstore::dir(p), layr_objects::Keying::Plain)?
+            .ok_or_else(|| anyhow::anyhow!("object store is in use; retry fsck --repair after its readers/imports finish"))?;
+        damage = store.damage()?;
+    }
+    for d in &damage {
+        let outcome = match (&d.item, repair) {
+            (Damaged::Missing(_), _) => {
+                " (write it again: save in the line and run layr objects import head --full, or delete the line with layr line delete -D --discard)".to_string()
+            }
+            (_, false) => " (use --repair)".to_string(),
+            (Damaged::Record(state), true) => match crate::objstore::recorded_refs(p, state)? {
+                Some(refs) => {
+                    store.set_state(state, &refs)?;
+                    ": written again from the signed record".to_string()
+                }
+                None => format!(": moved to {}", store.quarantine(&d.item)?.display()),
+            },
+            (Damaged::Object(_) | Damaged::Dictionary(_), true) => format!(": moved to {}", store.quarantine(&d.item)?.display()),
+        };
+        outln!(ctx, "{label}{}{outcome}", d.reason);
+    }
+    Ok(damage.len())
 }
 
 /// The overlays of a project (their records, states and snapshots) and the lines that show them
@@ -2214,6 +2254,7 @@ fn fsck_overlays(ctx: &Ctx, repo: &Repo, repair: bool) -> Result<usize> {
                 outln!(ctx, "overlay {name}: records: {err:#}");
             }
         }
+        problems += fsck_objects(ctx, &o.p, &format!("overlay {name}: "), repair)?;
         for e in std::fs::read_dir(o.p.states_dir())?.flatten() {
             let id = e.file_name().to_string_lossy().into_owned();
             if o.p.db.state(&id)?.is_none() && !crate::free::preparing_state(&o.p, &id)? {

@@ -23,6 +23,12 @@ pub fn copy_contents(source: &File, destination: &File) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn clone_contents(source: &File, destination: &File) -> io::Result<layr_fs_core::Attempt<()>> {
+    // FICLONE can retain an old tail when the source ends on a block boundary.
+    // Decline before mutation: the index caller needs an atomic replacement on
+    // fallback, and truncating after the clone could fail after changing its bytes.
+    if source.metadata()?.len() < destination.metadata()?.len() {
+        return Ok(layr_fs_core::Attempt::Unavailable(rustix::io::Errno::OPNOTSUPP.into()));
+    }
     match rustix::fs::ioctl_ficlone(destination, source) {
         Ok(()) => Ok(layr_fs_core::Attempt::Applied(())),
         Err(error)
@@ -130,6 +136,73 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn content_copy_shrinks_at_boundaries_preserving_inode_aliases_and_positions() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut source = fixture.file("source")?;
+        let mut destination = fixture.file("destination")?;
+        fs::hard_link(fixture.0.join("destination"), fixture.0.join("alias"))?;
+        let inode = destination.metadata()?.ino();
+        for size in [0, 32767, 32768, 32769, 65536, 131072, 1048576] {
+            let expected = vec![b'a'; size];
+            source.set_len(0)?;
+            source.write_all_at(&expected, 0)?;
+            let old = vec![b'b'; size + 237];
+            destination.write_all_at(&old, 0)?;
+            destination.set_len(old.len() as u64)?;
+            source.seek(io::SeekFrom::Start(3))?;
+            destination.seek(io::SeekFrom::Start(size as u64 + 17))?;
+            #[cfg(target_os = "linux")]
+            {
+                let before = destination.metadata()?;
+                assert!(matches!(
+                    clone_contents(&source, &destination)?,
+                    layr_fs_core::Attempt::Unavailable(error) if error.raw_os_error() == Some(rustix::io::Errno::OPNOTSUPP.raw_os_error())
+                ));
+                assert_eq!(fs::read(fixture.0.join("alias"))?, old);
+                let after = destination.metadata()?;
+                assert_eq!((after.mtime(), after.mtime_nsec()), (before.mtime(), before.mtime_nsec()));
+                assert_eq!(source.stream_position()?, 3);
+                assert_eq!(destination.stream_position()?, size as u64 + 17);
+            }
+            copy_contents(&source, &destination)?;
+            assert_eq!(source.stream_position()?, 3);
+            assert_eq!(destination.stream_position()?, size as u64 + 17);
+            assert_eq!(destination.metadata()?.ino(), inode);
+            assert_eq!(destination.metadata()?.len(), size as u64);
+            assert_eq!(fs::read(fixture.0.join("alias"))?, expected);
+            assert_eq!(fs::read(fixture.0.join("source"))?, expected);
+        }
+        Ok(())
+    }
+    #[test]
+    fn content_copy_replaces_equal_and_shorter_destinations() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let mut source = fixture.file("source")?;
+        let mut destination = fixture.file("destination")?;
+        let inode = destination.metadata()?.ino();
+        let expected = vec![b'a'; 32768];
+        source.write_all_at(&expected, 0)?;
+        #[cfg(target_os = "linux")]
+        let cloning_supported = matches!(clone_contents(&source, &fixture.file("probe")?)?, layr_fs_core::Attempt::Applied(()));
+        for old_size in [1usize, 32768] {
+            destination.set_len(old_size as u64)?;
+            destination.write_all_at(&vec![b'b'; old_size], 0)?;
+            source.seek(io::SeekFrom::Start(3))?;
+            destination.seek(io::SeekFrom::Start(17))?;
+            #[cfg(target_os = "linux")]
+            if cloning_supported {
+                assert!(matches!(clone_contents(&source, &destination)?, layr_fs_core::Attempt::Applied(())));
+                assert_eq!(fs::read(fixture.0.join("destination"))?, expected);
+            }
+            copy_contents(&source, &destination)?;
+            assert_eq!(fs::read(fixture.0.join("destination"))?, expected);
+            assert_eq!(destination.metadata()?.ino(), inode);
+            assert_eq!(source.stream_position()?, 3);
+            assert_eq!(destination.stream_position()?, 17);
+        }
+        Ok(())
     }
     #[test]
     fn sparse_fallback_truncates_preserves_inode_aliases_and_positions() -> io::Result<()> {
