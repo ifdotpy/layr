@@ -369,6 +369,13 @@ pub fn maintain_for_gc(ctx: &Ctx, repo: &crate::repo::Repo, dry: bool, quiet: bo
     let mode = if dry { MaintenanceMode::Preview } else { MaintenanceMode::Run };
     let report = |name: &str, p: &crate::store::Project| -> Result<()> {
         if let Some(plan) = crate::objstore::maintain(p, mode)? {
+            // Damage stops nothing else: what can be read is maintained (#453).
+            for what in plan.damaged.iter().take(10) {
+                eprintln!("warning: objects: {name}: skipped what cannot be read: {what} (see layr fsck)");
+            }
+            if plan.damaged.len() > 10 {
+                eprintln!("warning: objects: {name}: and {} more that cannot be read", plan.damaged.len() - 10);
+            }
             if !quiet {
                 let verb = if dry { "would remove" } else { "removed" };
                 let cold = if dry { "would turn cold" } else { "turned cold" };

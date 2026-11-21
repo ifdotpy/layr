@@ -44,13 +44,9 @@ pub fn verified(p: &Project, state: &str) -> Result<Option<(Store, StateRef)>> {
     if !exists(p) {
         return Ok(None);
     }
-    let Some(rec) = p.db.state(state)? else {
+    let Some(r) = recorded_refs(p, state)? else {
         return Ok(None);
     };
-    let (Some(tree), Some(times)) = (rec.tree.as_deref(), rec.times.as_deref()) else {
-        return Ok(None);
-    };
-    let r = StateRef { tree: Id::parse(tree)?, times: Id::parse(times)? };
     let store = open(p)?;
     if !store.has(&r.tree) || !store.has(&r.times) {
         return Ok(None);
@@ -58,17 +54,36 @@ pub fn verified(p: &Project, state: &str) -> Result<Option<(Store, StateRef)>> {
     Ok(Some((store, r)))
 }
 
+/// The tree and times table that the signed record of `state` names, if it names them.
+pub fn recorded_refs(p: &Project, state: &str) -> Result<Option<StateRef>> {
+    let Some(rec) = p.db.state(state)? else {
+        return Ok(None);
+    };
+    let (Some(tree), Some(times)) = (rec.tree.as_deref(), rec.times.as_deref()) else {
+        return Ok(None);
+    };
+    Ok(Some(StateRef { tree: Id::parse(tree)?, times: Id::parse(times)? }))
+}
+
 /// Make the snapshot of `state` again from its tree and times table: a checkout into a new tree of
 /// the work folder, then a read-only snapshot at `states/<id>`, as a state built from Git
 /// (`gitbridge::build_tree`). Returns false when the object store has no tree for the state.
 pub fn build_state(repo: &Repo, state: &str) -> Result<bool> {
-    let _lock = repo.p.lock_or_borrow()?;
     if repo.p.has_state(state) {
         return Ok(true);
     }
     let Some((store, r)) = verified(&repo.p, state)? else {
+        // A state whose objects this store recorded and cannot read is damage (#452): no other
+        // source has them. This check takes no lock, so a save preparation can meet it.
+        if exists(&repo.p) {
+            open_existing(&repo.p)?.checked_state(state)?;
+        }
         return Ok(false);
     };
+    let _lock = repo.p.lock_or_borrow()?;
+    if repo.p.has_state(state) {
+        return Ok(true);
+    }
     let _t = crate::trace::span(format!("build {} from objects", crate::ids::short(state)));
     let source =
         crate::source::Source::Objects(crate::object_tree::ObjectTree::new(store, r, &repo.p.meta_dir().join("object-reads"))?);
@@ -387,13 +402,18 @@ fn state_write_base(
         Some(delta) => Some(delta),
         None => crate::source::storage::capture_delta(source)?,
     };
+    // A base that cannot be read gives a full write (#452); an I/O error stops the write.
+    let readable = |state: &str| match store.checked_state(state) {
+        Err(error) if layr_objects::store::is_unreadable(error.as_ref()) => Ok(None),
+        result => result,
+    };
     if let Some((base, paths)) = delta {
-        if let Some(refs) = store.state_ref(&base)? {
+        if let Some(refs) = readable(&base)? {
             return Ok(Some((refs, paths)));
         }
     }
     let Some(parent_state) = parent else { return Ok(None) };
-    let Some(refs) = store.state_ref(parent_state)? else { return Ok(None) };
+    let Some(refs) = readable(parent_state)? else { return Ok(None) };
     let parent = if p.has_state(parent_state) {
         let source = crate::source::Source::of_state(p, parent_state)?;
         source
@@ -505,6 +525,17 @@ fn native_bases(repo: &Repo) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_damage_stays_typed_through_the_file_system_adapter() {
+        use layr_objects::store::{is_unreadable, Unreadable};
+        // The object tree hands store errors to the file system layer (`FsError::backend`).
+        let damage = anyhow::Error::new(Unreadable("object x is empty".into())).context("read d/a");
+        let through = anyhow::Error::from(layr_fs_core::FsError::backend(damage)).context("final save");
+        assert!(is_unreadable(through.as_ref()), "{through:#}");
+        let busy = anyhow::Error::from(layr_fs_core::FsError::Busy).context("final save");
+        assert!(!is_unreadable(busy.as_ref()));
+    }
 
     #[test]
     #[cfg_attr(feature = "overlayfs", ignore = "OverlayFS registry requires root")]
