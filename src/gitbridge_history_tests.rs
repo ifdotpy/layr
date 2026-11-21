@@ -67,20 +67,7 @@ impl Fixture {
         let git = repo.p.git_dir();
         let source = root.join("source");
         std::fs::create_dir(&source)?;
-        let run = |args: &[&str]| -> Result<String> {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&source)
-                .args(["-c", "user.name=History Test", "-c", "user.email=history@example.com"])
-                .args(args)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_INDEX_FILE")
-                .env_remove("GIT_WORK_TREE")
-                .env("LAYR_ROOT", &ctx.store.root)
-                .output()?;
-            anyhow::ensure!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-            Ok(String::from_utf8(out.stdout)?.trim().to_string())
-        };
+        let run = |args: &[&str]| source_git(&root, args);
         run(&["init", "-q"])?;
         std::fs::write(source.join("seed"), b"original\n")?;
         std::fs::create_dir(source.join("move-out"))?;
@@ -120,6 +107,41 @@ impl Fixture {
         let base_state = repo.state(&state)?.parents[0].clone();
         drop(repo);
         Ok(Self { ctx, output, root, commit, parent, state, base_state })
+    }
+
+    /// Commits `count` more Git commits on top of the fixture and imports them as Git-only states.
+    /// Even commits add a line to `seed`; odd ones change the last file of `other` only, so `seed`
+    /// keeps the blob of the commit before.
+    fn extend(&mut self, count: usize) -> Result<()> {
+        let source = self.root.join("source");
+        for n in 0..count {
+            let file = if n % 2 == 0 { source.join("seed") } else { source.join(format!("other/{:03}", FILE_COUNT - 1)) };
+            writeln!(std::fs::OpenOptions::new().append(true).open(file)?, "line {n}")?;
+            source_git(&self.root, &["commit", "-qam", &format!("extend {n}")])?;
+        }
+        let repo = self.repo()?;
+        let git = repo.p.git_dir();
+        source_git(&self.root, &["push", "-q", &git.to_string_lossy(), "HEAD:refs/heads/main"])?;
+        let commit = source_git(&self.root, &["rev-parse", "HEAD"])?;
+        let state = import_commit(&self.ctx, &repo, &commit, "origin/main")?.0;
+        drop(repo);
+        (self.commit, self.state) = (commit, state);
+        Ok(())
+    }
+
+    /// `layr blame <state> -- <path>` with a fresh object reader: the output, the git commands
+    /// it started and the blobs it read.
+    fn blame(&self, extra: &[&str], path: &str) -> Result<(String, usize, usize)> {
+        forget_objects();
+        self.output.0.borrow_mut().clear();
+        let before = GIT_COMMANDS.with(|n| n.get());
+        let mut args: Vec<String> = extra.iter().map(|a| a.to_string()).collect();
+        args.extend([self.state.clone(), "--".into(), path.into()]);
+        let result = crate::cmd::history::blame(&self.ctx, &args);
+        let commands = GIT_COMMANDS.with(|n| n.get()) - before;
+        crate::free::finish(&self.ctx);
+        result?;
+        Ok((String::from_utf8(self.output.0.borrow().clone())?, commands, metrics().0))
     }
 
     fn repo(&self) -> Result<Repo<'_>> {
@@ -170,8 +192,7 @@ impl Fixture {
         let source = self.root.join("source");
         let mut parent = None;
         for (oid, id) in [(&self.parent, &self.base_state), (&self.commit, &self.state)] {
-            let out = Command::new("git").arg("-C").arg(&source).args(["checkout", "-q", oid]).output()?;
-            anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            source_git(&self.root, &["checkout", "-q", oid])?;
             let report = layr_objects::write_tree(
                 &store,
                 &source,
@@ -203,6 +224,22 @@ impl Fixture {
         self.base_state = base;
         Ok(())
     }
+}
+
+/// A git command in the source repository of the fixture at `root`; its trimmed output.
+fn source_git(root: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root.join("source"))
+        .args(["-c", "user.name=History Test", "-c", "user.email=history@example.com"])
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_WORK_TREE")
+        .env("LAYR_ROOT", root.join("store"))
+        .output()?;
+    anyhow::ensure!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
 impl Drop for Fixture {
@@ -335,5 +372,175 @@ fn object_path_history_keeps_rename_endpoints_without_reading_unrelated_changes(
     for path in ["move-out", "moved-out", "move-in", "selected/moved-in"] {
         assert_eq!(fixture.command(true, &[path], true)?, fixture.command(false, &[path], true)?);
     }
+    Ok(())
+}
+
+#[test]
+fn blame_of_imported_history_starts_a_fixed_number_of_git_commands() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (short, short_commands, short_blobs) = fixture.blame(&[], "seed")?;
+    assert_eq!(short.lines().count(), 1, "{short}");
+    assert_eq!(short_blobs, 2, "the two versions of seed");
+    let second = fixture.state.clone();
+    const EXTRA: usize = 40;
+    fixture.extend(EXTRA)?;
+    let (long, long_commands, long_blobs) = fixture.blame(&[], "seed")?;
+    assert_eq!(long.lines().count(), 1 + EXTRA / 2, "{long}");
+    assert!(long.lines().nth(1).is_some_and(|l| l.ends_with(") line 0")), "{long}");
+    assert_eq!((short_commands, long_commands), (1, 1), "one object reader, whatever the length of the history");
+    assert_eq!(long_blobs, 2 + EXTRA / 2, "one read per distinct blob of seed: {long}");
+    let (range, ..) = fixture.blame(&["-L", "2,3"], "seed")?;
+    assert_eq!(range, long.lines().skip(1).take(2).map(|l| format!("{l}\n")).collect::<String>());
+    // The walk ends where the path is missing: selected/moved-in exists only from the second commit.
+    let (moved, ..) = fixture.blame(&["-s"], "selected/moved-in")?;
+    assert_eq!(moved.lines().count(), 1, "{moved}");
+    assert!(moved.starts_with(&format!("{} ", &ids::display(&second)[..8])), "{moved}");
+    // A link blames its target text; a folder or a missing path has no versions.
+    let (link, ..) = fixture.blame(&["-s"], "selected/link")?;
+    assert!(link.trim_end().ends_with(") 001"), "{link}");
+    assert!(fixture.blame(&[], "selected").is_err());
+    assert!(fixture.blame(&[], "absent").is_err());
+    Ok(())
+}
+
+#[test]
+fn tree_find_matches_whole_names_and_reads_folder_modes() -> Result<()> {
+    let record = |mode: &str, name: &str, byte: u8| [format!("{mode} {name}\0").into_bytes(), vec![byte; 20]].concat();
+    let tree = [
+        record("100644", "a", 1),
+        record("040000", "ab", 2),
+        record("120000", "b", 3),
+        record("0160000", "c", 4),
+        record("40755", "d", 5),
+    ]
+    .concat();
+    let found = |name: &str| tree_find(&tree, name.as_bytes()).map(|e| e.map(|e| (e.mode, e.oid)));
+    for (name, mode, byte) in [("a", "100644", 1), ("ab", "40000", 2), ("b", "120000", 3), ("c", "160000", 4), ("d", "40000", 5)]
+    {
+        assert_eq!(found(name)?, Some((mode.to_string(), hex::encode([byte; 20]))), "{name}");
+    }
+    for absent in ["", "a/", "abc", "e", "100644"] {
+        assert!(found(absent)?.is_none(), "{absent:?}");
+    }
+    assert!(tree_find(&tree[..tree.len() - 1], b"d").is_err(), "a short object ID");
+    assert!(tree_find(b"100644 a", b"a").is_err(), "a name without its end");
+    assert!(tree_find(b"100644", b"a").is_err(), "a mode without a name");
+    assert!(tree_find(b"", b"a")?.is_none());
+    assert!(tree_find(&[record("10064x", "a", 1), tree.clone()].concat(), b"b").is_err(), "a mode that is not octal");
+    let parsed = parse_tree(&tree)?;
+    assert_eq!(parsed.keys().collect::<Vec<_>>(), ["a", "ab", "b", "c", "d"]);
+    assert!(parsed["ab"].is_tree() && parsed["d"].is_tree() && parsed["c"].is_link() && !parsed["b"].is_tree());
+    assert!(parse_tree(&tree[..tree.len() - 1]).is_err());
+    Ok(())
+}
+
+#[test]
+fn canon_mode_reads_the_file_type_bits_as_git_does() {
+    for (raw, mode) in [
+        ("40000", Some(0o40000)),
+        ("040000", Some(0o40000)),
+        ("40755", Some(0o40000)),
+        ("100644", Some(0o100644)),
+        ("100664", Some(0o100644)),
+        ("100755", Some(0o100755)),
+        ("100744", Some(0o100755)),
+        ("0100644", Some(0o100644)),
+        ("120000", Some(0o120000)),
+        ("120777", Some(0o120000)),
+        ("160000", Some(0o160000)),
+        ("160755", Some(0o160000)),
+        ("0", Some(0o160000)),
+        ("", None),
+        ("8", None),
+        ("10064x", None),
+        ("+100644", None),
+        ("400000100644", Some(0o100644)),
+    ] {
+        assert_eq!(canon_mode(raw.as_bytes()), mode, "{raw:?}");
+    }
+}
+
+#[test]
+fn paths_go_through_folders_with_padded_and_unusual_modes() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let repo = fixture.repo()?;
+    let git = repo.p.git_dir();
+    let scratch = fixture.root.join("raw");
+    std::fs::create_dir(&scratch)?;
+    // Objects Git reads but would not write today: written as they are (`--literally`).
+    let write = |kind: &str, data: &[u8]| -> Result<String> {
+        let file = scratch.join(crate::ids::new_id());
+        std::fs::write(&file, data)?;
+        Ok(git_out(&git, &["hash-object", "-w", "--literally", "-t", kind, &file.to_string_lossy()])?.trim().to_string())
+    };
+    let raw_id = |oid: &str| hex::decode(oid).map_err(anyhow::Error::from);
+    let file = write("blob", b"inside\n")?;
+    let folder = write("tree", &[b"100644 x\0".as_slice(), &raw_id(&file)?].concat())?;
+    for mode in ["40755", "040000"] {
+        let root = write("tree", &[format!("{mode} src\0").as_bytes(), &raw_id(&folder)?].concat())?;
+        let identity = ["-c", "user.name=History Test", "-c", "user.email=history@example.com"];
+        let commit = git_out(&git, &[&identity[..], &["commit-tree", &root, "-m", mode]].concat())?.trim().to_string();
+        assert!(matches!(entry(&repo, &commit, "src/x")?, Entry::File(data) if data == b"inside\n"), "{mode}");
+        assert!(matches!(entry(&repo, &commit, "")?, Entry::Dir(names) if names == [("src".to_string(), true)]), "{mode}");
+        assert_eq!(file_blob(&repo, &commit, "src/x")?, Some(file.clone()), "{mode}");
+        assert_eq!(file_blob(&repo, &commit, "src")?, None, "{mode}");
+    }
+    Ok(())
+}
+
+#[test]
+fn entry_reads_paths_of_an_imported_commit_through_one_reader() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let repo = fixture.repo()?;
+    forget_objects();
+    let before = GIT_COMMANDS.with(|n| n.get());
+    let at = |path: &str| entry(&repo, &fixture.commit, path);
+    let folder = |entry: Entry| match entry {
+        Entry::Dir(names) => names,
+        _ => Vec::new(),
+    };
+    let root = folder(at("")?);
+    assert_eq!(folder(at("/")?), root, "a slash names the root too");
+    assert!(root.contains(&("selected".into(), true)) && root.contains(&("seed".into(), false)), "{root:?}");
+    let selected = folder(at("selected/")?);
+    assert!(selected.contains(&("link".into(), false)) && selected.windows(2).all(|w| w[0] < w[1]), "{selected:?}");
+    assert!(matches!(at("selected/link")?, Entry::Link(target) if target == b"001"));
+    assert!(matches!(at("seed")?, Entry::File(data) if data == b"modified\n"));
+    assert!(matches!(entry(&repo, &fixture.parent, "seed")?, Entry::File(data) if data == b"original\n"));
+    // Like Git, a path names its components literally: no empty or `.` component.
+    for missing in ["absent", "seed/below", "selected/absent", "selected/00", "selected//001", "selected/./001"] {
+        assert!(matches!(at(missing)?, Entry::Missing), "{missing}");
+    }
+    assert_eq!(GIT_COMMANDS.with(|n| n.get()) - before, 1, "one object reader for every read");
+    // A read of the wrong type leaves the body of the object unread: the next read must not take
+    // it for its answer.
+    let folder = git_out(&repo.p.git_dir(), &["rev-parse", &format!("{}:selected", fixture.commit)])?;
+    assert!(blob(&repo, folder.trim()).is_err());
+    assert!(matches!(at("seed")?, Entry::File(data) if data == b"modified\n"));
+    // A readable blob stored under the wrong ID is an error, not its bytes.
+    let stored = fixture.object("selected/002")?;
+    std::fs::set_permissions(&stored, std::fs::Permissions::from_mode(0o644))?;
+    let mut encoded = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoded.write_all(b"blob 7\0corrupt")?;
+    std::fs::write(&stored, encoded.finish()?)?;
+    assert!(at("selected/002").is_err());
+    Ok(())
+}
+
+#[test]
+fn object_of_names_the_object_git_names_and_reads_it() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let repo = fixture.repo()?;
+    let git = repo.p.git_dir();
+    for path in ["", "seed", "selected", "selected/link", "selected/001"] {
+        let expected = git_out(&git, &["rev-parse", &format!("{}:{path}", fixture.commit)])?;
+        assert_eq!(object_of(&repo, &fixture.state, path)?.as_deref(), Some(expected.trim()), "{path:?}");
+    }
+    for absent in ["absent", "seed/below", "selected/absent"] {
+        assert_eq!(object_of(&repo, &fixture.state, absent)?, None, "{absent}");
+    }
+    // The object of the path is read too: a missing blob is an error, not an ID.
+    std::fs::remove_file(fixture.object("selected/002")?)?;
+    assert!(object_of(&repo, &fixture.state, "selected/002").is_err());
     Ok(())
 }

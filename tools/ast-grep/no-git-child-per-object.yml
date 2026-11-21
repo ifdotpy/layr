@@ -1,0 +1,20 @@
+id: no-git-child-per-object
+language: Rust
+severity: error
+message: Path and blob reads of history (blame, show <rev>:<path>, rev-parse <rev>:<path>) go through the object reader of the command (`with_objects`); a `git cat-file` or path `ls-tree` here starts one process per state.
+files:
+  - src/gitbridge.rs
+  - src/cmd/history.rs
+rule:
+  all:
+    - any:
+        - pattern: '["cat-file", "blob", $$$]'
+        - pattern: '["cat-file", "-p", $$$]'
+        - pattern: '["ls-tree", $$$]'
+        - pattern: CatFile::new($$$)
+    - inside:
+        stopBy: end
+        kind: function_item
+        has:
+          field: name
+          regex: ^(entry|file_blob|blob|path_entry|tree_find|object_of_once|blame)$
