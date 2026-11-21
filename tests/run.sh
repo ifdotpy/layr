@@ -154,6 +154,13 @@ if [ "${LAYR_TEST_RETRY:-1}" = 1 ] && [ "${#failed_tests[@]}" -gt 0 ] && [ "${#f
     done
     [ "${#still[@]}" -eq 0 ] && failed=0
 fi
+# LAYR_TEST_TIMES: the slowest tests last, so a long run shows where its time went.
+if [ -n "${LAYR_TEST_TIMES:-}" ]; then
+    echo "SLOWEST TESTS (seconds):"
+    for t in "${files[@]}"; do
+        [ -f "$logdir/$t.rc" ] && read -r _ seconds < "$logdir/$t.rc" && echo "$seconds $t"
+    done | sort -rn | head -15 | sed 's/^/  /'
+fi
 if [ "$next" -ne "${#files[@]}" ]; then
     echo "FAIL runner: a test returned no result"
     failed=1
