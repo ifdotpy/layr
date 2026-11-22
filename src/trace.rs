@@ -58,6 +58,42 @@ impl Drop for Span {
     }
 }
 
+/// The summed time of one kind of short step that runs many times (once per line, say), printed
+/// once with its count when it goes: `trace  812.0 ms  overlap their states (180 calls)`.
+/// Without `LAYR_TRACE` it only counts the calls.
+pub struct Sum {
+    name: &'static str,
+    enabled: bool,
+    ms: f64,
+    calls: usize,
+}
+
+pub fn sum(name: &'static str) -> Sum {
+    Sum { name, enabled: enabled(), ms: 0.0, calls: 0 }
+}
+
+impl Sum {
+    /// Run `f` and add its time to the sum.
+    pub fn time<T>(&mut self, f: impl FnOnce() -> T) -> T {
+        self.calls += 1;
+        if !self.enabled {
+            return f();
+        }
+        let start = Instant::now();
+        let out = f();
+        self.ms += start.elapsed().as_secs_f64() * 1000.0;
+        out
+    }
+}
+
+impl Drop for Sum {
+    fn drop(&mut self) {
+        if self.enabled && self.calls > 0 {
+            eprintln!("trace {:>8.1} ms  {} ({} calls)", self.ms, self.name, self.calls);
+        }
+    }
+}
+
 /// Like `span`, and with `LAYR_TRACE` also prints the start: a step that never ends shows its
 /// start line, which `span` alone cannot show.
 pub fn begin(name: impl Into<String>) -> Option<Span> {
@@ -93,5 +129,24 @@ mod tests {
         assert_eq!(slowest(2), "b 900ms; c 300ms");
         reset();
         assert_eq!(slowest(3), "");
+    }
+
+    #[test]
+    fn a_sum_counts_each_timed_call_and_returns_its_value() {
+        let mut s = sum("step");
+        assert_eq!(s.time(|| 2), 2);
+        assert_eq!(s.time(|| "x"), "x");
+        assert_eq!(s.calls, 2);
+    }
+
+    #[test]
+    fn a_traced_sum_adds_the_milliseconds_of_each_call() {
+        let mut s = Sum { name: "step", enabled: true, ms: 0.0, calls: 0 };
+        for _ in 0..2 {
+            s.time(|| std::thread::sleep(std::time::Duration::from_millis(2)));
+        }
+        assert_eq!(s.calls, 2);
+        // Milliseconds (a sleep lasts at least its time), not seconds.
+        assert!(s.ms >= 4.0, "{} ms", s.ms);
     }
 }

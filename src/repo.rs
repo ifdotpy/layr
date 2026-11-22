@@ -1236,9 +1236,20 @@ impl<'a> Repo<'a> {
 
     /// The newest automatic state of a line, if any.
     pub fn last_auto(&self, line: &Line) -> Result<Option<StateRec>> {
+        Ok(self.with_tree(self.p.db.line_states(&line.id, StateKind::Auto)?))
+    }
+
+    /// `last_auto` if it was made at `time` (milliseconds) or later. The automatic states come newest
+    /// first, so the first of those since `time` with a tree is that state: the older ones are not read.
+    pub fn last_auto_since(&self, line: &Line, time: i64) -> Result<Option<StateRec>> {
+        Ok(self.with_tree(self.p.db.line_states_since(&line.id, StateKind::Auto, time)?))
+    }
+
+    /// The first of `states` whose tree is available.
+    fn with_tree(&self, states: Vec<StateRec>) -> Option<StateRec> {
         // A state whose native copy was retired is in the object store: still the newest working content (an undo of a
         // restore went back to the head when the retirement came first, 2026-11-16).
-        Ok(self.p.db.line_states(&line.id, StateKind::Auto)?.into_iter().find(|s| self.tree_available(&s.id)))
+        states.into_iter().find(|s| self.tree_available(&s.id))
     }
 
     /// The state that a save compares the working content with: the newest automatic state made
