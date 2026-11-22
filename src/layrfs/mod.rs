@@ -329,10 +329,19 @@ fn serve_tool(tool: &str, args: &[String]) -> Result<i32, String> {
         "tool": tool,
         "args": args,
         "root": root,
+        "root_id": folder_id(&root),
         "cwd": cwd,
         "stdin_readable": stdin_readable(),
     });
     talk(&sock, tool, &req)
+}
+
+/// The device and inode of a folder. The server compares them with what it sees at the same path:
+/// a server started in another mount namespace (a check with its own temporary folders) sees
+/// another folder there, or none.
+pub(crate) fn folder_id(path: &Path) -> Option<[u64; 2]> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| [m.dev(), m.ino()])
 }
 
 /// Send a tool request and copy the answer to stdout and stderr: the exit code, or why the

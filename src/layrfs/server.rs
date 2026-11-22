@@ -262,6 +262,9 @@ fn handle(server: &Arc<Server>, sock: &UnixStream, socket: &Path) -> Result<()> 
     match req.get("op").and_then(|v| v.as_str()) {
         Some("tool") => {
             let root = root("root")?;
+            if let Some(why) = other_folder(&req, &root) {
+                return reply(sock, serde_json::json!({"fallback": why}));
+            }
             let cwd = root_rel(&root, &root_cwd(&req)?)?;
             let line = server.line(&root);
             let watcher = line.watcher.lock().unwrap().clone();
@@ -406,10 +409,39 @@ pub(super) fn plan_tool(
     }
 }
 
+/// Why the server cannot answer for `root`: the client saw another folder at that path. A server
+/// started by a process with other mounts (a check in its own mount namespace) shares the socket
+/// of the user, but a walk of the path would read another folder, or none, and print nothing.
+fn other_folder(req: &serde_json::Value, root: &Path) -> Option<String> {
+    let client: [u64; 2] = serde_json::from_value(req.get("root_id")?.clone()).ok()?;
+    (super::folder_id(root) != Some(client))
+        .then(|| format!("the layrfs server sees another folder at {} (another mount namespace)", root.display()))
+}
+
 pub(super) fn root_cwd(req: &serde_json::Value) -> Result<PathBuf> {
     Ok(PathBuf::from(req.get("cwd").and_then(|v| v.as_str()).context("missing cwd")?))
 }
 
 pub(super) fn root_rel(root: &Path, cwd: &Path) -> Result<PathBuf> {
     Ok(cwd.strip_prefix(root).context("the working folder is outside the tree")?.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_with_other_mounts_does_not_answer_for_the_folder() {
+        let dir = std::env::temp_dir().join(format!("layrfs-other-folder-{}", crate::ids::new_id()));
+        std::fs::create_dir(&dir).unwrap();
+        let id = super::super::folder_id(&dir).unwrap();
+        let req = |root_id: serde_json::Value| serde_json::json!({"root_id": root_id});
+        assert_eq!(other_folder(&req(serde_json::json!(id)), &dir), None);
+        // A client of an older layr sends no identity: the server answers as before.
+        assert_eq!(other_folder(&serde_json::json!({}), &dir), None);
+        let why = other_folder(&req(serde_json::json!([id[0], id[1] + 1])), &dir).unwrap();
+        assert!(why.contains("another mount namespace"), "{why}");
+        assert!(other_folder(&req(serde_json::json!(id)), &dir.join("gone")).is_some());
+        std::fs::remove_dir(&dir).unwrap();
+    }
 }
