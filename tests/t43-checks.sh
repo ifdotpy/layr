@@ -48,7 +48,18 @@ cp "$LAYR" "$T/layr"
 export LAYR_SOCKET=$T/layr.sock
 "$T/layr" daemon --socket "$LAYR_SOCKET" --tick 3600 > "$T/daemon.log" 2>&1 &
 DPID=$!
-stop_watchers() { pkill -P "$DPID" 2>/dev/null || true; }
+# The request processes of the daemon: its children, or with LayrFS (Linux) the children of its service loop,
+# a child daemon under the FUSE host. A kill of the service loop itself left the watcher running (2026-11-22).
+stop_watchers() {
+    local child
+    for child in $(pgrep -P "$DPID" 2>/dev/null); do
+        if ps -o args= -p "$child" 2>/dev/null | grep -q ' daemon --socket '; then
+            pkill -P "$child" 2>/dev/null || true
+        else
+            kill "$child" 2>/dev/null || true
+        fi
+    done
+}
 trap 'stop_watchers; kill ${DPID:-} ${WPID:-} 2>/dev/null || true; cleanup' EXIT
 for i in $(seq 1 100); do [ -S "$LAYR_SOCKET" ] && break; sleep .1; done
 as_reader() { (cd / && runuser -u layr-check-reader -- env LAYR_SOCKET="$LAYR_SOCKET" CHECK_SECRET=never-log-this-secret "$T/layr" --project p "$@"); }
