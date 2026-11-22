@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.51.7](https://github.com/ifdotpy/layr/compare/v0.51.6...v0.51.7) (2026-11-22)
+
+
+### Performance Improvements
+
+* **push:** List only the state shards of the tips and the records folder once
+
+
+## [0.51.6](https://github.com/ifdotpy/layr/compare/v0.51.5...v0.51.6) (2026-11-22)
+
+
+### Performance Improvements
+
+* **store:** Check fresh state IDs with a set when importing records
+
 ## [0.51.1](https://github.com/ifdotpy/layr/compare/v0.51.0...v0.51.1) (2026-11-21)
 
 
