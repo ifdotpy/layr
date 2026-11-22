@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.51.4](https://github.com/ifdotpy/layr/compare/v0.51.3...v0.51.4) (2026-11-22)
+
+
+### Performance Improvements
+
+* **store:** Select push candidates from one catalog read and one object store open
+
+
+## [0.51.3](https://github.com/ifdotpy/layr/compare/v0.51.2...v0.51.3) (2026-11-21)
+
+
+### Bug Fixes
+
+* **status:** Honor --no-renames and print porcelain for a bare -z
+* Raise the soft open files limit at start
+* **overlayfs:** Retry a busy unmount for up to 2 s
+* **remote:** Allow clock skew in the gateway session challenge
+
+
+### Performance Improvements
+
+* **merge:** Scan for conflict markers in bytes and stop at the first pair
+* **status:** Group untracked folders by path ancestors in status and ls-files
+* **save:** Skip redundant named cache comparisons
+
 ## [0.51.1](https://github.com/ifdotpy/layr/compare/v0.51.0...v0.51.1) (2026-11-21)
 
 
