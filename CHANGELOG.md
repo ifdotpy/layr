@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.52.0](https://github.com/ifdotpy/layr/compare/v0.51.7...v0.52.0) (2026-11-22)
+
+
+### Features
+
+* **git:** keep the files of the git history once, in the object store
+
+
+### Bug Fixes
+
+* **layrfs:** keep the far patch tests below the file size limit of a check
+* **git:** keep the index of a first export again, and test migrate on snapshot storage
+
+
 ## [0.51.7](https://github.com/ifdotpy/layr/compare/v0.51.6...v0.51.7) (2026-11-22)
 
 
