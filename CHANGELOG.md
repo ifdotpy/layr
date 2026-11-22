@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.51.6](https://github.com/ifdotpy/layr/compare/v0.51.5...v0.51.6) (2026-11-22)
+
+
+### Performance Improvements
+
+* **store:** Check fresh state IDs with a set when importing records
+
+
+## [0.51.5](https://github.com/ifdotpy/layr/compare/v0.51.4...v0.51.5) (2026-11-22)
+
+
+### Performance Improvements
+
+* **status:** Read each overlay, state tree and recent automatic state once when planning overlaps
+
 ## [0.51.1](https://github.com/ifdotpy/layr/compare/v0.51.0...v0.51.1) (2026-11-21)
 
 
