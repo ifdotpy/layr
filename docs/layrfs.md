@@ -7,7 +7,9 @@ as the real tool's; when it cannot be the same, the real tool runs.
 
 This is the first part of the LayrFS design: the index and the tool substitution, over the normal
 folder of a line. The virtual folder for agent lines (an FSKit or FUSE view of the same index,
-with changes in memory) comes later and uses the same server.
+with changes in memory) comes later and uses the same server. A measured Linux FUSE prototype
+of that view, served without root: [layrfs-fuse.md](layrfs-fuse.md). In such a view, `layr tool rg|find`
+asks the view's own server, which keeps this index of the view and reads the backing files.
 
 ## Use it
 

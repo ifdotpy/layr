@@ -38,6 +38,11 @@ impl Kind {
     }
 }
 
+/// Where the bytes of an entry are, for a tree whose files are not read through its root (the
+/// FUSE view of a line, docs/layrfs-fuse.md: the backing blob or upper file). None: read the path
+/// below the root.
+pub type ContentFn = std::sync::Arc<dyn Fn(&[u8]) -> Option<PathBuf> + Send + Sync>;
+
 #[derive(Default)]
 pub struct Tree {
     /// Every entry below the root (the root itself is not a key).
@@ -57,6 +62,7 @@ pub struct Tree {
     /// absent. A refresh of the path clears the entry when the path can be read again.
     pub unreadable: BTreeMap<Vec<u8>, String>,
     pub overlay: Option<Overlay>,
+    pub content_of: Option<ContentFn>,
 }
 
 /// The two folders of a virtual line and what the index knows of the upper one. The lower tree
@@ -383,34 +389,45 @@ fn raw_walker(root: &Path) -> ignore::WalkBuilder {
 impl Tree {
     /// Build the index of `root` with parallel walks.
     pub fn build(root: &Path) -> Tree {
+        Tree::build_from(root, None)
+    }
+
+    /// Build the index of `root`; `known` gives every entry and the stamps when the caller has
+    /// them (the FUSE view knows its tree), so only ripgrep's walk reads `root`.
+    pub fn build_from(root: &Path, known: Option<(Vec<(Vec<u8>, Kind)>, Vec<(Vec<u8>, Stamp)>)>) -> Tree {
         let all = Mutex::new(Vec::new());
         let stamps = Mutex::new(Vec::new());
         let failed = Mutex::new(Vec::new());
-        raw_walker(root).build_parallel().run(|| {
-            let mut local = Batch { out: &all, items: Vec::new() };
-            let mut times = Batch { out: &stamps, items: Vec::new() };
-            let mut errors = Batch { out: &failed, items: Vec::new() };
-            Box::new(move |e| {
-                let e = match e {
-                    Ok(e) => Ok(e),
-                    Err(err) => Err(walk_error(root, &err).map(|x| errors.push(x))),
-                };
-                if let Ok(e) = e {
-                    if let (Ok(rel), Some(ft)) = (e.path().strip_prefix(root), e.file_type()) {
-                        let k = key(rel);
-                        if ft.is_dir() || is_rules(key_name(&k)) {
-                            if let Ok(meta) = e.metadata() {
-                                times.push((k.clone(), stamp_of(&meta)));
+        if let Some((a, st)) = known {
+            *all.lock().unwrap() = a;
+            *stamps.lock().unwrap() = st;
+        } else {
+            raw_walker(root).build_parallel().run(|| {
+                let mut local = Batch { out: &all, items: Vec::new() };
+                let mut times = Batch { out: &stamps, items: Vec::new() };
+                let mut errors = Batch { out: &failed, items: Vec::new() };
+                Box::new(move |e| {
+                    let e = match e {
+                        Ok(e) => Ok(e),
+                        Err(err) => Err(walk_error(root, &err).map(|x| errors.push(x))),
+                    };
+                    if let Ok(e) = e {
+                        if let (Ok(rel), Some(ft)) = (e.path().strip_prefix(root), e.file_type()) {
+                            let k = key(rel);
+                            if ft.is_dir() || is_rules(key_name(&k)) {
+                                if let Ok(meta) = e.metadata() {
+                                    times.push((k.clone(), stamp_of(&meta)));
+                                }
+                            }
+                            if e.depth() > 0 {
+                                local.push((k, Kind::of(ft)));
                             }
                         }
-                        if e.depth() > 0 {
-                            local.push((k, Kind::of(ft)));
-                        }
                     }
-                }
-                ignore::WalkState::Continue
-            })
-        });
+                    ignore::WalkState::Continue
+                })
+            });
+        }
         let found = Mutex::new(Vec::new());
         rg_walker(root).build_parallel().run(|| {
             let mut local = Batch { out: &found, items: Vec::new() };
@@ -444,13 +461,21 @@ impl Tree {
                 walked.insert(k);
             }
         }
+        let mut stamps: BTreeMap<Vec<u8>, Stamp> = stamps.into_inner().unwrap().into_iter().collect();
+        // `.git/info/exclude` applies to the walk too: without its time here, the first query
+        // finds it "changed" and rebuilds the whole index.
+        let exclude = key(Path::new(".git/info/exclude"));
+        if let Ok(m) = std::fs::symlink_metadata(root.join(".git/info/exclude")) {
+            stamps.insert(exclude, stamp_of(&m));
+        }
         Tree {
             all: all.into_inner().unwrap().into_iter().collect(),
             visible,
             walked,
-            stamps: stamps.into_inner().unwrap().into_iter().collect(),
+            stamps,
             unreadable: failed.into_inner().unwrap().into_iter().collect(),
             overlay: None,
+            content_of: None,
         }
     }
 
@@ -575,6 +600,13 @@ impl Tree {
         }
     }
 
+    /// Walk the whole tree again; the reader of file contents stays.
+    fn rebuild(&mut self, root: &Path) {
+        let content_of = self.content_of.take();
+        *self = Tree::build(root);
+        self.content_of = content_of;
+    }
+
     /// Bring the index up to date for the changed paths (root-relative). A changed ignore file
     /// refreshes its folder; a changed `.git/info/exclude` refreshes the whole tree.
     pub fn refresh(&mut self, root: &Path, changed: &[PathBuf]) {
@@ -582,7 +614,7 @@ impl Tree {
         for rel in changed {
             let name = rel.file_name().map(|n| n.as_bytes()).unwrap_or(b"");
             if rel == Path::new(".git/info/exclude") || rel.as_os_str().is_empty() {
-                *self = Tree::build(root);
+                self.rebuild(root);
                 return;
             }
             if matches!(name, b".gitignore" | b".ignore" | b".rgignore") {
@@ -603,7 +635,7 @@ impl Tree {
         }
         for t in kept {
             if t.as_os_str().is_empty() {
-                *self = Tree::build(root);
+                self.rebuild(root);
                 return;
             }
             self.refresh_one(root, &t);
@@ -741,6 +773,9 @@ impl Tree {
 
     /// The file to read for the entry at `k`, below `root` (the mount of a virtual line).
     pub fn content(&self, root: &Path, k: &[u8]) -> PathBuf {
+        if let Some(p) = self.content_of.as_ref().and_then(|f| f(k)) {
+            return p;
+        }
         match &self.overlay {
             Some(o) => o.content(k),
             None => root.join(rel_path(k)),
@@ -1110,6 +1145,4 @@ mod tests {
         same(&t, "after changes");
         let _ = std::fs::remove_dir_all(&d);
     }
-
-
 }

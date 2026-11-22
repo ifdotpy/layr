@@ -31,6 +31,7 @@ mod diff;
 mod disk;
 mod errors;
 mod free;
+mod fast_cache;
 #[cfg(any(test, all(target_os = "linux", not(feature = "overlayfs"))))]
 mod fs_candidates;
 #[cfg(test)]
@@ -48,6 +49,7 @@ pub(crate) fn test_runs_as_root() -> bool {
 }
 mod fsutil;
 mod gitbridge;
+mod gitpack;
 mod ids;
 use layr_store::http;
 #[cfg(target_os = "macos")]

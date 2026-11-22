@@ -1,0 +1,29 @@
+#!/bin/bash
+# Item 3: switch between two commits that differ in N files: plain git, git in a fast line,
+# layr reset --hard, and the view's goto (the tree changes, no file is written).
+set -u
+eval "$(~/gitview/it.sh env)"
+export GIT_CONFIG_GLOBAL=/dev/null LAYR_AUTHOR_NAME=GV LAYR_AUTHOR_EMAIL=gv@example.invalid
+export GIT_AUTHOR_NAME=Dev GIT_AUTHOR_EMAIL=dev@example.invalid GIT_COMMITTER_NAME=Dev GIT_COMMITTER_EMAIL=dev@example.invalid
+L=$LAYR; LINES=$LAYR_ROOT/projects/gvkernel/lines; n=ck$$; N=${1:-2000}; P=$HOME/gitview/kernel-plain
+now() { date +%s%N; }
+t() { local name=$1; shift; local s=$(now); "$@" >/dev/null 2>/tmp/ck.err; local rc=$?; printf '%-34s %7d ms rc=%s\n' "$name" $(( ($(now)-s)/1000000 )) $rc; [ $rc = 0 ] || head -2 /tmp/ck.err; }
+wait_head() { for i in $(seq 200); do [ "$(git rev-parse HEAD)" = "$($L rev-parse --git head 2>/dev/null)" ] && return; sleep 0.05; done; echo "head did not follow" >&2; }
+FILES=$(cd ~/gitview/kernel-src && git ls-files '*.c' | awk -v n=$N 'NR%int(60000/n)==1' | head -$N)
+echo "files changed between the two commits: $(echo $FILES | wc -w)"
+# plain git
+cd $P; git checkout -q -B base; for f in $FILES; do printf '/* big */\n' >> $f; done; git commit -q -am big; git branch -f big; git reset -q --hard HEAD~1
+for W in 1 8 32; do t "plain: git checkout big ($W)" git -c checkout.workers=$W checkout -q big; t "plain: git checkout base ($W)" git -c checkout.workers=$W checkout -q base; done
+git branch -q -D big
+# fast line
+cd ~/gitview/kernel-src; $L line new $n --fast -q || exit 1; cd $LINES/$n
+git status --porcelain >/dev/null
+base=$($L rev-parse head)
+for f in $FILES; do printf '/* big */\n' >> $f; done; git commit -q -am big; wait_head
+big=$($L rev-parse head); git branch -f big; git checkout -q -b base HEAD~1; wait_head
+for W in 1 8 32; do
+  t "fast: git checkout big ($W)" git -c checkout.workers=$W checkout -q big; wait_head
+  t "fast: git checkout base ($W)" git -c checkout.workers=$W checkout -q base; wait_head
+done
+cd ~/gitview/kernel-src; $L line delete -D --discard $n -q >/dev/null 2>&1
+echo load $(cut -d" " -f1 /proc/loadavg)

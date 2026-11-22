@@ -281,20 +281,8 @@ fn handle(server: &Arc<Server>, sock: &UnixStream, socket: &Path) -> Result<()> 
             let scope = super::index::key(&cwd);
             // The comparison and the reading of the index happen under one lock: a rebuild
             // that replaces the tree in between would answer from a walk older than the change.
-            let plan = |tree: &Tree, out: &mut FrameWriter| -> (Outcome, Option<rg::Search>) {
-                if let Some((path, error)) = tree.unreadable.iter().next() {
-                    return (Outcome::Fallback(format!("unreadable indexed path {path:?}: {error}")), None);
-                }
-                match req.get("tool").and_then(|v| v.as_str()) {
-                    Some("rg") => match rg::plan(&root, &cwd, stdin_readable, &args, tree, out) {
-                        Ok(rg::Step::Done(code)) => (Outcome::Done(code), None),
-                        Ok(rg::Step::Search(s)) => (Outcome::Done(0), Some(s)),
-                        Err(why) => (Outcome::Fallback(why), None),
-                    },
-                    Some("find") => (find::run(&cwd, &args, tree, out), None),
-                    _ => (Outcome::Fallback("unknown tool".into()), None),
-                }
-            };
+            let tool = req.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+            let plan = |tree: &Tree, out: &mut FrameWriter| plan_tool(tool, &root, &cwd, stdin_readable, &args, tree, out);
             let not_ready = |st: &State| match st {
                 State::Ready(_) => None,
                 State::Building { .. } => Some("the index is being built".to_string()),
@@ -393,10 +381,35 @@ fn handle(server: &Arc<Server>, sock: &UnixStream, socket: &Path) -> Result<()> 
     }
 }
 
-fn root_cwd(req: &serde_json::Value) -> Result<PathBuf> {
+/// Answer one `rg` or `find` call from `tree`: the outcome, and the content search that runs
+/// after the index is released. Shared by this server and the FUSE view (`super::view`).
+pub(super) fn plan_tool(
+    tool: &str,
+    root: &Path,
+    cwd: &Path,
+    stdin_readable: bool,
+    args: &[String],
+    tree: &Tree,
+    out: &mut dyn std::io::Write,
+) -> (Outcome, Option<rg::Search>) {
+    if let Some((path, error)) = tree.unreadable.iter().next() {
+        return (Outcome::Fallback(format!("unreadable indexed path {path:?}: {error}")), None);
+    }
+    match tool {
+        "rg" => match rg::plan(root, cwd, stdin_readable, args, tree, out) {
+            Ok(rg::Step::Done(code)) => (Outcome::Done(code), None),
+            Ok(rg::Step::Search(s)) => (Outcome::Done(0), Some(s)),
+            Err(why) => (Outcome::Fallback(why), None),
+        },
+        "find" => (find::run(cwd, args, tree, out), None),
+        _ => (Outcome::Fallback("unknown tool".into()), None),
+    }
+}
+
+pub(super) fn root_cwd(req: &serde_json::Value) -> Result<PathBuf> {
     Ok(PathBuf::from(req.get("cwd").and_then(|v| v.as_str()).context("missing cwd")?))
 }
 
-fn root_rel(root: &Path, cwd: &Path) -> Result<PathBuf> {
+pub(super) fn root_rel(root: &Path, cwd: &Path) -> Result<PathBuf> {
     Ok(cwd.strip_prefix(root).context("the working folder is outside the tree")?.to_path_buf())
 }

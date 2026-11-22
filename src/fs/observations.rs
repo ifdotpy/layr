@@ -57,6 +57,15 @@ pub(crate) fn validated_read<T>(
     if matches!(observations.read_policy(), ReadPolicy::Capture) {
         return Ok(None);
     }
+    // Only layr writes the shadow of a fast line: nothing changes it during the read.
+    #[cfg(target_os = "macos")]
+    let roots: Vec<&Path> = roots.iter().copied().filter(|root| crate::views::known_of(root).is_none()).collect();
+    #[cfg(target_os = "macos")]
+    if roots.is_empty() {
+        return read().map(Some);
+    }
+    #[cfg(target_os = "macos")]
+    let roots = roots.as_slice();
     validated_read_with(observations, roots, selection, read)
 }
 fn validated_read_with<T>(

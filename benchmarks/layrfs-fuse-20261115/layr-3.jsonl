@@ -1,0 +1,55 @@
+{"tree":"layr","backend":"fuse","step":"line new","ms":35}
+{"tree":"layr","backend":"fuse","step":"line delete (clean)","ms":25}
+{"tree":"layr","backend":"fuse","step":"tool index ready","ms":102}
+{"tree":"layr","backend":"fuse","step":"git status (cold)","ms":296}
+{"tree":"layr","backend":"fuse","step":"git status (warm)","ms":18}
+{"tree":"layr","backend":"fuse","step":"git status, no fsmonitor (warm)","ms":14}
+{"tree":"layr","backend":"fuse","step":"rg -l TODO (first)","ms":45}
+{"tree":"layr","backend":"fuse","step":"rg -l TODO (warm)","ms":34}
+{"tree":"layr","backend":"fuse","step":"layr tool rg -l TODO (warm)","ms":20}
+{"tree":"layr","backend":"fuse","step":"find -type f (warm)","ms":10}
+{"tree":"layr","backend":"fuse","step":"layr tool find -type f (warm)","ms":9}
+{"tree":"layr","backend":"fuse","step":"edit 10 files","ms":10}
+{"tree":"layr","backend":"fuse","step":"save 10","ms":13,"tree":"05dca141c9ddf053cb8665c36105b4454858d726353692377abc2ee3f0ba06ab"}
+{"tree":"layr","backend":"fuse","step":"edit 10000 files (create)","ms":6655}
+{"tree":"layr","backend":"fuse","step":"save 10000","ms":381,"tree":"8cb4aa5ff86e9f84ca17f49b9a1dd351a5592bca964006e9825b270d6aa8c8d9"}
+{"tree":"layr","backend":"fuse","step":"line delete (10010 changes)","ms":26}
+{"tree":"layr","backend":"fuse","step":"cargo build (full)","ms":65068}
+{"tree":"layr","backend":"fuse","step":"cargo build (touch main.rs)","ms":6055}
+{"tree":"layr","backend":"fuse","step":"cargo build (edit views.rs)","ms":284}
+{"tree":"layr","backend":"btrfs","step":"line new","ms":18}
+{"tree":"layr","backend":"btrfs","step":"line delete (clean)","ms":13}
+{"tree":"layr","backend":"btrfs","step":"tool index ready","ms":81}
+{"tree":"layr","backend":"btrfs","step":"git status (cold)","ms":179}
+{"tree":"layr","backend":"btrfs","step":"git status (warm)","ms":10}
+{"tree":"layr","backend":"btrfs","step":"rg -l TODO (first)","ms":24}
+{"tree":"layr","backend":"btrfs","step":"rg -l TODO (warm)","ms":12}
+{"tree":"layr","backend":"btrfs","step":"layr tool rg -l TODO (warm)","ms":11}
+{"tree":"layr","backend":"btrfs","step":"find -type f (warm)","ms":12}
+{"tree":"layr","backend":"btrfs","step":"layr tool find -type f (warm)","ms":12}
+{"tree":"layr","backend":"btrfs","step":"edit 10 files","ms":4}
+{"tree":"layr","backend":"btrfs","step":"save 10","ms":57,"tree":"b0d06b7cd89dd18f7e1db21a8f7b91da1bdf9cca0a87e9b8439d5aff4f45f010"}
+{"tree":"layr","backend":"btrfs","step":"edit 10000 files (create)","ms":1117}
+{"tree":"layr","backend":"btrfs","step":"save 10000","ms":1607,"tree":"cd12d6f619376ca67163f835d389ae86ae8d18fd3c9c74ddd002bcd7c29ba888"}
+{"tree":"layr","backend":"btrfs","step":"line delete (10010 changes)","ms":67}
+{"tree":"layr","backend":"btrfs","step":"cargo build (full)","ms":58819}
+{"tree":"layr","backend":"btrfs","step":"cargo build (touch main.rs)","ms":5708}
+{"tree":"layr","backend":"btrfs","step":"cargo build (edit views.rs)","ms":239}
+{"tree":"layr","backend":"overlay","step":"line new","ms":17}
+{"tree":"layr","backend":"overlay","step":"line delete (clean)","ms":22}
+{"tree":"layr","backend":"overlay","step":"tool index ready","ms":77}
+{"tree":"layr","backend":"overlay","step":"git status (cold)","ms":92}
+{"tree":"layr","backend":"overlay","step":"git status (warm)","ms":9}
+{"tree":"layr","backend":"overlay","step":"rg -l TODO (first)","ms":14}
+{"tree":"layr","backend":"overlay","step":"rg -l TODO (warm)","ms":12}
+{"tree":"layr","backend":"overlay","step":"layr tool rg -l TODO (warm)","ms":11}
+{"tree":"layr","backend":"overlay","step":"find -type f (warm)","ms":13}
+{"tree":"layr","backend":"overlay","step":"layr tool find -type f (warm)","ms":11}
+{"tree":"layr","backend":"overlay","step":"edit 10 files","ms":8}
+{"tree":"layr","backend":"overlay","step":"save 10","ms":15,"tree":"17eabe34015d08912e1f3ba03ba383991100363ba91cbd9799f4427de681839d"}
+{"tree":"layr","backend":"overlay","step":"edit 10000 files (create)","ms":1317}
+{"tree":"layr","backend":"overlay","step":"save 10000","ms":70,"tree":"5049e5d26d6937d3fe41d596f2b03f1d7f20ce4174b642f2dfadedfe4465a404"}
+{"tree":"layr","backend":"overlay","step":"line delete (10010 changes)","ms":863}
+{"tree":"layr","backend":"overlay","step":"cargo build (full)","ms":58606}
+{"tree":"layr","backend":"overlay","step":"cargo build (touch main.rs)","ms":5543}
+{"tree":"layr","backend":"overlay","step":"cargo build (edit views.rs)","ms":344}

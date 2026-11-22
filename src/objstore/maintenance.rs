@@ -141,7 +141,14 @@ pub fn maintain(p: &Project, mode: MaintenanceMode) -> Result<Option<layr_object
         store.clone_hook = Some(crate::sys::apfs_unseal_fd);
     }
     let limit = if periodic { MaintenanceLimit::PERIODIC } else { MaintenanceLimit::UNLIMITED };
-    let mut plan = store.plan_maintenance(&p.db.kept_state_ids()?, &hot_trees(p, &store)?, limit)?;
+    #[allow(unused_mut)]
+    let mut keep = p.db.kept_state_ids()?;
+    // The state under the changes of each fast line: its view reads unchanged files from it.
+    #[cfg(target_os = "linux")]
+    keep.extend(crate::views::fast_bases(p));
+    // The files that the git store reads from here (docs/git-on-objects.md) have no other copy.
+    let mapped = crate::gitpack::mapped_blobs(p)?;
+    let mut plan = store.plan_maintenance_keeping(&keep, &mapped, &hot_trees(p, &store)?, limit)?;
     if !matches!(mode, MaintenanceMode::Preview) {
         store.prune_planned(&plan)?;
     }
@@ -160,6 +167,10 @@ pub fn maintain(p: &Project, mode: MaintenanceMode) -> Result<Option<layr_object
         // Bodies that did not decode stay loose; gc reports them with the rest of the damage.
         let packed = store.repack_planned(&plan)?;
         plan.damaged.extend(packed.unreadable);
+        // A full run writes packs of an older block size (4 MiB) again (docs/objects.md).
+        if matches!(mode, MaintenanceMode::Run) {
+            plan.reblocked = store.reblock()?.reblocked;
+        }
         crate::fsutil::atomic_write(&stamp, now.to_string().as_bytes(), 0o600)?;
     }
     Ok(Some(plan))

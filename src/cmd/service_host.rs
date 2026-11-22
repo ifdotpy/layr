@@ -188,6 +188,7 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
     crate::trace::set_request_enabled(env.contains_key("LAYR_TRACE"));
     let _trace = crate::trace::span("command");
     crate::repo::begin_command();
+    crate::free::begin_command();
     crate::store::set_holder_command(&argv);
     crate::store::panic_point(argv.first().map_or("", String::as_str));
     let store = match Store::open(root) {
@@ -219,7 +220,12 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
                 }
                 code
             } else {
-                eprintln!("fatal: {e:#}");
+                // LAYR_ERROR_BACKTRACE=1 (with RUST_BACKTRACE=1): where the error came from.
+                if std::env::var_os("LAYR_ERROR_BACKTRACE").is_some() {
+                    eprintln!("fatal: {e:?}");
+                } else {
+                    eprintln!("fatal: {e:#}");
+                }
                 if disk_full(&e) {
                     eprintln!("{}", disk_full_hint(root));
                 }
@@ -272,6 +278,83 @@ const PERIODIC_CHECKS: &str = "periodic-checks.json";
 /// automatic states and the git store access stay with the root service.
 /// How old a state without an owner must be before the hourly pass frees it.
 const LEAK_AGE_MS: i64 = 3_600_000;
+
+/// Mount again every fast line of this machine whose server is gone. The hub (the service's
+/// first process) serves them: wait for it, and never start another.
+#[cfg(all(target_os = "linux", feature = "layrfs-fuse"))]
+fn remount_fast_lines(root: &Path, hub: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while UnixStream::connect(hub).is_err() {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("layr fast lines: the hub at {} does not answer; no line mounted again", hub.display());
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let Ok(store) = Store::open(root) else { return };
+    let names = store.project_names().unwrap_or_default();
+    drop(store);
+    for name in names {
+        let Ok(store) = Store::open(root) else { return };
+        let ctx = Ctx {
+            store,
+            caller: Caller::from_uid(0),
+            cwd: PathBuf::from("/"),
+            env: HashMap::new(),
+            author: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            captures: Default::default(),
+        };
+        let Ok(repo) = crate::repo::Repo::open(&ctx, &name) else { continue };
+        let Ok(lines) = repo.lines() else { continue };
+        for l in lines {
+            if l.machine != repo.p.store.machine.id || crate::views::fast_of(&repo, &l).is_none() {
+                continue;
+            }
+            if let Err(e) = crate::views::ensure_fast_mounted(&repo, &l) {
+                eprintln!("layr fast line ({name}/{}): {e:#}", l.name);
+            }
+        }
+        // The git store reads the files of its history from the object store (docs/git-on-objects.md).
+        if let Err(e) = crate::gitpack::ensure_mounted(&repo.p) {
+            eprintln!("layr git objects of {name}: not mounted: {e:#}");
+        }
+    }
+}
+
+/// Mount again the fast lines of `uid` whose mount is gone (macOS: an FSKit mount belongs to its user).
+#[cfg(target_os = "macos")]
+fn remount_fast_lines_of(root: &Path, uid: u32) {
+    let Ok(store) = Store::open(root) else { return };
+    let names = store.project_names().unwrap_or_default();
+    drop(store);
+    for name in names {
+        let Ok(store) = Store::open(root) else { return };
+        let ctx = Ctx {
+            store,
+            caller: Caller::from_uid(uid),
+            cwd: PathBuf::from("/"),
+            env: HashMap::new(),
+            author: Default::default(),
+            out: std::cell::RefCell::new(Box::new(std::io::sink())),
+            captures: Default::default(),
+        };
+        let Ok(repo) = crate::repo::Repo::open(&ctx, &name) else { continue };
+        let Ok(lines) = repo.lines() else { continue };
+        for l in lines.into_iter().filter(|l| l.owner == uid && crate::views::fast_of(&repo, l).is_some()) {
+            if let Err(e) = crate::views::ensure_fast_mounted(&repo, &l) {
+                eprintln!("layr fast line ({name}/{}): {e:#}", l.name);
+            }
+        }
+        // The folder of the git blobs of the object store (docs/git-on-objects.md), an FSKit
+        // mount of this user too.
+        if crate::gitpack::uses_folder(&repo.p.git_dir()) {
+            if let Err(e) = crate::gitpack::ensure_mounted(&repo.p) {
+                eprintln!("layr git objects of {name}: not mounted: {e:#}");
+            }
+        }
+    }
+}
 
 /// Test only (tests/t255-periodic-yields.sh): one automatic-state pass without a daemon.
 pub fn periodic_test(root: &Path) {
@@ -338,6 +421,12 @@ fn periodic(root: &Path, hourly: bool, user_mode: Option<u32>, manual_queue: boo
                 Err(error) => eprintln!("layr free ({name}): {error:#}"),
             }
         }
+        #[cfg(target_os = "linux")]
+        if hourly {
+            if let Err(error) = crate::views::sweep_fast(&repo, std::time::Duration::from_secs(24 * 3600), std::time::Duration::from_secs(600)) {
+                eprintln!("layr fast lines ({name}): {error:#}");
+            }
+        }
         if hourly && user_mode.is_none() {
             // Also repairs the git store of a project from an earlier layr, soon after a start.
             if let Ok(_lock) = repo.p.lock_maintenance() {
@@ -361,6 +450,14 @@ fn automatic_states(ctx: &Ctx, repo: &crate::repo::Repo, name: &str, now: i64) {
         if let Ok(lines) = repo.lines() {
             checks.retain(|id, _| lines.iter().any(|l| &l.id == id));
             for l in lines {
+                // A fast line whose server is gone reads as no folder: mount it first.
+                #[cfg(target_os = "linux")]
+                if l.machine == repo.p.store.machine.id && crate::views::fast_of(repo, &l).is_some() {
+                    if let Err(e) = crate::views::ensure_fast_mounted(repo, &l) {
+                        eprintln!("layr fast line ({name}/{}): {e:#}", l.name);
+                        continue;
+                    }
+                }
                 if l.machine != repo.p.store.machine.id || !repo.working(&l).exists() {
                     continue;
                 }
@@ -559,6 +656,9 @@ pub fn daemon(args: &[String]) -> Result<i32> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755))?;
     }
+    // A running service with fast lines hands them over: this one takes its place.
+    #[cfg(all(target_os = "linux", feature = "layrfs-fuse"))]
+    let take = if user_mode { Vec::new() } else { crate::layrfs::view::takeover(&sock)? };
     if sock.exists() {
         if UnixStream::connect(&sock).is_ok() {
             bail!("another layr service is running on {}", sock.display());
@@ -587,6 +687,49 @@ pub fn daemon(args: &[String]) -> Result<i32> {
     }
     crate::sys::catch_terminate()?;
     eprintln!("layr service: listening on {} (store {})", sock.display(), root.display());
+    // The user service (macOS, at login): the fast lines of its user whose mount is gone (a
+    // restart) are mounted again at once, in a child that the loop reaps.
+    #[cfg(target_os = "macos")]
+    if user_mode {
+        if let crate::sys::Fork::Child = crate::sys::fork()? {
+            remount_fast_lines_of(&root, own);
+            std::process::exit(0);
+        }
+    }
+    // Fast lines (LayrFS): this process stays as their FUSE server; the service loop runs in a
+    // child forked now, before any thread, so it stays single threaded and forks per request.
+    #[cfg(all(target_os = "linux", feature = "layrfs-fuse"))]
+    if !user_mode {
+        // The request processes find the hub next to this socket.
+        std::env::set_var("LAYR_SOCKET", &sock);
+        let hub = sock.parent().map(|d| d.join("layrfs-hub.sock")).context("socket folder")?;
+        let host = rustix::process::getpid();
+        match crate::sys::fork()? {
+            crate::sys::Fork::Parent(zygote) => {
+                drop(listener);
+                drop(registry_listeners);
+                return crate::layrfs::view::host(&hub, zygote, take);
+            }
+            crate::sys::Fork::Child => {
+                // The service loop: as before the fork.
+                crate::pools::mark_forking_parent();
+                crate::sys::catch_terminate()?;
+                // The service stops with its first process (a kill of the daemon's pid, as before
+                // the fork): SIGTERM, so running requests finish.
+                rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))?;
+                if rustix::process::getppid() != Some(host) {
+                    return Ok(0);
+                }
+                // Fast lines whose server is gone (a restart of the machine, a crash of the
+                // service) are mounted again at once, before a program reads an empty folder.
+                // A child does it, so the service answers meanwhile; the loop reaps it.
+                if let crate::sys::Fork::Child = crate::sys::fork()? {
+                    remount_fast_lines(&root, &hub);
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
     let mut last_hourly: i64 = 0;
     let mut last_daily: i64 = 0;
     let mut next = std::time::Instant::now() + std::time::Duration::from_secs(tick);

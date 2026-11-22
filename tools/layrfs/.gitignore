@@ -3,3 +3,4 @@ build-signed/
 build-unsigned.log
 build-signed.log
 LayrFSHost.xcodeproj/
+build-release/

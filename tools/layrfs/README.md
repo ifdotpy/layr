@@ -1,10 +1,12 @@
 # LayrFS: FSKit file system for virtual lines
 
-LayrFS mounts a directory at a mount point. It has two modes:
+LayrFS mounts a directory at a mount point. It has three modes:
 
 - Passthrough: it forwards every operation to the directory with POSIX calls (the first prototype, for FSKit cost).
 - Overlay: a directory with a `layrfs-view.conf` file mounts an upper folder over a read-only lower tree.
   Layr uses this mode for virtual lines (`layr line new <name> --view virtual`, see [docs/views.md](../../docs/views.md)).
+- Git pack: a directory with a `layrfs-gitpack.conf` file shows the git blobs of a project's object store as
+  read-only git packs, read from `layr fs gitpack serve` through named pipes (see [docs/git-on-objects.md](../../docs/git-on-objects.md)).
 
 It uses the macOS 27 (FSKit V3) handler protocols and records every operation.
 
@@ -22,6 +24,7 @@ Requirements: macOS 27.0 or later, Xcode 27.2, a paid Apple Developer team.
 | `LayrFS/OverlayVolume.swift` | `FSVolume` of the overlay mode. |
 | `LayrFS/LayrItem.swift` | `FSItem` subclass and the inode table. |
 | `LayrFS/LayrVolume.swift` | `FSVolume` with the V3 handlers. |
+| `LayrFS/GitPackVolume.swift` | `FSVolume` of the git pack mode. |
 | `LayrFS/Stats.swift` | Counters, latency histogram, open log, JSON dump, and config. |
 | `selftest/` | Runs the backend, the item table and the overlay against temp trees. It needs no mount and no signing. |
 | `tools/fsevents-watch.swift` | FSEvents probe that `bench.sh` uses. |
@@ -84,7 +87,19 @@ merged view with the mirror: content, modes, links, IDs, whiteouts, and a reload
 4. Open System Settings > General > Login Items & Extensions > File System Extensions. The host app button also opens this pane.
 5. Turn on LayrFS.
 
+Step 3 lists the extension also when it is off. `LayrFSHost --status` (the binary in
+`Contents/MacOS`) prints `enabled`, `disabled` or `missing`; `layr line new --fast` uses it.
+`LayrFSHost --open-settings` opens the pane.
+
 An app update stops the extension and so all its mounts. Unmount before you replace the app.
+
+## Release
+
+- `release.sh`: the app alone, Developer ID signature and notarization, as a zip. `TEAM_ID` is
+  the team; without `NOTARY_PROFILE`, Xcode notarizes with its signed-in account.
+- `packaging/macos/build-pkg.sh` (from the repository root): the installer of layr and this app,
+  signed and notarized. It needs the certificates and the notarytool credentials in its header.
+  `UNSIGNED=1` makes a package without signatures, for a check of the layout.
 
 Update an installed and enabled app only in place: `./reinstall-inplace.sh` builds, signs, and copies over the
 installed app with `ditto`. Do not delete the installed app, do not unregister it (`lsregister -u`), and do not

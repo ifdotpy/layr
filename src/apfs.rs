@@ -158,7 +158,7 @@ pub(crate) fn scan_shared(root: &Path, data: bool) -> Result<Arc<BTreeMap<String
     if let Some(scan) = saved.as_ref().and_then(|f| decoded(f)) {
         return Ok(scan);
     }
-    let _t = crate::trace::span("APFS bulk scan");
+    let _t = crate::trace::span(format!("APFS bulk scan {}", root.display()));
     let mut out = BTreeMap::new();
     out.insert(String::new(), entry_of_metadata(&m, root, true)?);
     if m.is_dir() {

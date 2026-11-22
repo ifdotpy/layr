@@ -123,7 +123,10 @@ impl Src for Source {
     fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
         match self {
             Self::Objects(objects) => Some(objects),
-            _ => None,
+            // A native copy whose objects are known (`object_tree::register`).
+            Self::Folder(native) => crate::object_tree::registered(&native.path),
+            #[cfg(target_os = "macos")]
+            Self::Layers(_) => None,
         }
     }
 }

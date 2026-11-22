@@ -1,0 +1,168 @@
+{"kind":"outside","step":"git status (warm)","ms":525,"round":1,"load":12.68}
+{"kind":"outside","step":"git status (warm 2)","ms":95,"round":1,"load":12.68}
+{"kind":"outside","step":"git status after 10 edits","ms":238,"round":1,"load":12.68}
+{"kind":"outside","step":"git diff --stat","ms":79,"round":1,"load":12.68}
+{"kind":"outside","step":"git add -u","ms":145,"round":1,"load":12.68}
+{"kind":"outside","step":"git commit (10 files)","ms":172,"round":1,"load":12.68}
+{"kind":"outside","step":"git log -n 20","ms":14,"round":1,"load":12.68}
+{"kind":"outside","step":"git show --stat HEAD","ms":14,"round":1,"load":12.68}
+{"kind":"outside","step":"git checkout -b + back","ms":336,"round":1,"load":12.68}
+{"kind":"outside","step":"git branch -D","ms":11,"round":1,"load":12.68}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":412,"round":1,"load":12.68}
+{"kind":"outside","step":"git gc --auto","ms":10,"round":1,"load":12.68}
+{"kind":"inside","step":"git status (warm)","ms":351,"round":1,"load":12.68}
+{"kind":"inside","step":"git status (warm 2)","ms":184,"round":1,"load":12.68}
+{"kind":"inside","step":"git status after 10 edits","ms":196,"round":1,"load":12.68}
+{"kind":"inside","step":"git diff --stat","ms":60,"round":1,"load":12.68}
+{"kind":"inside","step":"git add -u","ms":202,"round":1,"load":12.68}
+{"kind":"inside","step":"git commit (10 files)","ms":275,"round":1,"load":12.70}
+{"kind":"inside","step":"git log -n 20","ms":10,"round":1,"load":12.70}
+{"kind":"inside","step":"git show --stat HEAD","ms":22,"round":1,"load":12.70}
+{"kind":"inside","step":"git checkout -b + back","ms":353,"round":1,"load":12.70}
+{"kind":"inside","step":"git branch -D","ms":14,"round":1,"load":12.70}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":369,"round":1,"load":12.70}
+{"kind":"inside","step":"git gc --auto","ms":8,"round":1,"load":12.70}
+{"kind":"outside","step":"git status (warm)","ms":188,"round":2,"load":12.70}
+{"kind":"outside","step":"git status (warm 2)","ms":190,"round":2,"load":12.70}
+{"kind":"outside","step":"git status after 10 edits","ms":161,"round":2,"load":12.70}
+{"kind":"outside","step":"git diff --stat","ms":52,"round":2,"load":12.70}
+{"kind":"outside","step":"git add -u","ms":151,"round":2,"load":12.70}
+{"kind":"outside","step":"git commit (10 files)","ms":155,"round":2,"load":12.70}
+{"kind":"outside","step":"git log -n 20","ms":10,"round":2,"load":12.70}
+{"kind":"outside","step":"git show --stat HEAD","ms":11,"round":2,"load":12.70}
+{"kind":"outside","step":"git checkout -b + back","ms":333,"round":2,"load":12.70}
+{"kind":"outside","step":"git branch -D","ms":8,"round":2,"load":12.70}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":260,"round":2,"load":12.70}
+{"kind":"outside","step":"git gc --auto","ms":6,"round":2,"load":12.70}
+{"kind":"inside","step":"git status (warm)","ms":238,"round":2,"load":12.70}
+{"kind":"inside","step":"git status (warm 2)","ms":169,"round":2,"load":12.70}
+{"kind":"inside","step":"git status after 10 edits","ms":154,"round":2,"load":12.70}
+{"kind":"inside","step":"git diff --stat","ms":79,"round":2,"load":12.70}
+{"kind":"inside","step":"git add -u","ms":257,"round":2,"load":12.70}
+{"kind":"inside","step":"git commit (10 files)","ms":273,"round":2,"load":12.70}
+{"kind":"inside","step":"git log -n 20","ms":20,"round":2,"load":12.70}
+{"kind":"inside","step":"git show --stat HEAD","ms":19,"round":2,"load":12.70}
+{"kind":"inside","step":"git checkout -b + back","ms":604,"round":2,"load":12.70}
+{"kind":"inside","step":"git branch -D","ms":10,"round":2,"load":12.70}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":327,"round":2,"load":12.70}
+{"kind":"inside","step":"git gc --auto","ms":7,"round":2,"load":12.70}
+{"kind":"outside","step":"git status (warm)","ms":215,"round":3,"load":12.73}
+{"kind":"outside","step":"git status (warm 2)","ms":266,"round":3,"load":12.73}
+{"kind":"outside","step":"git status after 10 edits","ms":216,"round":3,"load":12.73}
+{"kind":"outside","step":"git diff --stat","ms":84,"round":3,"load":12.73}
+{"kind":"outside","step":"git add -u","ms":131,"round":3,"load":12.73}
+{"kind":"outside","step":"git commit (10 files)","ms":132,"round":3,"load":12.73}
+{"kind":"outside","step":"git log -n 20","ms":8,"round":3,"load":12.73}
+{"kind":"outside","step":"git show --stat HEAD","ms":14,"round":3,"load":12.73}
+{"kind":"outside","step":"git checkout -b + back","ms":334,"round":3,"load":12.73}
+{"kind":"outside","step":"git branch -D","ms":8,"round":3,"load":12.73}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":253,"round":3,"load":12.73}
+{"kind":"outside","step":"git gc --auto","ms":7,"round":3,"load":12.73}
+{"kind":"inside","step":"git status (warm)","ms":215,"round":3,"load":12.73}
+{"kind":"inside","step":"git status (warm 2)","ms":308,"round":3,"load":12.73}
+{"kind":"inside","step":"git status after 10 edits","ms":378,"round":3,"load":12.73}
+{"kind":"inside","step":"git diff --stat","ms":53,"round":3,"load":12.73}
+{"kind":"inside","step":"git add -u","ms":148,"round":3,"load":12.73}
+{"kind":"inside","step":"git commit (10 files)","ms":292,"round":3,"load":12.73}
+{"kind":"inside","step":"git log -n 20","ms":12,"round":3,"load":12.73}
+{"kind":"inside","step":"git show --stat HEAD","ms":19,"round":3,"load":12.73}
+{"kind":"inside","step":"git checkout -b + back","ms":604,"round":3,"load":12.73}
+{"kind":"inside","step":"git branch -D","ms":19,"round":3,"load":12.73}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":669,"round":3,"load":12.73}
+{"kind":"inside","step":"git gc --auto","ms":7,"round":3,"load":12.73}
+{"kind":"outside","step":"git status (warm)","ms":210,"round":4,"load":12.73}
+{"kind":"outside","step":"git status (warm 2)","ms":156,"round":4,"load":12.73}
+{"kind":"outside","step":"git status after 10 edits","ms":236,"round":4,"load":12.83}
+{"kind":"outside","step":"git diff --stat","ms":62,"round":4,"load":12.83}
+{"kind":"outside","step":"git add -u","ms":235,"round":4,"load":12.83}
+{"kind":"outside","step":"git commit (10 files)","ms":434,"round":4,"load":12.83}
+{"kind":"outside","step":"git log -n 20","ms":39,"round":4,"load":12.83}
+{"kind":"outside","step":"git show --stat HEAD","ms":53,"round":4,"load":12.83}
+{"kind":"outside","step":"git checkout -b + back","ms":608,"round":4,"load":12.83}
+{"kind":"outside","step":"git branch -D","ms":99,"round":4,"load":12.83}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":310,"round":4,"load":12.83}
+{"kind":"outside","step":"git gc --auto","ms":6,"round":4,"load":12.83}
+{"kind":"inside","step":"git status (warm)","ms":314,"round":4,"load":12.83}
+{"kind":"inside","step":"git status (warm 2)","ms":200,"round":4,"load":12.83}
+{"kind":"inside","step":"git status after 10 edits","ms":163,"round":4,"load":12.83}
+{"kind":"inside","step":"git diff --stat","ms":62,"round":4,"load":12.83}
+{"kind":"inside","step":"git add -u","ms":252,"round":4,"load":12.83}
+{"kind":"inside","step":"git commit (10 files)","ms":257,"round":4,"load":12.83}
+{"kind":"inside","step":"git log -n 20","ms":10,"round":4,"load":12.83}
+{"kind":"inside","step":"git show --stat HEAD","ms":19,"round":4,"load":12.83}
+{"kind":"inside","step":"git checkout -b + back","ms":346,"round":4,"load":12.83}
+{"kind":"inside","step":"git branch -D","ms":12,"round":4,"load":12.83}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":460,"round":4,"load":12.83}
+{"kind":"inside","step":"git gc --auto","ms":7,"round":4,"load":12.83}
+{"kind":"outside","step":"git status (warm)","ms":171,"round":5,"load":12.83}
+{"kind":"outside","step":"git status (warm 2)","ms":109,"round":5,"load":12.83}
+{"kind":"outside","step":"git status after 10 edits","ms":144,"round":5,"load":12.84}
+{"kind":"outside","step":"git diff --stat","ms":53,"round":5,"load":12.84}
+{"kind":"outside","step":"git add -u","ms":144,"round":5,"load":12.84}
+{"kind":"outside","step":"git commit (10 files)","ms":147,"round":5,"load":12.84}
+{"kind":"outside","step":"git log -n 20","ms":9,"round":5,"load":12.84}
+{"kind":"outside","step":"git show --stat HEAD","ms":11,"round":5,"load":12.84}
+{"kind":"outside","step":"git checkout -b + back","ms":258,"round":5,"load":12.84}
+{"kind":"outside","step":"git branch -D","ms":8,"round":5,"load":12.84}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":222,"round":5,"load":12.84}
+{"kind":"outside","step":"git gc --auto","ms":7,"round":5,"load":12.84}
+{"kind":"inside","step":"git status (warm)","ms":145,"round":5,"load":12.84}
+{"kind":"inside","step":"git status (warm 2)","ms":158,"round":5,"load":12.84}
+{"kind":"inside","step":"git status after 10 edits","ms":145,"round":5,"load":12.84}
+{"kind":"inside","step":"git diff --stat","ms":46,"round":5,"load":12.84}
+{"kind":"inside","step":"git add -u","ms":137,"round":5,"load":12.84}
+{"kind":"inside","step":"git commit (10 files)","ms":193,"round":5,"load":12.84}
+{"kind":"inside","step":"git log -n 20","ms":9,"round":5,"load":12.84}
+{"kind":"inside","step":"git show --stat HEAD","ms":17,"round":5,"load":12.84}
+{"kind":"inside","step":"git checkout -b + back","ms":283,"round":5,"load":12.84}
+{"kind":"inside","step":"git branch -D","ms":11,"round":5,"load":12.84}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":266,"round":5,"load":12.84}
+{"kind":"inside","step":"git gc --auto","ms":7,"round":5,"load":12.84}
+{"kind":"outside","step":"git status (warm)","ms":130,"round":6,"load":12.84}
+{"kind":"outside","step":"git status (warm 2)","ms":108,"round":6,"load":12.84}
+{"kind":"outside","step":"git status after 10 edits","ms":115,"round":6,"load":12.84}
+{"kind":"outside","step":"git diff --stat","ms":45,"round":6,"load":12.84}
+{"kind":"outside","step":"git add -u","ms":109,"round":6,"load":12.84}
+{"kind":"outside","step":"git commit (10 files)","ms":121,"round":6,"load":12.84}
+{"kind":"outside","step":"git log -n 20","ms":8,"round":6,"load":12.84}
+{"kind":"outside","step":"git show --stat HEAD","ms":11,"round":6,"load":12.84}
+{"kind":"outside","step":"git checkout -b + back","ms":231,"round":6,"load":12.84}
+{"kind":"outside","step":"git branch -D","ms":8,"round":6,"load":12.84}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":198,"round":6,"load":12.84}
+{"kind":"outside","step":"git gc --auto","ms":6,"round":6,"load":12.84}
+{"kind":"inside","step":"git status (warm)","ms":128,"round":6,"load":12.84}
+{"kind":"inside","step":"git status (warm 2)","ms":129,"round":6,"load":12.84}
+{"kind":"inside","step":"git status after 10 edits","ms":121,"round":6,"load":12.84}
+{"kind":"inside","step":"git diff --stat","ms":44,"round":6,"load":12.84}
+{"kind":"inside","step":"git add -u","ms":125,"round":6,"load":12.84}
+{"kind":"inside","step":"git commit (10 files)","ms":168,"round":6,"load":12.84}
+{"kind":"inside","step":"git log -n 20","ms":9,"round":6,"load":12.84}
+{"kind":"inside","step":"git show --stat HEAD","ms":16,"round":6,"load":12.84}
+{"kind":"inside","step":"git checkout -b + back","ms":275,"round":6,"load":12.84}
+{"kind":"inside","step":"git branch -D","ms":10,"round":6,"load":12.84}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":244,"round":6,"load":12.45}
+{"kind":"inside","step":"git gc --auto","ms":7,"round":6,"load":12.45}
+{"kind":"outside","step":"git status (warm)","ms":118,"round":7,"load":12.45}
+{"kind":"outside","step":"git status (warm 2)","ms":106,"round":7,"load":12.45}
+{"kind":"outside","step":"git status after 10 edits","ms":109,"round":7,"load":12.45}
+{"kind":"outside","step":"git diff --stat","ms":41,"round":7,"load":12.45}
+{"kind":"outside","step":"git add -u","ms":107,"round":7,"load":12.45}
+{"kind":"outside","step":"git commit (10 files)","ms":119,"round":7,"load":12.45}
+{"kind":"outside","step":"git log -n 20","ms":7,"round":7,"load":12.45}
+{"kind":"outside","step":"git show --stat HEAD","ms":11,"round":7,"load":12.45}
+{"kind":"outside","step":"git checkout -b + back","ms":233,"round":7,"load":12.45}
+{"kind":"outside","step":"git branch -D","ms":7,"round":7,"load":12.45}
+{"kind":"outside","step":"git reset --hard HEAD~1","ms":199,"round":7,"load":12.45}
+{"kind":"outside","step":"git gc --auto","ms":6,"round":7,"load":12.45}
+{"kind":"inside","step":"git status (warm)","ms":152,"round":7,"load":12.45}
+{"kind":"inside","step":"git status (warm 2)","ms":127,"round":7,"load":12.45}
+{"kind":"inside","step":"git status after 10 edits","ms":130,"round":7,"load":12.45}
+{"kind":"inside","step":"git diff --stat","ms":39,"round":7,"load":12.45}
+{"kind":"inside","step":"git add -u","ms":140,"round":7,"load":12.45}
+{"kind":"inside","step":"git commit (10 files)","ms":219,"round":7,"load":12.45}
+{"kind":"inside","step":"git log -n 20","ms":8,"round":7,"load":12.45}
+{"kind":"inside","step":"git show --stat HEAD","ms":18,"round":7,"load":12.45}
+{"kind":"inside","step":"git checkout -b + back","ms":265,"round":7,"load":12.45}
+{"kind":"inside","step":"git branch -D","ms":10,"round":7,"load":12.45}
+{"kind":"inside","step":"git reset --hard HEAD~1","ms":241,"round":7,"load":12.45}
+{"kind":"inside","step":"git gc --auto","ms":8,"round":7,"load":12.45}

@@ -1,5 +1,6 @@
-// FSUnaryFileSystem: one FSPathURLResource becomes one volume: a passthrough volume, or the overlay
-// volume of a virtual line when the folder has a layrfs-view.conf file.
+// FSUnaryFileSystem: one FSPathURLResource becomes one volume: a passthrough volume, the overlay
+// volume of a virtual line when the folder has a layrfs-view.conf file, or the git pack volume when
+// it has a layrfs-gitpack.conf file.
 
 import CryptoKit
 import Foundation
@@ -51,7 +52,10 @@ final class LayrFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         let path = r.url.path
         do {
             let v: FSVolume
-            if ViewConfig.exists(resource: path) {
+            if GitPackConfig.exists(resource: path) {
+                // The git blobs of a project's object store (docs/git-on-objects.md).
+                v = try GitPackVolume(resource: r, config: try GitPackConfig.load(resource: path), volumeID: Self.uuid(for: path))
+            } else if ViewConfig.exists(resource: path) {
                 let view = try ViewConfig.load(resource: path)
                 let config = Config.load(taskOptions: opts, extra: view.pairs)
                 v = try OverlayVolume(resource: r, view: view, config: config, readOnly: readOnly, volumeID: Self.uuid(for: path))

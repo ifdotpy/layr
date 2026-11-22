@@ -126,6 +126,11 @@ impl Src for Path {
     fn folder(&self) -> Option<&Path> {
         Some(self)
     }
+    // A snapshot of a fast line: its objects are known (`object_tree::register`).
+    #[cfg(target_os = "linux")]
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
+        crate::object_tree::registered(self)
+    }
 }
 impl Src for PathBuf {
     fn at(&self, rel: &str) -> Result<PathBuf> {
@@ -134,6 +139,10 @@ impl Src for PathBuf {
     }
     fn folder(&self) -> Option<&Path> {
         Some(self)
+    }
+    #[cfg(target_os = "linux")]
+    fn objects(&self) -> Option<&crate::object_tree::ObjectTree> {
+        crate::object_tree::registered(self)
     }
 }
 
@@ -1307,14 +1316,21 @@ pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
     let source = names(src)?;
     for name in names(dst)? {
         if !source.contains(&name) {
-            rustix::fs::fremovexattr(dst, name.as_slice())?;
+            rustix::fs::fremovexattr(dst, name.as_slice())
+                .with_context(|| format!("remove the attribute {}", String::from_utf8_lossy(&name)))?;
         }
     }
     for name in source {
         let size = rustix::fs::fgetxattr_query(src, name.as_slice())?;
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name.as_slice(), value.as_mut_slice())?;
-        rustix::fs::fsetxattr(dst, name.as_slice(), &value[..size], rustix::fs::XattrFlags::empty())?;
+        match rustix::fs::fsetxattr(dst, name.as_slice(), &value[..size], rustix::fs::XattrFlags::empty()) {
+            Ok(()) => {}
+            // A LayrFS (FSKit) mount keeps the quarantine mark for its sandbox: a fast line's file
+            // cannot take one.
+            Err(rustix::io::Errno::PERM) if name == b"com.apple.quarantine" => {}
+            Err(e) => return Err(anyhow!(e)).with_context(|| format!("set the attribute {}", String::from_utf8_lossy(&name))),
+        }
     }
     Ok(())
 }

@@ -828,6 +828,8 @@ pub(crate) fn spawn_trash_emptier(dir: &Path) -> bool {
     std::process::Command::new(exe)
         .arg("__empty-trash")
         .arg(dir)
+        // Not the caller's folder: a line folder that is a mount (a fast line) must stay free to unmount.
+        .current_dir(dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

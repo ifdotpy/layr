@@ -1,0 +1,18 @@
+[package]
+name = "git-on-v2"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+rayon = "1"
+sha1 = "0.10"
+crc32fast = "1"
+fuser = { path = "../../vendor/fuser" }
+layr-objects = { path = "../../crates/layr-objects" }
+
+[profile.release]
+debug = 1

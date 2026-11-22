@@ -961,7 +961,11 @@ fn delete_cache_fixture(root: &Path) {
     #[cfg(all(target_os = "linux", feature = "overlayfs"))]
     let _ = std::fs::remove_dir_all(root);
     #[cfg(not(all(target_os = "linux", feature = "overlayfs")))]
-    crate::fs::remove(root).unwrap();
+    if let Err(e) = crate::fs::remove(root) {
+        // A user who is not root may not destroy a Btrfs subvolume when the file system is
+        // mounted without user_subvol_rm_allowed; the owner may still rmdir an empty one.
+        std::fs::remove_dir_all(root).unwrap_or_else(|r| panic!("{e:#}; then remove_dir_all: {r}"));
+    }
 }
 
 #[test]

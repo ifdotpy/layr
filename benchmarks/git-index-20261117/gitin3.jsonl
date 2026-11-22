@@ -1,0 +1,252 @@
+{"v":"base","kind":"outside","step":"git status (warm)","ms":167,"round":1}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":88,"round":1}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":135,"round":1}
+{"v":"base","kind":"outside","step":"git add -u","ms":151,"round":1}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":177,"round":1}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":256,"round":1}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":157,"round":1}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":144,"round":1}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":136,"round":1}
+{"v":"base","kind":"inside","step":"git add -u","ms":187,"round":1}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":206,"round":1}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":342,"round":1}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":97,"round":1}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":98,"round":1}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":83,"round":1}
+{"v":"split","kind":"outside","step":"git add -u","ms":77,"round":1}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":104,"round":1}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":200,"round":1}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":100,"round":1}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":92,"round":1}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":173,"round":1}
+{"v":"split","kind":"inside","step":"git add -u","ms":133,"round":1}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":164,"round":1}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":284,"round":1}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":98,"round":1}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":75,"round":1}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":91,"round":1}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":91,"round":1}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":109,"round":1}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":221,"round":1}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":132,"round":1}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":84,"round":1}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":95,"round":1}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":91,"round":1}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":101,"round":1}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":199,"round":1}
+{"v":"base","kind":"outside","step":"git status (warm)","ms":161,"round":2}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":80,"round":2}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":139,"round":2}
+{"v":"base","kind":"outside","step":"git add -u","ms":124,"round":2}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":138,"round":2}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":215,"round":2}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":142,"round":2}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":123,"round":2}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":131,"round":2}
+{"v":"base","kind":"inside","step":"git add -u","ms":135,"round":2}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":198,"round":2}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":283,"round":2}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":114,"round":2}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":88,"round":2}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":87,"round":2}
+{"v":"split","kind":"outside","step":"git add -u","ms":149,"round":2}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":161,"round":2}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":183,"round":2}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":109,"round":2}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":117,"round":2}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":106,"round":2}
+{"v":"split","kind":"inside","step":"git add -u","ms":101,"round":2}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":164,"round":2}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":280,"round":2}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":155,"round":2}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":107,"round":2}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":125,"round":2}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":90,"round":2}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":144,"round":2}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":257,"round":2}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":150,"round":2}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":135,"round":2}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":181,"round":2}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":155,"round":2}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":169,"round":2}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":307,"round":2}
+{"v":"base","kind":"outside","step":"git status (warm)","ms":232,"round":3}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":81,"round":3}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":202,"round":3}
+{"v":"base","kind":"outside","step":"git add -u","ms":152,"round":3}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":183,"round":3}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":242,"round":3}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":189,"round":3}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":131,"round":3}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":203,"round":3}
+{"v":"base","kind":"inside","step":"git add -u","ms":145,"round":3}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":220,"round":3}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":308,"round":3}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":84,"round":3}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":79,"round":3}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":81,"round":3}
+{"v":"split","kind":"outside","step":"git add -u","ms":99,"round":3}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":92,"round":3}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":189,"round":3}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":92,"round":3}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":85,"round":3}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":89,"round":3}
+{"v":"split","kind":"inside","step":"git add -u","ms":85,"round":3}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":133,"round":3}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":234,"round":3}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":133,"round":3}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":88,"round":3}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":106,"round":3}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":68,"round":3}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":90,"round":3}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":201,"round":3}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":97,"round":3}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":78,"round":3}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":89,"round":3}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":89,"round":3}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":104,"round":3}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":211,"round":3}
+{"v":"base","kind":"outside","step":"git status (warm)","ms":150,"round":4}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":149,"round":4}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":164,"round":4}
+{"v":"base","kind":"outside","step":"git add -u","ms":133,"round":4}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":141,"round":4}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":246,"round":4}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":152,"round":4}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":134,"round":4}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":136,"round":4}
+{"v":"base","kind":"inside","step":"git add -u","ms":141,"round":4}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":192,"round":4}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":370,"round":4}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":218,"round":4}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":145,"round":4}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":230,"round":4}
+{"v":"split","kind":"outside","step":"git add -u","ms":132,"round":4}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":151,"round":4}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":333,"round":4}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":152,"round":4}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":109,"round":4}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":96,"round":4}
+{"v":"split","kind":"inside","step":"git add -u","ms":99,"round":4}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":156,"round":4}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":327,"round":4}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":92,"round":4}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":92,"round":4}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":111,"round":4}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":107,"round":4}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":102,"round":4}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":195,"round":4}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":121,"round":4}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":131,"round":4}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":103,"round":4}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":97,"round":4}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":115,"round":4}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":212,"round":4}
+{"v":"base","kind":"outside","step":"git status (warm)","ms":148,"round":5}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":139,"round":5}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":127,"round":5}
+{"v":"base","kind":"outside","step":"git add -u","ms":114,"round":5}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":140,"round":5}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":240,"round":5}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":163,"round":5}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":143,"round":5}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":178,"round":5}
+{"v":"base","kind":"inside","step":"git add -u","ms":151,"round":5}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":228,"round":5}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":320,"round":5}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":88,"round":5}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":75,"round":5}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":98,"round":5}
+{"v":"split","kind":"outside","step":"git add -u","ms":70,"round":5}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":106,"round":5}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":183,"round":5}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":89,"round":5}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":83,"round":5}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":82,"round":5}
+{"v":"split","kind":"inside","step":"git add -u","ms":87,"round":5}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":156,"round":5}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":240,"round":5}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":107,"round":5}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":92,"round":5}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":102,"round":5}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":81,"round":5}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":124,"round":5}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":248,"round":5}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":128,"round":5}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":95,"round":5}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":95,"round":5}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":90,"round":5}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":108,"round":5}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":249,"round":5}
+{"v":"base","kind":"outside","step":"git status (warm)","ms":153,"round":6}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":77,"round":6}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":164,"round":6}
+{"v":"base","kind":"outside","step":"git add -u","ms":179,"round":6}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":147,"round":6}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":272,"round":6}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":180,"round":6}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":176,"round":6}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":172,"round":6}
+{"v":"base","kind":"inside","step":"git add -u","ms":143,"round":6}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":215,"round":6}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":491,"round":6}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":169,"round":6}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":84,"round":6}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":129,"round":6}
+{"v":"split","kind":"outside","step":"git add -u","ms":96,"round":6}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":118,"round":6}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":273,"round":6}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":129,"round":6}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":106,"round":6}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":110,"round":6}
+{"v":"split","kind":"inside","step":"git add -u","ms":119,"round":6}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":183,"round":6}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":233,"round":6}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":100,"round":6}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":93,"round":6}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":94,"round":6}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":73,"round":6}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":91,"round":6}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":213,"round":6}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":114,"round":6}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":146,"round":6}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":119,"round":6}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":104,"round":6}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":158,"round":6}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":229,"round":6}
+{"v":"base","kind":"outside","step":"git status (warm)","ms":168,"round":7}
+{"v":"base","kind":"outside","step":"git status (warm 2)","ms":130,"round":7}
+{"v":"base","kind":"outside","step":"git status after 10 edits","ms":145,"round":7}
+{"v":"base","kind":"outside","step":"git add -u","ms":140,"round":7}
+{"v":"base","kind":"outside","step":"git commit (10 files)","ms":143,"round":7}
+{"v":"base","kind":"outside","step":"git reset --hard HEAD~1","ms":264,"round":7}
+{"v":"base","kind":"inside","step":"git status (warm)","ms":146,"round":7}
+{"v":"base","kind":"inside","step":"git status (warm 2)","ms":161,"round":7}
+{"v":"base","kind":"inside","step":"git status after 10 edits","ms":144,"round":7}
+{"v":"base","kind":"inside","step":"git add -u","ms":166,"round":7}
+{"v":"base","kind":"inside","step":"git commit (10 files)","ms":265,"round":7}
+{"v":"base","kind":"inside","step":"git reset --hard HEAD~1","ms":300,"round":7}
+{"v":"split","kind":"outside","step":"git status (warm)","ms":114,"round":7}
+{"v":"split","kind":"outside","step":"git status (warm 2)","ms":81,"round":7}
+{"v":"split","kind":"outside","step":"git status after 10 edits","ms":109,"round":7}
+{"v":"split","kind":"outside","step":"git add -u","ms":78,"round":7}
+{"v":"split","kind":"outside","step":"git commit (10 files)","ms":123,"round":7}
+{"v":"split","kind":"outside","step":"git reset --hard HEAD~1","ms":228,"round":7}
+{"v":"split","kind":"inside","step":"git status (warm)","ms":94,"round":7}
+{"v":"split","kind":"inside","step":"git status (warm 2)","ms":85,"round":7}
+{"v":"split","kind":"inside","step":"git status after 10 edits","ms":89,"round":7}
+{"v":"split","kind":"inside","step":"git add -u","ms":107,"round":7}
+{"v":"split","kind":"inside","step":"git commit (10 files)","ms":160,"round":7}
+{"v":"split","kind":"inside","step":"git reset --hard HEAD~1","ms":222,"round":7}
+{"v":"splitobj","kind":"outside","step":"git status (warm)","ms":90,"round":7}
+{"v":"splitobj","kind":"outside","step":"git status (warm 2)","ms":75,"round":7}
+{"v":"splitobj","kind":"outside","step":"git status after 10 edits","ms":88,"round":7}
+{"v":"splitobj","kind":"outside","step":"git add -u","ms":77,"round":7}
+{"v":"splitobj","kind":"outside","step":"git commit (10 files)","ms":90,"round":7}
+{"v":"splitobj","kind":"outside","step":"git reset --hard HEAD~1","ms":237,"round":7}
+{"v":"splitobj","kind":"inside","step":"git status (warm)","ms":126,"round":7}
+{"v":"splitobj","kind":"inside","step":"git status (warm 2)","ms":91,"round":7}
+{"v":"splitobj","kind":"inside","step":"git status after 10 edits","ms":101,"round":7}
+{"v":"splitobj","kind":"inside","step":"git add -u","ms":92,"round":7}
+{"v":"splitobj","kind":"inside","step":"git commit (10 files)","ms":110,"round":7}
+{"v":"splitobj","kind":"inside","step":"git reset --hard HEAD~1","ms":218,"round":7}

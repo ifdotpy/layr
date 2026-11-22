@@ -10,12 +10,13 @@ New projects stay on v1 unless `init --objects` enables `objects.enabled` before
 `clone` keeps the setting of its source records. Existing
 projects keep their recorded setting. `init --no-objects` is still accepted and keeps v1.
 `layr migrate` moves a project from v1 to v2 (section 13, user guide `docs/migrate.md`).
+A project made from a git checkout is v2 from the start: `layr init --from-git` migrates its first states and deletes their old snapshots (`--snapshots` keeps v1; a failed migration leaves v1 with a warning). `layr init` makes v2 only with `--objects`: export, sync, project copy and the cache paths still need native copies.
 Experimental object configs marked `v:1` upgrade automatically; object encodings and IDs stay unchanged.
 After migration, source states remain usable without native state snapshots.
 Status, diff, and file reads use object trees directly.
 Operations that require native folders can create temporary copies.
 New saves write objects before they publish the state record.
-Derived states keep their native format. A part of an overlay (a cache too) goes to the overlay's own object store when its project has `objects.enabled`; its native copy stays for now (docs/overlays.md section 1a, slice 7). Owner decision 2026-11-11: a cache is an
+Derived states keep their native format. A part of an overlay (a cache too) goes to the overlay's own object store when its project has `objects.enabled`; its native copy goes once the objects are durable (docs/overlays.md section 1a, "Local space and history of parts"). Owner decision 2026-11-11: a cache is an
 ordinary overlay (an overlay), and its states go into v2 objects like any overlay; a state record then
 names one tree and one times table per overlay ([cache overlays](cache-overlays.md) section 2).
 Remote compatibility is separate (section 13 and `docs/remote-format.md`).
@@ -207,7 +208,7 @@ form 'c' chunked:  count:varint   (chunk-id:32   length:varint)*count
 
 ## 6. Packs
 
-A pack holds many objects in zstd blocks; the writer makes blocks of about 4 MiB. **The same pack format is used locally and on remotes**
+A pack holds many objects in zstd blocks; the writer makes blocks of about 256 KiB. **The same pack format is used locally and on remotes**
 (S3 stores and Layr Cloud): a repack writes packs, and a push sends them as they are.
 
 ```text
@@ -225,10 +226,12 @@ A pack holds many objects in zstd blocks; the writer makes blocks of about 4 MiB
 - Entries are sorted by id, ids are unique, and each entry lies inside its block's plain bytes.
   `type` is a type byte (section 5). `form` is `r` (raw: the content of a tree, times table, chunk
   or whole blob), `d` (a delta body as in section 5) or `c` (a chunk list).
-- The writer cuts a pack into blocks of about 4 MiB of plain bytes, one zstd frame each, at level
-  19. A reader accepts any number of blocks. A read decodes the block of its entry, and a store keeps
-  up to 512 MiB of decoded blocks. A block is the unit of a cold read: 4 MiB against one stream per
-  pack makes a read of one file 13 times faster for 4.2% more bytes (section 15).
+- The writer cuts a pack into blocks of about 256 KiB of plain bytes, one zstd frame each, at level
+  19. A reader accepts any number of blocks (a repack writes packs of 4 MiB blocks from before again). A
+  read decodes the block of its entry, and a store keeps up to 512 MiB of decoded blocks. A block is
+  the unit of a cold read: git reads many files through the git pack folder
+  (`docs/git-on-objects.md`), and 256 KiB blocks make `git log -p` and `git blame` 2 to 3 times
+  faster than 4 MiB blocks, for 10 % more bytes (section 15).
 - A reader opens an index without decoding it and searches its sorted entries in place, so opening a
   store costs nothing per object. The index checksum is checked when a pack is received; every
   object read is checked against its id.
@@ -327,7 +330,10 @@ Two steps, as Git does with loose objects and `git gc`:
    (section 15).
 2. **Repack** (`layr objects repack`, also run by `layr gc` when a project has an object store):
    hot blobs outside the hot set turn cold, the first repack trains the store dictionary, then every
-   loose object goes into packs (blocks of about 4 MiB, level 19).
+   loose object goes into packs (blocks of about 256 KiB, level 19). A pack of larger blocks (4 MiB,
+   from before) is written again in blocks of 256 KiB, objects in the same order; the new packs
+   are on disk before the old pack goes, and a reader that finds no old index reads the packs
+   again (`Store::reblock`).
 
 The service also prunes and repacks each object-backed project (including overlays) every
 `objects.maintenance-interval` seconds, default **60**; `0` disables automatic maintenance.
@@ -593,7 +599,7 @@ of the stores below.
 | dictionary in packs | 0.4 to 0.5 % larger in 1 MiB blocks of small sources; larger in 1, 4 and 8 MiB blocks of the history and in 4 MiB blocks of Chromium (this crate's matrix, below) | none in packs |
 | delta against the previous version | 32 times smaller than a whole level-19 frame on 213 changed files (benchmark) | saves write deltas |
 | delta base by similarity (keep at 5 % or more) | 0.04 % on the history below (14 renames) | same path only |
-| pack compression | one stream is 18.7 to 27.6 % of raw against 26.5 to 31.2 % file by file at level 19 (benchmark); on Chromium one stream per pack is 4.2 % smaller than 4 MiB blocks, but a cold read is 13 times slower (see "Reads, block size and saves") | level 19, blocks of 4 MiB |
+| pack compression | one stream is 18.7 to 27.6 % of raw against 26.5 to 31.2 % file by file at level 19 (benchmark); on Chromium one stream per pack is 4.2 % smaller than 4 MiB blocks, but a cold read is 13 times slower (see "Reads, block size and saves") | level 19, blocks of 256 KiB |
 | long-distance matching | 0 to 3 % on large streams (benchmark); nothing below the 8 MiB window | on above 8 MiB |
 | level 9 | slow and a small gain | not used |
 
@@ -664,8 +670,11 @@ Block size, in path order, times table still one object for the whole tree:
 | 1 MiB | 1,253,485,248 | 0.8 ms | 35 ms | 63 ms | | |
 
 The save columns in this table re-store unchanged files, so they write little. 4 MiB is the
-format's choice: 4.2 % more bytes than one stream for a read 13 times faster; 1 MiB costs twice that
-and gives a save almost nothing.
+choice of the first format: 4.2 % more bytes than one stream for a read 13 times faster; 1 MiB costs
+twice that and gives a save almost nothing. The format now uses 256 KiB: git reads the files of the
+object store (`docs/git-on-objects.md`), and on 1,000 commits of Chromium 256 KiB blocks made
+`git log -p -n 100` 1.3 s against 4.2 s, `git blame` 316 ms against 600 ms, and the store 1,367 MB
+against 1,233 MB (`benchmarks/git-on-v2-20261119/README.md`).
 
 The other costs of a save and of a read were the decoding of all pack indexes when a store opens
 (74 ms) and the one times table of the whole tree (17 ms to decode, 3 ms to encode, 24 ms to compress

@@ -119,7 +119,12 @@ fn decode(text: &str) -> BTreeMap<String, Entry> {
 /// folder. The new file belongs to `own`, including when the service writes as root.
 /// Called before the snapshot of a cache save, outside the project lock.
 pub fn record(w: &Path, folders: &[String], own: (u32, u32)) -> Result<()> {
-    let dirs: Vec<_> = folders.iter().map(|f| fsutil::safe_join(w, f).map(|d| (f, d))).collect::<Result<_>>()?;
+    record_in(w, w, folders, own)
+}
+
+/// `record` with the cache folders in `caches` (a fast line keeps them in its cache root).
+pub fn record_in(w: &Path, caches: &Path, folders: &[String], own: (u32, u32)) -> Result<()> {
+    let dirs: Vec<_> = folders.iter().map(|f| fsutil::safe_join(caches, f).map(|d| (f, d))).collect::<Result<_>>()?;
     // An empty folder holds no build output, so it needs no times (and stays empty).
     let holds = |d: &std::path::Path| std::fs::read_dir(d).is_ok_and(|mut r| r.any(|e| e.is_ok_and(|e| e.file_name() != FILE)));
     let dirs: Vec<_> = dirs.into_iter().filter(|(_, d)| d.is_dir() && holds(d)).collect();
@@ -128,7 +133,7 @@ pub fn record(w: &Path, folders: &[String], own: (u32, u32)) -> Result<()> {
     }
     let _t = crate::trace::span("source times: record");
     let data = encode(&collect(w)?);
-    let tree = crate::tree::Tree::open(w)?;
+    let tree = crate::tree::Tree::open(caches)?;
     for (folder, _) in dirs {
         // Set ownership on the unpublished inode. The cache is user-writable: neither
         // a symlink nor a hard link at the old name may redirect this privileged write.

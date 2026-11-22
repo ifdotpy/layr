@@ -187,6 +187,14 @@ final class OverlayVolume: FSVolume, FSVolume.Handler, FSVolume.PathConfOperatio
         return try ov.stat(table.path(it))
     }
 
+    /// The kernel does not tell this volume which files are open (no open calls). A file that
+    /// loses its last name keeps a descriptor until the kernel reclaims it, so a program that has
+    /// it open still reads, writes, stats and truncates it. A lower file is read-only then.
+    private func keepRemoved(_ it: LayrItem, path: String, entry: Entry) {
+        guard it.type == .file, entry.linkCount <= 1 else { return }
+        try? it.ensureOpen(path: path, backend: ov, write: ov.inUpper(path))
+    }
+
     /// Copies the item's file up before a change, and drops a descriptor of the lower copy.
     private func prepareChange(_ it: LayrItem, path: String) throws {
         if try ov.copyUp(path) { it.dropReadFD() }
@@ -267,7 +275,9 @@ final class OverlayVolume: FSVolume, FSVolume.Handler, FSVolume.PathConfOperatio
     }
 
     func synchronize(flags: FSSyncFlags, replyHandler reply: @escaping @Sendable ((any Error)?) -> Void) {
-        runVoid(.synchronize, reply) {}  // every write is already in the upper folder
+        // Every write is already in the upper folder; a sync makes it durable there.
+        // wait: file integrity (also the drive's cache); dWait: data integrity; noWait: start only.
+        runVoid(.synchronize, reply) { try ov.sync(wait: flags != .noWait, full: flags == .wait) }
     }
 
     // MARK: - FSVolume.Handler: items
@@ -371,6 +381,25 @@ final class OverlayVolume: FSVolume, FSVolume.Handler, FSVolume.PathConfOperatio
         run(.setattr, reply) {
             try requireWritable()
             let it = try self.item(item)
+            if it.unlinked {
+                // A removed file that is still open: its descriptor takes the size and the mode.
+                // ftruncate needs a descriptor open for writing; fchmod takes any.
+                let e: Entry = try withIO(it, write: newAttributes.isValid(.size)) { fd in
+                    var used: FSItem.Attribute = []
+                    if newAttributes.isValid(.size) {
+                        try check(ftruncate(fd, off_t(newAttributes.size)), "ftruncate removed item"); used.insert(.size)
+                    }
+                    if newAttributes.isValid(.mode) {
+                        try check(fchmod(fd, mode_t(newAttributes.mode & 0o7777)), "fchmod removed item"); used.insert(.mode)
+                    }
+                    newAttributes.consumedAttributes = used
+                    return try ov.fstat(fd, ino: it.ino)
+                }
+                guard let r = FSSetAttributesResult(attributes: attrs(e, of: it), freeSpace: FSFreeSpace.noUpdate) else {
+                    throw PosixError(code: EIO, op: "FSSetAttributesResult")
+                }
+                return r
+            }
             let p = try table.path(it)
             try prepareChange(it, path: p)
             _ = try apply(newAttributes, to: p, item: it)
@@ -477,6 +506,7 @@ final class OverlayVolume: FSVolume, FSVolume.Handler, FSVolume.PathConfOperatio
             let dp = try table.childPath(dst, dn)
             var overEntry: Entry? = nil
             if over != nil { overEntry = try? ov.stat(dp) }
+            if let over, let oe = overEntry, over !== it { keepRemoved(over, path: dp, entry: oe) }
             let copied = !ov.inUpper(sp)
             try ov.rename(sp, dp)
             if copied { it.dropReadFD() }
@@ -515,6 +545,7 @@ final class OverlayVolume: FSVolume, FSVolume.Handler, FSVolume.PathConfOperatio
             let n = try nameString(name)
             let p = try table.childPath(dir, n)
             var pre = try ov.stat(p)
+            keepRemoved(it, path: p, entry: pre)
             try ov.unlink(p, isDir: it.type == .directory)
             pre.linkCount = (it.type == .directory || pre.linkCount <= 1) ? 0 : pre.linkCount - 1
             table.lock.lock()

@@ -20,6 +20,8 @@ let base = (tmpBase as NSString).appendingPathComponent("layrfs-overlay-selftest
 let lowerDir = base + "/lower", upperDir = base + "/upper", mirror = base + "/mirror"
 try fm.createDirectory(atPath: lowerDir + "/dir/sub", withIntermediateDirectories: true)
 try fm.createDirectory(atPath: lowerDir + "/emptydir", withIntermediateDirectories: true)
+try fm.createDirectory(atPath: lowerDir + "/noread", withIntermediateDirectories: true)
+try fm.createDirectory(atPath: lowerDir + "/tagged", withIntermediateDirectories: true)
 try fm.createDirectory(atPath: lowerDir + "/deep/a/b", withIntermediateDirectories: true)
 try fm.createDirectory(atPath: upperDir, withIntermediateDirectories: true)
 func put(_ rel: String, _ text: String, root: String = lowerDir) {
@@ -30,8 +32,11 @@ put("dir/b.txt", "bee")
 put("dir/sub/c.txt", "sea")
 put("deep/a/b/d.txt", "dee")
 put("Mixed Case.txt", "mixed")
+put("tagged/t.txt", "tag")
+put("noread/n.txt", "no")
 try fm.createSymbolicLink(atPath: lowerDir + "/link", withDestinationPath: "a.txt")
 chmod(lowerDir + "/dir/sub", 0o750)
+_ = "tag".withCString { setxattr(lowerDir + "/tagged", "com.example.tag", $0, 3, 0, 0) }
 // The mirror starts as a plain copy of the lower tree.
 let cp = Process()
 cp.executableURL = URL(fileURLWithPath: "/bin/cp")
@@ -189,8 +194,11 @@ try ov.rename("dir/sub/new.txt", "dir/moved/new.txt")
 try fm.moveItem(atPath: mirror + "/dir/sub/new.txt", toPath: mirror + "/dir/moved/new.txt")
 try ov.symlink("dir/l2", target: "../a.txt")
 try fm.createSymbolicLink(atPath: mirror + "/dir/l2", withDestinationPath: "../a.txt")
-try ov.link(from: "Mixed Case.txt", to: "hard.txt")
-_ = Darwin.link(mirror + "/Mixed Case.txt", mirror + "/hard.txt")
+// Hard links are refused (layr would save each name as its own file).
+do {
+    try ov.link(from: "Mixed Case.txt", to: "hard.txt")
+    failures += 1; print("FAIL: a hard link was made")
+} catch let e as PosixError where e.code == ENOTSUP {}
 compareWithMirror("upper changes")
 
 // Rename over an existing lower file, and rename of a copied-up file (the lower name needs a whiteout).
@@ -208,15 +216,89 @@ if !ov.keys.caseSensitive {
     expect((try? ov.stat("MIXED CASE.TXT"))?.nameString == "Mixed Case.txt", "case-insensitive lookup returns the stored name")
 }
 
+// A new entry in a lower folder keeps the folder's attributes.
+try ov.createFile("tagged/new.txt", mode: 0o644)
+put("tagged/new.txt", "", root: mirror)
+expect((try? ov.getXattr("tagged", name: "com.example.tag")) == Data("tag".utf8), "a folder keeps its attributes when it gets an upper copy")
+
 // Reload from disk: the same merged view, the same whiteouts in the layer attribute.
+// A user file whose name looks like a rename clone stays.
+put(Overlay.renamePrefix + "notes", "mine", root: upperDir)
+put(Overlay.renamePrefix + "notes", "mine", root: mirror)
 let before = ov.whiteouts
 ov = try Overlay(lowerPath: lowerDir, upperPath: upperDir)
+expect(fm.fileExists(atPath: upperDir + "/" + Overlay.renamePrefix + "notes"), "a user file with the clone prefix stays")
 expect(ov.whiteouts == before, "whiteouts survive a reload")
 compareWithMirror("reload")
+
+// A rename of a lower file that a crash interrupted: before the whiteout of the source the
+// clone goes; after it the next mount completes the rename.
+func crashRename(tmp: String, src: String, dst: String, whiteout: Bool) throws {
+    put(tmp, "mixed", root: upperDir)
+    let ub = try Backend(rootPath: upperDir)
+    let intent = try JSONSerialization.data(withJSONObject: ["tmp": tmp, "src": src, "dst": dst], options: [.sortedKeys])
+    try ub.setXattr(".", name: Overlay.renamingAttr, value: intent, options: 0)
+    if whiteout {
+        let list = (ov.whiteouts + [src]).sorted()
+        try ub.setXattr(".", name: Overlay.removedAttr, value: try JSONSerialization.data(withJSONObject: list), options: 0)
+    }
+    ov = try Overlay(lowerPath: lowerDir, upperPath: upperDir)
+    expect(!fm.fileExists(atPath: upperDir + "/" + tmp), "the rename clone \(tmp) is gone at the mount")
+    expect((try? ub.getXattr(".", name: Overlay.renamingAttr)) == nil, "the rename record is gone at the mount")
+}
+try crashRename(tmp: Overlay.renamePrefix + "t1", src: "Mixed Case.txt", dst: "mixed-2.txt", whiteout: false)
+compareWithMirror("a rename undone at the mount")
+try crashRename(tmp: Overlay.renamePrefix + "t2", src: "Mixed Case.txt", dst: "mixed-2.txt", whiteout: true)
+try fm.moveItem(atPath: mirror + "/Mixed Case.txt", toPath: mirror + "/mixed-2.txt")
+compareWithMirror("a rename completed at the mount")
+
+// A rename record that `rename` cannot write (a path out of the upper folder) stops the mount and
+// changes nothing on disk.
+put("outside.txt", "keep", root: base)
+do {
+    let ub = try Backend(rootPath: upperDir)
+    let bad = try JSONSerialization.data(withJSONObject: ["tmp": "../outside.txt", "src": "a.txt", "dst": "b.txt"], options: [.sortedKeys])
+    try ub.setXattr(".", name: Overlay.renamingAttr, value: bad, options: 0)
+    expect(errno { _ = try Overlay(lowerPath: lowerDir, upperPath: upperDir) } == EIO, "a bad rename record stops the mount")
+    expect(fm.fileExists(atPath: base + "/outside.txt"), "a bad rename record removes no file out of the upper folder")
+    try ub.setXattr(".", name: Overlay.renamingAttr, value: Data("{}".utf8), options: 0)
+    expect(errno { _ = try Overlay(lowerPath: lowerDir, upperPath: upperDir) } == EIO, "a rename record without its fields stops the mount")
+    expect((try? ub.getXattr(".", name: Overlay.renamingAttr)) == Data("{}".utf8), "a rename record without its fields stays")
+    try? ub.removeXattr(".", name: Overlay.renamingAttr)
+}
+
+// A remove whose whiteout cannot be written (the upper root refuses attributes) keeps the changed
+// copy: the name never shows the lower content again.
+try ov.copyUp("tagged/t.txt")
+put("tagged/t.txt", "changed", root: upperDir)
+put("tagged/t.txt", "changed", root: mirror)
+var rootFlags = Darwin.stat()
+lstat(upperDir, &rootFlags)
+_ = lchflags(upperDir, rootFlags.st_flags | UInt32(UF_IMMUTABLE))
+expect(errno { try ov.unlink("tagged/t.txt", isDir: false) } != 0, "a remove without its whiteout fails")
+_ = lchflags(upperDir, rootFlags.st_flags)
+compareWithMirror("after a failed remove")
+ov = try Overlay(lowerPath: lowerDir, upperPath: upperDir)
+compareWithMirror("a failed remove keeps the changed file after a reload")
+
+// A lower folder that cannot be read is not empty for rmdir.
+var dirMode = Darwin.stat()
+lstat(lowerDir + "/noread", &dirMode)
+_ = lchflags(lowerDir + "/noread", dirMode.st_flags & ~UInt32(UF_IMMUTABLE))
+chmod(lowerDir + "/noread", 0)
+let fresh = try Overlay(lowerPath: lowerDir, upperPath: upperDir)
+expect(errno { try fresh.unlink("noread", isDir: true) } == EIO, "rmdir of an unreadable lower folder fails")
+chmod(lowerDir + "/noread", dirMode.st_mode & 0o7777)
+_ = lchflags(lowerDir + "/noread", dirMode.st_flags)
+ov = try Overlay(lowerPath: lowerDir, upperPath: upperDir)
+compareWithMirror("after the unreadable folder")
 let raw = try Backend(rootPath: upperDir).getXattr(".", name: "com.layr.removed")
-expect((try JSONSerialization.jsonObject(with: raw) as? [String]) == before, "com.layr.removed is a sorted JSON array")
+expect((try JSONSerialization.jsonObject(with: raw) as? [String]) == ov.whiteouts, "com.layr.removed is a sorted JSON array")
 expect((try? ov.getXattr(".", name: "com.layr.removed")) == nil, "the layer attribute is hidden")
 expect(!(try ov.listXattrs(".")).contains(Array("com.layr.removed".utf8)), "the layer attribute is not listed")
 
+// exit() skips the defer above: the sealed tree goes here.
+setFlags(lowerDir, false)
+try? fm.removeItem(atPath: base)
 if failures == 0 { print("OVERLAY SELFTEST PASS") } else { print("OVERLAY SELFTEST FAIL: \(failures)") }
 exit(failures == 0 ? 0 : 1)

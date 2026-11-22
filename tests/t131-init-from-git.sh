@@ -85,4 +85,37 @@ eq "the group-writable directory keeps its mode" 775 "$(stat_field mode sub)"
 eq "the imported Git HEAD is the parent" "$group_head" "$(l rev-parse --git head~1)"
 eq "the imported working folder is clean" "" "$(l status --short)"
 umask 022
+
+# A shallow clone: its history ends at a commit whose parents the clone does not have. The line
+# starts at that commit, git in the line reads the same history, and a push to the origin (which
+# has the parents) sends the new commits.
+git init -q --bare -b main "$B/deep.git"
+git clone -q "$B/deep.git" "$B/deep" 2>/dev/null
+( cd "$B/deep" && git checkout -qb main 2>/dev/null; for i in 1 2 3; do echo $i > f$i.txt; git add . && git commit -qm "deep $i"; done; git push -q origin main 2>/dev/null )
+git clone -q --depth 1 "file://$B/deep.git" "$B/shallow" 2>/dev/null
+shallow_head=$(git -C "$B/shallow" rev-parse HEAD)
+eq "the clone is shallow" true "$(git -C "$B/shallow" rev-parse --is-shallow-repository)"
+ok "init --from-git takes a shallow clone" "$LAYR" init shallow --from-git "$B/shallow" -q
+cd "$B/shallow" || exit 1
+eq "the head is the commit of the shallow clone" "$shallow_head" "$(l rev-parse --git head)"
+eq "the history of the line ends at that commit" 1 "$(l log --oneline | wc -l | tr -d ' ')"
+eq "the folder of the shallow clone is clean" "" "$(l status --short)"
+eq "the files of the shallow clone" "1 2 3" "$(cat f1.txt f2.txt f3.txt | tr '\n' ' ' | sed 's/ $//')"
+eq "git in the line reads the same history" 1 "$(git log --oneline 2>&1 | wc -l | tr -d ' ')"
+eq "git status in the line is clean" "" "$(git status --porcelain 2>&1)"
+ok "a new line on a shallow history" l line new work -q
+cd "$LAYR_ROOT/projects/shallow/lines/work" || exit 1
+eq "git in the new line reads the same history" "$shallow_head" "$(git rev-parse HEAD 2>&1)"
+echo more > more.txt
+ok "add on a shallow history" l add more.txt
+ok "save on a shallow history" l save -m "on top" -q
+eq "git log after the save" 2 "$(git log --oneline 2>&1 | wc -l | tr -d ' ')"
+ok "push of a shallow history to its origin" l git push origin work
+eq "the origin has the new commit on its whole history" 4 "$(git --git-dir="$B/deep.git" log --oneline work 2>&1 | wc -l | tr -d ' ')"
+eq "the parent at the origin is the commit of the clone" "$shallow_head" "$(git --git-dir="$B/deep.git" rev-parse work~1 2>&1)"
+# A later commit of the origin comes with a fetch; the history of the store stays shallow.
+( cd "$B/deep" && echo 4 > f4.txt && git add . && git commit -qm "deep 4" && git push -q origin main 2>/dev/null )
+ok "fetch into a shallow history" l git fetch origin
+eq "the fetched branch" "deep 4" "$(l log -n 1 --format=%s origin/main 2>&1)"
+eq "the fetched history ends at the same commit" 2 "$(l log --oneline origin/main 2>&1 | wc -l | tr -d ' ')"
 finish

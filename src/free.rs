@@ -7,68 +7,83 @@
 
 use crate::store::{Project, Store};
 use anyhow::Result;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// Projects this process opened: `(store root, project name)`. `finish` frees their queues when
-/// the command ends and forgets them.
-static OPENED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
+thread_local! {
+    /// Projects this process opened: `(store root, project name)`. `finish` frees their queues when
+    /// the command ends and forgets them. The registries of this module belong to the thread of
+    /// the command, and the service clears them when a command starts (`begin_command`).
+    static OPENED: RefCell<BTreeSet<(PathBuf, String)>> = const { RefCell::new(BTreeSet::new()) };
+}
 
 /// The queue that a free pass of this process left for a project (`(store root, project name)`): the states that
 /// wait as the base of a live layer. The free step at the end of the command skips a project whose queue is still
 /// the same, so a command that ran the pass itself (`gc --repair`) does not walk the layers again.
 static LEFT_QUEUED: Mutex<BTreeMap<(PathBuf, String), Vec<String>>> = Mutex::new(BTreeMap::new());
 
-/// Line heads that records of this command moved to (`Db::derive`): at the end of the command a thin head with a
-/// long chain gets a complete tree, in the background (`keyframe_heads`).
-static MOVED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+thread_local! {
+    /// Line heads that records of this command moved to (`Db::derive`): at the end of the command a thin head with a
+    /// long chain gets a complete tree, in the background (`keyframe_heads`).
+    static MOVED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
 
-/// States that a line head left, and lines that a record deleted, in this command (`Db::derive`): their derived
-/// data goes at the end of the command (`drop_derived`).
-static LEFT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-static DELETED_LINES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+thread_local! {
+    /// States that a line head left, and lines that a record deleted, in this command (`Db::derive`): their derived
+    /// data goes at the end of the command (`drop_derived`).
+    static LEFT: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
+thread_local! {
+    static DELETED_LINES: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
 
 /// A line head left `state`.
 pub fn head_left(state: &str) {
-    if let Ok(mut left) = LEFT.lock() {
-        left.insert(state.to_string());
-    }
+    LEFT.with(|m| m.borrow_mut().insert(state.to_string()));
 }
 
 /// A record deleted the line `id`.
 pub fn line_deleted(id: &str) {
-    if let Ok(mut deleted) = DELETED_LINES.lock() {
-        deleted.insert(id.to_string());
-    }
+    DELETED_LINES.with(|m| m.borrow_mut().insert(id.to_string()));
 }
 
-/// Final states whose old layers can retire after their prepared complete view is published.
 #[cfg(target_os = "macos")]
-static FINALS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+thread_local! {
+    /// Final states whose old layers can retire after their prepared complete view is published.
+    static FINALS: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+}
 
 /// A final state already has its complete tree. Its background worker only waits for readers
 /// and retires the old layer; it never copies content under the project lock. GC can finish
 /// retirement if a worker stopped or the complete view was evicted.
 #[cfg(target_os = "macos")]
 pub fn keyframe_later(state: &str) {
-    if let Ok(mut finals) = FINALS.lock() {
-        finals.insert(state.to_string());
-    }
+    FINALS.with(|m| m.borrow_mut().insert(state.to_string()));
 }
 
 /// A record moved a line head to `state`.
 pub fn head_moved(state: &str) {
-    if let Ok(mut moved) = MOVED.lock() {
-        moved.insert(state.to_string());
-    }
+    MOVED.with(|m| m.borrow_mut().insert(state.to_string()));
+}
+
+/// Start a command in the service: the registries hold only what this command does. The service
+/// opens projects between commands too (mounts, follows, status of views); before this, the next
+/// command then finished every project of the store (0.4 to 0.5 s per command with 100
+/// projects). Their queues stay in their databases for the next command that opens them.
+pub fn begin_command() {
+    OPENED.with(|m| m.borrow_mut().clear());
+    MOVED.with(|m| m.borrow_mut().clear());
+    LEFT.with(|m| m.borrow_mut().clear());
+    DELETED_LINES.with(|m| m.borrow_mut().clear());
+    #[cfg(target_os = "macos")]
+    FINALS.with(|m| m.borrow_mut().clear());
 }
 
 /// Called when a project opens: its queue is checked at the end of the command.
 pub fn register(store: &Store, name: &str) {
-    if let Ok(mut opened) = OPENED.lock() {
-        opened.insert((store.root.clone(), name.to_string()));
-    }
+    OPENED.with(|m| m.borrow_mut().insert((store.root.clone(), name.to_string())));
 }
 
 /// Release only cleanup notifications backed by a confirmed catalog commit.
@@ -104,19 +119,17 @@ thread_local! {
 pub fn finish(ctx: &crate::ctx::Ctx) {
     let store = &ctx.store;
     release_held();
-    let names: Vec<String> = match OPENED.lock() {
-        Ok(mut opened) => {
-            let names = opened.iter().filter(|(root, _)| *root == store.root).map(|(_, n)| n.clone()).collect();
-            opened.retain(|(root, _)| *root != store.root);
-            names
-        }
-        Err(_) => return,
-    };
-    let moved: BTreeSet<String> = MOVED.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
-    let left: BTreeSet<String> = LEFT.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
-    let deleted: BTreeSet<String> = DELETED_LINES.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let names: Vec<String> = OPENED.with(|m| {
+        let mut opened = m.borrow_mut();
+        let names = opened.iter().filter(|(root, _)| *root == store.root).map(|(_, n)| n.clone()).collect();
+        opened.retain(|(root, _)| *root != store.root);
+        names
+    });
+    let moved: BTreeSet<String> = MOVED.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let left: BTreeSet<String> = LEFT.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let deleted: BTreeSet<String> = DELETED_LINES.with(|m| std::mem::take(&mut *m.borrow_mut()));
     #[cfg(target_os = "macos")]
-    let finals: BTreeSet<String> = FINALS.lock().map(|mut m| std::mem::take(&mut *m)).unwrap_or_default();
+    let finals: BTreeSet<String> = FINALS.with(|m| std::mem::take(&mut *m.borrow_mut()));
     for name in names {
         #[cfg(test)]
         INSPECTED.with(|names| names.borrow_mut().push(name.clone()));
@@ -170,9 +183,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
         }
     }
     // Opening the projects above registered them again: they are done.
-    if let Ok(mut opened) = OPENED.lock() {
-        opened.retain(|(root, _)| *root != store.root);
-    }
+    OPENED.with(|m| m.borrow_mut().retain(|(root, _)| *root != store.root));
 }
 
 /// The heads in `moved` that are thin states of project `name` with a chain longer than `thin.chain`: each gets a

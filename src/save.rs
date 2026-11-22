@@ -759,6 +759,14 @@ impl Repo<'_> {
         if crate::views::of(self, line).is_some() {
             return crate::views::upper(&self.p, &line.id);
         }
+        // A fast line (macOS) is read from its shadow, brought up to the view: its mount can be
+        // gone already (`line delete` unmounts first), and then its folder is empty.
+        #[cfg(target_os = "macos")]
+        if let Some(view) = crate::views::fast_of(self, line) {
+            if let Ok(shadow) = crate::views::fast_shadow(&self.p, &view) {
+                return shadow;
+            }
+        }
         self.working(line)
     }
 
@@ -1110,7 +1118,8 @@ impl Repo<'_> {
                 let key = self.cache_key(ctx, &name, &self.working(line), line.owner)?;
                 let workspace = Workspace::new(&orepo.p)?;
                 let tree = PreparedTree { workspace, layout: Layout::Complete };
-                storage::snapshot(&crate::fsutil::safe_join(&self.working(line), &path)?, &tree.path(), true)?;
+                // A fast line keeps its cache trees apart (`fast_cache`).
+                storage::snapshot(&self.cache_dir(line, &self.working(line), &path)?, &tree.path(), true)?;
                 let mut state = orepo.state_record(
                     ctx,
                     crate::ids::new_id(),

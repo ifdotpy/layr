@@ -1,0 +1,12 @@
+apt-get install xfsprogs
+useradd --system layr (home /home/layr)
+install /home/layr/layrfs-fuse (owned by layr)
+/etc/fuse.conf: user_allow_other
+mkfs.xfs /home/igos3/layrfs-bench/xfs.img (60 GiB sparse, nodatacow)
+mount -o loop /home/igos3/layrfs-bench/xfs.img /home/igos3/layrfs-bench/xfs (chown of the empty root to 1000)
+install -d -o igos3 -m 0755 /home/layrfs-src (source trees the user layr reads)
+# Not logged by setup.sh:
+sudo btrfs subvolume create/snapshot/delete under /home/igos3/layrfs-bench/btrfs (the Btrfs backend), and chown of each new base subvolume to igos3
+sudo mount -t overlay / umount under /home/igos3/layrfs-bench/xfs (the OverlayFS backend)
+User level, no sudo: rustup 1.99.1 in ~/.cargo, ripgrep 14.1.1 in ~/.local/bin, chmod -R go+rX /home/layrfs-src
+install /home/layr/layr (owned by layr)

@@ -42,7 +42,146 @@ fn cached<T>(cache: &Mutex<HashMap<Id, Arc<T>>>, id: &Id, load: impl FnOnce() ->
     let loaded = Arc::new(load()?);
     Ok(cache.lock().map_err(|_| poisoned())?.entry(*id).or_insert(loaded).clone())
 }
+/// Read-only native folders whose content equals an object state (the snapshots of a fast
+/// line's shadow): a comparison with them uses the objects (`Src for Path`).
+static REGISTERED: Mutex<Option<HashMap<PathBuf, &'static ObjectTree>>> = Mutex::new(None);
+
+/// Name `path` as a native copy of `tree`. The tree lives until the process ends.
+pub fn register(path: &Path, tree: Arc<ObjectTree>) {
+    let leaked: &'static Arc<ObjectTree> = Box::leak(Box::new(tree));
+    let tree: &'static ObjectTree = leaked.as_ref();
+    if let Ok(mut m) = REGISTERED.lock() {
+        m.get_or_insert_with(HashMap::new).insert(path.to_path_buf(), tree);
+    }
+}
+
+pub fn registered(path: &Path) -> Option<&'static ObjectTree> {
+    REGISTERED.lock().ok()?.as_ref()?.get(path).copied()
+}
+
+/// A writable native copy that started equal to the objects `refs` (a copy of a fast line's
+/// shadow): `ro` is a read-only snapshot with that content, the parent of an incremental compare.
+#[derive(Clone)]
+pub struct Base {
+    pub ro: PathBuf,
+    pub refs: StateRef,
+    pub objects: PathBuf,
+    pub reads: PathBuf,
+}
+
+static BASES: Mutex<Option<HashMap<PathBuf, Base>>> = Mutex::new(None);
+
+pub fn register_base(path: &Path, base: Base) {
+    if let Ok(mut m) = BASES.lock() {
+        m.get_or_insert_with(HashMap::new).insert(path.to_path_buf(), base);
+    }
+}
+
+pub fn base_of(path: &Path) -> Option<Base> {
+    BASES.lock().ok()?.as_ref()?.get(path).cloned()
+}
+
+/// After a native snapshot `src` -> `dst`: a copy of a registered base (a fast line's shadow)
+/// stays a copy of it; a read-only one gets its objects, written for the paths that changed since
+/// the base. Other snapshots (a classic save from its state) get their objects by the usual import,
+/// which can write deltas.
+pub fn after_snapshot(src: &Path, dst: &Path, readonly: bool) {
+    let Some(base) = base_of(src) else { return };
+    if !readonly {
+        register_base(dst, base);
+        return;
+    }
+    // A read-only copy of a read-only tree with known objects has the same objects.
+    if let Some(t) = registered(src) {
+        if let Ok(tree) = Store::open_existing(&base.objects, layr_objects::Keying::Plain).and_then(|s| ObjectTree::new(s, t.refs, &base.reads)) {
+            register(dst, tree);
+            register_base(dst, base);
+            return;
+        }
+    }
+    let _t = crate::trace::span("objects of a fast line copy");
+    let made = (|| -> Result<()> {
+        let store = Store::open_existing(&base.objects, layr_objects::Keying::Plain)?;
+        let refs = crate::objstore::changed_objects(&store, base.refs, &base.ro, dst)?;
+        register(dst, ObjectTree::new(store, refs, &base.reads)?);
+        register_base(dst, base.clone());
+        Ok(())
+    })();
+    if let Err(e) = made {
+        let _n = crate::trace::named(|| format!("no objects for {}: {e:#}", dst.display()));
+    }
+}
+
 impl ObjectTree {
+    /// The entries that may differ between two object states, as `changes::candidates` lists
+    /// them: folders with the same tree and times on both sides are left out whole.
+    pub fn candidates(&self, other: &ObjectTree) -> Result<Vec<crate::changes::EntryChange>> {
+        let mut out = BTreeMap::new();
+        self.pair(other, "", Some((self.refs.tree, self.refs.times)), Some((other.refs.tree, other.refs.times)), &mut out)?;
+        Ok(out
+            .into_iter()
+            .filter_map(|(path, (old, new))| {
+                crate::changes::EntryChange::observed(path, old, new, crate::compare::DataEvidence::Unknown)
+            })
+            .collect())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn pair(
+        &self,
+        other: &ObjectTree,
+        rel: &str,
+        a: Option<(Id, Id)>,
+        b: Option<(Id, Id)>,
+        out: &mut BTreeMap<String, (Option<Meta>, Option<Meta>)>,
+    ) -> Result<()> {
+        if a == b {
+            return Ok(());
+        }
+        let list = |t: &ObjectTree, d: Option<(Id, Id)>| -> Result<BTreeMap<Vec<u8>, Entry>> {
+            let Some((tree, times)) = d else { return Ok(BTreeMap::new()) };
+            let folder = t.tree(&tree)?;
+            let tm = t.times(&times)?;
+            anyhow::ensure!(folder.entries.len() == tm.records.len(), "tree and times count differ");
+            let mut m = BTreeMap::new();
+            for (entry, record) in folder.entries.iter().zip(tm.records.iter().copied()) {
+                let (ns, folder_times) = match (&entry.node, record) {
+                    (Node::Dir { .. }, layr_objects::times::Record::Folder(ts)) => (t.times(&ts)?.own, Some(ts)),
+                    (Node::Dir { .. }, _) | (_, layr_objects::times::Record::Folder(_)) => bail!("tree and times kinds differ"),
+                    (_, layr_objects::times::Record::Time(ns)) => (ns, None),
+                };
+                m.insert(entry.name.clone(), Entry { entry: entry.clone(), ns, folder_times });
+            }
+            Ok(m)
+        };
+        let ea = list(self, a)?;
+        let eb = list(other, b)?;
+        let mut names: std::collections::BTreeSet<&Vec<u8>> = ea.keys().collect();
+        names.extend(eb.keys());
+        for name in names {
+            let name_s = std::str::from_utf8(name).context("a layr path is not UTF-8")?;
+            let path = if rel.is_empty() { name_s.to_owned() } else { format!("{rel}/{name_s}") };
+            let (x, y) = (ea.get(name), eb.get(name));
+            if let (Some(x), Some(y)) = (x, y) {
+                if x.entry == y.entry && x.ns == y.ns && x.folder_times == y.folder_times {
+                    continue;
+                }
+            }
+            out.insert(path.clone(), (x.map(|e| e.meta()), y.map(|e| e.meta())));
+            let dir = |e: Option<&Entry>| match e {
+                Some(Entry { entry: layr_objects::tree::Entry { node: Node::Dir { tree }, .. }, folder_times: Some(ts), .. }) => {
+                    Some((*tree, *ts))
+                }
+                _ => None,
+            };
+            let (da, db) = (dir(x), dir(y));
+            if da.is_some() || db.is_some() {
+                self.pair(other, &path, da, db, out)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(store: Store, refs: StateRef, parent: &Path) -> Result<Arc<Self>> {
         std::fs::create_dir_all(parent)?;
         let cache = parent.join(crate::store::temp_name());
@@ -535,10 +674,13 @@ mod tests {
             std::fs::create_dir(&upper)?;
             let source = crate::thin::Layered::over(&upper, crate::thin::Layered::objects(tree.clone()))?;
             let source = crate::objstore::SnapshotSource(&source);
+            // The listing reads no content; the read of the file then fails the save.
+            let names = layr_objects::write::Source::names(&source, b"");
             assert!(
-                layr_objects::write::Source::names(&source, b"").is_err(),
+                names.as_ref().map_or(true, |n| n.contains(&b"file".to_vec())),
                 "a corrupt base entry must not disappear from a save"
             );
+            assert!(layr_objects::write::Source::path(&source, b"file").is_err(), "a corrupt base entry fails a save");
         }
         drop(tree);
         std::fs::remove_dir_all(tmp)?;

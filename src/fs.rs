@@ -137,7 +137,28 @@ pub(crate) fn capture(src: &Path, dst: &Path, protection: Protection, purpose: C
         }
     }
 }
+/// The source of a copy: the folder itself, or for the folder of a fast line (a LayrFS mount)
+/// its shadow, a native tree that the call brings up to the view.
+pub(crate) fn source_of(src: &Path) -> Result<(PathBuf, Option<crate::views::FastSource>)> {
+    match crate::views::fast_source(src) {
+        Some(fast) => {
+            let fast = fast?;
+            Ok((fast.shadow.clone(), Some(fast)))
+        }
+        None => Ok((src.to_path_buf(), None)),
+    }
+}
+
 pub(crate) fn freeze_path_owned(src: &Path, dst: &Path, purpose: CapturePurpose) -> Result<OwnedCapture> {
+    let (source, fast) = source_of(src)?;
+    let captured = freeze_native_owned(&source, dst, purpose)?;
+    if let Some(fast) = fast {
+        fast.finish(dst, true)?;
+    }
+    Ok(captured)
+}
+
+fn freeze_native_owned(src: &Path, dst: &Path, purpose: CapturePurpose) -> Result<OwnedCapture> {
     let driver = composition::operation(Some(src), dst, purpose)?;
     let result = (|| -> layr_fs_core::Result<_> {
         let source = driver.working(src)?;
@@ -281,6 +302,9 @@ pub(crate) fn export_selected_owned(
     destination: &Path,
 ) -> Result<OwnedWorking> {
     let driver = composition::operation(None, destination, CapturePurpose::State)?;
+    // The folder of a fast line is read from its shadow (`source_of`).
+    let fast = source.folder().map(source_of).transpose()?;
+    let folder = fast.as_ref().map(|(path, _)| path.as_path());
     let result = (|| -> layr_fs_core::Result<CreatedTree> {
         let created = driver.create_empty(driver.location(destination)?)?;
         let copied = (|| -> layr_fs_core::Result<()> {
@@ -288,7 +312,7 @@ pub(crate) fn export_selected_owned(
             root.mode = 0o700;
             created.tree.writer().set_metadata(&RelDir::Root, &root)?;
             let paths = paths.iter().map(|path| RelPath::new(path.as_bytes())).collect::<layr_fs_core::Result<Vec<_>>>()?;
-            let native = source.folder().map(|path| driver.working(path)).transpose()?;
+            let native = folder.map(|path| driver.working(path)).transpose()?;
             let reader = native.as_ref().map(WorkingTree::reader).unwrap_or(source);
             let acceleration = native
                 .as_ref()

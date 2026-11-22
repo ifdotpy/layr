@@ -179,6 +179,85 @@ pub(crate) fn with_detached<T>(project: &str, line: Line, f: impl FnOnce() -> T)
     out
 }
 
+thread_local! {
+    /// True while a command moves the head of a line after git (`adopt_git`): the commands it
+    /// runs do not look at git again.
+    static FOLLOWING_GIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// How long a command waits for the line when git moved HEAD: the hook of the `.git` folder is
+/// moving the head of the line then (some seconds in a large tree). A longer holder is another
+/// command; the head follows later.
+const FOLLOW_GIT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `adopt_git` for a command of the line owner in the fast line `line`. A failure is a warning:
+/// a command that only reads still runs, and a command that moves the head refuses
+/// (`gitbridge::check_git_head`).
+fn follow_git(ctx: &Ctx, repo: &Repo, line: crate::model::Line) -> crate::model::Line {
+    if FOLLOWING_GIT.get() || ctx.caller.uid != line.owner || !crate::gitbridge::follows_git(repo, &line) {
+        return line;
+    }
+    // The usual case: one git command, no lock.
+    if !crate::gitbridge::git_head_differs(repo, &line) {
+        return line;
+    }
+    match adopt_git(ctx, repo, &line, Some(FOLLOW_GIT_WAIT)) {
+        Ok(Some(moved)) => moved,
+        Ok(None) => repo.line(&line.id).unwrap_or(line),
+        Err(e) => {
+            eprintln!("warning: git moved HEAD of line {}, and the head of the line did not follow: {e:#}", line.name);
+            line
+        }
+    }
+}
+
+/// Git moved HEAD of the fast line `line` (a commit, an amend, a reset, a checkout): move the
+/// head of the line to the state of that commit and keep the files, as `layr reset <state>`
+/// does. The line as it is after the move; None when git's HEAD is the commit of the head.
+/// `wait`: how long to wait for a command that holds the line (None: until it ends); after
+/// that time the head stays, with a warning.
+pub fn adopt_git(
+    ctx: &Ctx,
+    repo: &Repo,
+    line: &crate::model::Line,
+    wait: Option<std::time::Duration>,
+) -> Result<Option<crate::model::Line>> {
+    let lock = match wait {
+        None => Some(repo.line_lock(line)?),
+        Some(limit) => {
+            let start = std::time::Instant::now();
+            loop {
+                if let crate::store::LockAttempt::Acquired(lock) = repo.p.try_line_lock(&line.id, &line.name)? {
+                    break Some(lock);
+                }
+                if start.elapsed() >= limit {
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    let Some(_lock) = lock else {
+        bail!("another command holds the line; run 'layr git adopt' when it ends");
+    };
+    let line = repo.line(&line.id)?;
+    let Some((commit, state)) = crate::gitbridge::git_moved(ctx, repo, &line)? else { return Ok(None) };
+    // The move leaves git's HEAD and its index as they are (`gitbridge::following_git`).
+    FOLLOWING_GIT.set(true);
+    let moved = crate::gitbridge::following_git(&commit, || {
+        work::reset(ctx, &["--mixed".to_string(), "-q".to_string(), state.clone()])
+    });
+    FOLLOWING_GIT.set(false);
+    match moved {
+        Ok(0) => {
+            crate::gitbridge::git_followed(repo, &line, &commit)?;
+            Ok(Some(repo.line(&line.id)?))
+        }
+        Err(e) => Err(e),
+        Ok(code) => bail!("layr reset {} ended with code {code}", crate::ids::short(&state)),
+    }
+}
+
 pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
     let loc = ctx.locate()?;
     crate::store::set_holder_line(loc.line.as_deref());
@@ -186,6 +265,11 @@ pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
     let line = match &loc.line {
         Some(n) => Some(repo.line(n)?),
         None => DETACHED.with(|d| d.borrow().as_ref().filter(|(p, _)| *p == loc.project).map(|(_, l)| l.clone())),
+    };
+    // Git moved HEAD in a fast line: the head of the line follows before the command reads it.
+    let line = match line {
+        Some(l) if loc.line.is_some() => Some(follow_git(ctx, &repo, l)),
+        other => other,
     };
     // The local ignore file of the line applies also where a command scans a copy of the folder.
     if let Some(l) = line.as_ref().filter(|_| loc.line.is_some()) {
@@ -292,6 +376,8 @@ pub const COMMANDS: &[&str] = &[
 
 pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
     crate::repo::begin_command();
+    #[cfg(target_os = "macos")]
+    let _fast = crate::views::CommandScope::enter();
     let (cmd, rest) = match argv.first() {
         Some(c) => (c.as_str(), &argv[1..]),
         None => {

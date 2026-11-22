@@ -1,0 +1,14 @@
+round 1 layr:  00:32:42 up  4:48,  4 users,  load average: 1.52, 3.59, 8.40
+  busiest:  100 python; 4.3 sshd-session; 3.8 layr; 3.5 python; 1.9 init;
+round 1 linux:  00:36:29 up  4:52,  4 users,  load average: 10.90, 8.33, 9.34
+  busiest: 99.9 python;99.8 twin;99.8 twin;99.8 twin_fix;99.8 twin_fix;
+round 2 layr:  00:38:32 up  4:54,  4 users,  load average: 9.85, 8.82, 9.39
+  busiest:  404 freecadcmd; 102 python;99.9 twin_fix; 5.5 layr; 3.5 python;
+round 2 layr:  00:48:15 up  5:03,  2 users,  load average: 4.63, 7.51, 9.00
+  busiest:  100 python; 100 twin_fix; 100 twin_fix; 100 twin_fix; 100 twin_fix;
+round 2 linux:  00:51:55 up  5:07,  2 users,  load average: 10.27, 10.36, 9.96
+  busiest:  100 python;99.9 twin_fix;99.8 twin_fix;99.7 twin_r2; 3.5 python;
+round 3 layr:  00:54:06 up  5:09,  2 users,  load average: 10.40, 9.88, 9.80
+  busiest:  100 python; 3.5 python; 1.8 init; 0.7 node-MainThread; 0.2 systemd-udevd;
+round 3 linux:  00:57:46 up  5:13,  2 users,  load average: 7.51, 9.86, 9.92
+  busiest: 99.8 python; 3.5 python; 1.8 init; 0.7 node-MainThread; 0.2 systemd-udevd;

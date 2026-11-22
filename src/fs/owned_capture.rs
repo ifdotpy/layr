@@ -268,6 +268,15 @@ pub(crate) fn copy_capture_owned(
     destination: &Path,
     purpose: CapturePurpose,
 ) -> Result<(OwnedWorking, OwnerLayout)> {
+    let (source, fast) = super::source_of(source)?;
+    let copied = copy_native_owned(&source, destination, purpose)?;
+    if let Some(fast) = fast {
+        fast.finish(destination, false)?;
+    }
+    Ok(copied)
+}
+
+fn copy_native_owned(source: &Path, destination: &Path, purpose: CapturePurpose) -> Result<(OwnedWorking, OwnerLayout)> {
     let driver = composition::operation(Some(source), destination, purpose)?;
     let mut guards = Vec::new();
     let result = (|| -> layr_fs_core::Result<WritableCapture> {

@@ -1,0 +1,19 @@
+ok   target is a link to the native cache folder
+ok   edits in the view
+ok   view content equals the native folder
+ok   status lists A, M, D and leaves out the cache
+ok   save gives the tree of the native folder ("tree":"2b8944fc60c3ef2ec46621b095351ca215ceb4a7a783eb7844cae440c7d2fe6d")
+ok   status is clean after the save
+ok   an edit after the save shows
+ok   the mount gives ENOTCONN after kill -9
+ok   the restart replayed the journal
+ok   edits after the restart
+ok   save after a crash gives the same tree
+ok   git add, commit and status in the view
+ok   the agent cannot list the store (0700, user layr)
+ok   the agent cannot remove a saved state
+ok   another user cannot read the mount
+ok   another user cannot ask for a save
+ok   the agent owns the files it sees
+ok   the upper folder belongs to layr
+check: 18 passed, 0 failed

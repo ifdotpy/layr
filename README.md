@@ -97,6 +97,9 @@ curl -fsSL https://cloud.layr.ws/p/layr/install.sh | sh
 | macOS | any APFS folder, also on the default volume | Set `LAYR_ROOT` to a folder, for example `~/Projects/layr-store`. Commands run as you; the root service is optional ([details](docs/apfs.md)) |
 | Linux | ext4 or XFS, through OverlayFS | Build with `--features overlayfs`; needs root mount permission ([details](docs/overlayfs-backend.md)) |
 
+On macOS 27 and later (Apple silicon), the installer `layr-<version>.pkg` also brings LayrFS,
+the file system of fast lines ([fast lines](docs/fast-lines.md)).
+
 All three keep the same store and record formats, so machines on different platforms sync with
 each other.
 

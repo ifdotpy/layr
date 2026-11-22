@@ -12,6 +12,10 @@ pub mod find;
 pub mod index;
 pub mod rg;
 mod server;
+#[cfg(all(target_os = "linux", feature = "layrfs-fuse"))]
+pub mod view;
+#[cfg(target_os = "linux")]
+pub mod viewclient;
 pub mod watch;
 
 use anyhow::{bail, Context, Result};
@@ -100,10 +104,15 @@ fn write_frame(w: &mut impl Write, kind: u8, data: &[u8]) -> std::io::Result<()>
 }
 
 fn read_frame(r: &mut impl Read) -> std::io::Result<(u8, Vec<u8>)> {
+    read_frame_up_to(r, MAX_FRAME)
+}
+
+/// `read_frame` with its own limit: the state of a whole view in a handoff is larger.
+fn read_frame_up_to(r: &mut impl Read, max: usize) -> std::io::Result<(u8, Vec<u8>)> {
     let mut head = [0u8; 5];
     r.read_exact(&mut head)?;
     let len = u32::from_be_bytes(head[1..].try_into().unwrap()) as usize;
-    if len > MAX_FRAME {
+    if len > max {
         return Err(std::io::Error::other("frame too large"));
     }
     let mut data = vec![0u8; len];
@@ -284,6 +293,25 @@ fn serve_tool(tool: &str, args: &[String]) -> Result<i32, String> {
         return Err("RIPGREP_CONFIG_PATH adds arguments".into());
     }
     let cwd = std::env::current_dir().and_then(|d| d.canonicalize()).map_err(|e| format!("working folder: {e}"))?;
+    // In the FUSE view of a line, the view's own server answers from its index and reads the
+    // backing files: a walk through the mount costs a request per folder and file.
+    #[cfg(target_os = "linux")]
+    if let Some(m) = viewclient::find(&cwd) {
+        if viewclient::global_excludes() {
+            return Err("this user's git has global excludes, which the view's server cannot read".into());
+        }
+        let sock = viewclient::connect(&m)?;
+        let req = serde_json::json!({
+            "op": "tool",
+            "version": version(),
+            "tool": tool,
+            "args": args,
+            "root": m.root,
+            "cwd": cwd,
+            "stdin_readable": stdin_readable(),
+        });
+        return talk(&sock, tool, &req);
+    }
     let root = tree_root(&cwd).ok_or("not in a layr line or a git work tree")?;
     let path = socket_path();
     let sock = match connect(&path) {
@@ -304,11 +332,17 @@ fn serve_tool(tool: &str, args: &[String]) -> Result<i32, String> {
         "cwd": cwd,
         "stdin_readable": stdin_readable(),
     });
-    write_frame(&mut &sock, b'q', &serde_json::to_vec(&req).unwrap()).map_err(|e| format!("request: {e}"))?;
+    talk(&sock, tool, &req)
+}
+
+/// Send a tool request and copy the answer to stdout and stderr: the exit code, or why the
+/// real tool must run (nothing was printed then).
+fn talk(sock: &UnixStream, tool: &str, req: &serde_json::Value) -> Result<i32, String> {
+    write_frame(&mut &*sock, b'q', &serde_json::to_vec(req).unwrap()).map_err(|e| format!("request: {e}"))?;
     let (mut out, mut err) = (std::io::stdout().lock(), std::io::stderr().lock());
     let mut wrote = false;
     loop {
-        let (kind, data) = match read_frame(&mut &sock) {
+        let (kind, data) = match read_frame(&mut &*sock) {
             Ok(f) => f,
             Err(e) if !wrote => return Err(format!("the layrfs server did not answer: {e}")),
             Err(e) => {
@@ -345,6 +379,14 @@ fn serve_tool(tool: &str, args: &[String]) -> Result<i32, String> {
 /// `layr fs serve|warm|status|stop`.
 pub fn run_fs(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
+        #[cfg(target_os = "linux")]
+        Some("view") if args.get(1).map(String::as_str) == Some("fsmonitor") => Ok(viewclient::fsmonitor(&args[2..])),
+        #[cfg(all(target_os = "linux", feature = "layrfs-fuse"))]
+        Some("view") => view::run(&args[1..]),
+        #[cfg(not(all(target_os = "linux", feature = "layrfs-fuse")))]
+        Some("view") => bail!("this layr build has no FUSE view (Linux, cargo feature layrfs-fuse)"),
+        #[cfg(any(all(target_os = "linux", feature = "layrfs-fuse"), target_os = "macos"))]
+        Some("gitpack") => crate::gitpack::run(&args[1..]),
         Some("serve") => {
             server::serve(&socket_path())?;
             Ok(0)
@@ -388,7 +430,7 @@ pub fn run_fs(args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
-        _ => bail!("usage: layr fs serve | warm [<dir>] [--wait] | status | stop"),
+        _ => bail!("usage: layr fs serve | warm [<dir>] [--wait] | status | stop | view ..."),
     }
 }
 

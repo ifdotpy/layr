@@ -529,9 +529,10 @@ impl<'a> Repo<'a> {
     }
 
     /// The tree of our working folder to compare. APFS compares the live folder, as status does:
-    /// a copy would clone every file, cache folders included.
+    /// a copy would clone every file, cache folders included. A fast line's live folder is its
+    /// shadow (`working_src`): its mount has no APFS file identities.
     fn radar_tree(&self, line: &Line) -> Result<(Option<crate::repo::Temp>, PathBuf)> {
-        let working = self.working(line);
+        let working = self.working_src(line)?;
         if !crate::fs::prefers_captured_comparison(&working) {
             return Ok((None, working));
         }
@@ -614,7 +615,7 @@ impl<'a> Repo<'a> {
         self.hold(self.pin(&heads)?);
         // Taking the working folder tree is costly; do it only when another line needs it.
         let mut ours: Option<(Option<crate::repo::Temp>, PathBuf)> = None;
-        let ignored = Rules::new(&self.working(line));
+        let ignored = Rules::new(&self.working_src(line)?);
         // The hidden overlays are read once for all lines: reading them reads every overlay setting.
         // The other overlays of the layers join them when first seen (`open_layers`).
         let mut open = self.hidden_overlays()?;
