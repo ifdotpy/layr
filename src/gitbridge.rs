@@ -1869,7 +1869,7 @@ fn work_tree(repo: &Repo, source: &crate::repo::Snap, paths: &[String], keep: &m
 /// A checkout borrowed from one immutable source, owning any temporary trees until Git has
 /// finished both the index command and its refresh. It cannot survive or mutate its source.
 struct ExportCheckout<'source> {
-    _source: &'source crate::repo::Snap,
+    source: &'source crate::repo::Snap,
     root: PathBuf,
     _keep: Vec<crate::repo::Temp>,
 }
@@ -1882,7 +1882,12 @@ impl<'source> ExportCheckout<'source> {
             None => repo.complete(source.clone(), &mut keep)?,
             Some(paths) => work_tree(repo, source, paths, &mut keep)?,
         };
-        Ok(Self { _source: source, root, _keep: keep })
+        Ok(Self { source, root, _keep: keep })
+    }
+
+    fn is_thin(&self) -> bool {
+        use crate::fsutil::Src;
+        self.source.folder().is_none()
     }
 }
 
@@ -2744,21 +2749,22 @@ fn commit_tree(
         git_out(s, &["update-ref", refname, &commit])?;
         drop(commit_write);
         // Keep the index for the next export and for lines made from this state.
-        keep_index(repo, &state.id, &tmp_idx, inherited)?;
+        keep_index(repo, &state.id, &tmp_idx, inherited, &checkout)?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&tmp_idx);
     res
 }
 
-/// Keep `idx` as the index of `state` unless it has one. Only a copy of an earlier index is
-/// kept: its stat data are valid. An index from the tree of a commit has no stat data, and a
-/// refresh would read every file of the state; `line_commit` makes one when a line needs it.
-/// The file appears complete or not at all: other processes copy kept indexes without the
-/// project lock.
-fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<()> {
+/// Keep `idx` as the index of `state` unless it has one. An index that is not a copy of an
+/// earlier index gets its stat data from one refresh (none for a thin state: its index already has
+/// them). The file appears complete or not at all: other processes copy kept indexes without the
+/// project lock. Without it, the next export of every line read the whole tree of its commit
+/// (main's behavior since 0.47; the git-view merge had dropped it, and the apfs check failed).
+fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool, checkout: &ExportCheckout<'_>) -> Result<()> {
+    let _retain = crate::trace::span("git export index retention");
     let dst = index_path(repo, state);
-    if dst.exists() || !inherited {
+    if dst.exists() {
         return Ok(());
     }
     let tmp = dst.with_file_name(format!("{state}.{}.tmp", ids::new_id()));
@@ -2767,6 +2773,27 @@ fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<(
         let _ = std::fs::remove_file(&tmp);
     }
     r.context("keep the git index of the exported state")?;
+    if !inherited {
+        let _ = refresh_index(repo, state, checkout);
+    }
+    Ok(())
+}
+
+fn refresh_index(repo: &Repo, state: &str, checkout: &ExportCheckout<'_>) -> Result<()> {
+    // An index made from the previous index and the changed paths of a thin state has valid
+    // stat data already; a refresh would need a complete tree.
+    if checkout.is_thin() {
+        return Ok(());
+    }
+    let _t = crate::trace::span("git index refresh");
+    let s = store(repo);
+    base_cmd(&s)
+        .env("GIT_INDEX_FILE", index_path(repo, state))
+        .env("GIT_WORK_TREE", &checkout.root)
+        .args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false", "update-index", "-q", "--refresh"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
     Ok(())
 }
 
