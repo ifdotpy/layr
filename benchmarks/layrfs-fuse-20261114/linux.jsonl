@@ -1,0 +1,49 @@
+{"tree":"linux","backend":"fuse","step":"import","ms":20733}
+{"tree":"linux","backend":"fuse","step":"line new","ms":33}
+{"tree":"linux","backend":"fuse","step":"line delete (clean)","ms":25}
+{"tree":"linux","backend":"fuse","step":"git status (first)","ms":70671}
+{"tree":"linux","backend":"fuse","step":"git status (warm)","ms":??}
+{"tree":"linux","backend":"fuse","step":"rg -l TODO (first)","ms":10085}
+{"tree":"linux","backend":"fuse","step":"rg -l TODO (warm)","ms":3601}
+{"tree":"linux","backend":"fuse","step":"find -type f (warm)","ms":880}
+{"tree":"linux","backend":"fuse","step":"edit 10 files","ms":20}
+{"tree":"linux","backend":"fuse","step":"save 10","ms":250,"tree":"9282947261d7f0ffeb274c8df46a6b2ea35e60a4f6ba81928dddf8ac52a66b60"}
+{"tree":"linux","backend":"fuse","step":"edit 10000 files (modify)","ms":10758}
+{"tree":"linux","backend":"fuse","step":"save 10000","ms":3789,"tree":"0121ec13f3a716511eda760221004ea3aecc447281bcdd0df15803e54585cb59"}
+{"tree":"linux","backend":"fuse","step":"line delete (10010 changes)","ms":97}
+{"tree":"linux","backend":"btrfs","step":"line new","ms":30}
+{"tree":"linux","backend":"btrfs","step":"line delete (clean)","ms":25}
+{"tree":"linux","backend":"btrfs","step":"git status (first)","ms":24979}
+{"tree":"linux","backend":"btrfs","step":"git status (warm)","ms":249}
+{"tree":"linux","backend":"btrfs","step":"rg -l TODO (first)","ms":386}
+{"tree":"linux","backend":"btrfs","step":"rg -l TODO (warm)","ms":310}
+{"tree":"linux","backend":"btrfs","step":"find -type f (warm)","ms":170}
+{"tree":"linux","backend":"btrfs","step":"edit 10 files","ms":5}
+{"tree":"linux","backend":"btrfs","step":"save 10","ms":266,"tree":"93e6ca08ec11b91b46ff2cf8bf27d2052558ef4e00fd99184cd39fa642012f14"}
+{"tree":"linux","backend":"btrfs","step":"edit 10000 files (modify)","ms":297}
+{"tree":"linux","backend":"btrfs","step":"save 10000","ms":5597,"tree":"dea047d9b6ed9e987004c459e316d3c0d409a17c1491b99a07c0d0c5483e1e1c"}
+{"tree":"linux","backend":"btrfs","step":"line delete (10010 changes)","ms":866}
+{"tree":"linux","backend":"overlay","step":"line new","ms":23}
+{"tree":"linux","backend":"overlay","step":"line delete (clean)","ms":29}
+{"tree":"linux","backend":"overlay","step":"git status (first)","ms":60258}
+{"tree":"linux","backend":"overlay","step":"git status (warm)","ms":281}
+{"tree":"linux","backend":"overlay","step":"rg -l TODO (first)","ms":6038}
+{"tree":"linux","backend":"overlay","step":"rg -l TODO (warm)","ms":266}
+{"tree":"linux","backend":"overlay","step":"find -type f (warm)","ms":161}
+{"tree":"linux","backend":"overlay","step":"edit 10 files","ms":24}
+{"tree":"linux","backend":"overlay","step":"save 10","ms":69,"tree":"c1a8f0154f3e16eb0038b97ef3991a4cc90c2baf3a1eab9dd26c062c6fb2f86e"}
+{"tree":"linux","backend":"overlay","step":"edit 10000 files (modify)","ms":4245}
+{"tree":"linux","backend":"overlay","step":"save 10000","ms":2911,"tree":"e664df37293f1c09f14d45d6038d1032fbaabc446ba9838fbb8276c075a1d87a"}
+{"tree":"linux","backend":"overlay","step":"line delete (10010 changes)","ms":2564}
+{"tree":"linux","backend":"fuse-noopen","step":"line new","ms":37}
+{"tree":"linux","backend":"fuse-noopen","step":"line delete (clean)","ms":35}
+{"tree":"linux","backend":"fuse-noopen","step":"git status (first)","ms":64412}
+{"tree":"linux","backend":"fuse-noopen","step":"git status (warm)","ms":??}
+{"tree":"linux","backend":"fuse-noopen","step":"rg -l TODO (first)","ms":1843}
+{"tree":"linux","backend":"fuse-noopen","step":"rg -l TODO (warm)","ms":1938}
+{"tree":"linux","backend":"fuse-noopen","step":"find -type f (warm)","ms":603}
+{"tree":"linux","backend":"fuse-noopen","step":"edit 10 files","ms":9}
+{"tree":"linux","backend":"fuse-noopen","step":"save 10","ms":213,"tree":"a09f245f3b6ebc8c50f556360d0e77f69309ce24c45157c08b3999098c06c0b6"}
+{"tree":"linux","backend":"fuse-noopen","step":"edit 10000 files (modify)","ms":6231}
+{"tree":"linux","backend":"fuse-noopen","step":"save 10000","ms":913,"tree":"c81678c8753283093310278b025b5acebc70da97c5b5b420b67e12edadc2cc5b"}
+{"tree":"linux","backend":"fuse-noopen","step":"line delete (10010 changes)","ms":23}

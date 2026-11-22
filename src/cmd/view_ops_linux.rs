@@ -12,13 +12,16 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos.is_empty() || a.pos.len() > 2 || modes != 1 || (a.pos.len() == 2 && !a.has("--folder")) {
         return Err(exit(2, "usage: layr line show <line> --folder [<path>] | --none | --virtual"));
     }
-    require_enabled(ctx)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = repo.line(&a.pos[0])?;
     repo.authorize_line(ctx, &line, crate::repo::LineOp::Manage)?;
-    if of(repo, &line).is_none() {
+    let Some(view) = view_of(repo, &line) else {
         bail!("line {} has a folder; only virtual lines change their view for now", line.name);
+    };
+    // Fast lines are not experimental.
+    if !view.is_layrfs() {
+        require_enabled(ctx)?;
     }
     if h.line.as_ref().is_some_and(|l| l.id == line.id) || ctx.cwd.starts_with(repo.working(&line)) {
         bail!("run this command outside the line's folder: its view changes");
@@ -26,6 +29,9 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _line_lock = repo.line_lock(&line)?;
     let _lock = _line_lock.lock(&repo.p)?;
     let line = repo.line(&line.id)?;
+    if view.is_layrfs() {
+        return show_fast(ctx, repo, &line, &view, a.has("--none"), a.has("--folder"));
+    }
     recover_move(repo, &line)?;
     let hidden = dir(repo, &line.id).join("tree");
     let visible = repo.p.default_line_path(&line.name);

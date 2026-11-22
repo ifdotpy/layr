@@ -1,0 +1,8 @@
+%CPU COMMAND
+ 369 freecadcmd
+ 320 freecadcmd
+ 294 freecadcmd
+ 266 freecadcmd
+ 5.5 init
+ 3.5 python
+ 1.0 claude

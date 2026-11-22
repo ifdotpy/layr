@@ -1,0 +1,17 @@
+[package]
+name = "layrfs-fuse"
+version = "0.0.0"
+edition = "2021"
+description = "Helpers of the layr FUSE view benchmarks (docs/layrfs-fuse.md)"
+license = "MIT"
+publish = false
+
+# Outside the layr workspace: the prototype has its own lock file and does not change the builds of layr.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+layr-objects = { path = "../../crates/layr-objects" }
+
+[profile.release]
+debug = 1

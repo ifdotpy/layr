@@ -305,6 +305,40 @@ pub mod git {
         Ok(0)
     }
 
+    /// `layr git adopt`: git moved HEAD in a fast line (a commit, an amend, a reset, a checkout),
+    /// and the head of the line follows. Each layr command of the line owner in the line does
+    /// this first, and a hook of the `.git` folder runs it after git moves HEAD (`--hook`: in
+    /// the background, no output).
+    pub fn adopt(ctx: &Ctx, args: &[String]) -> Result<i32> {
+        let spec = Spec::new().flag("-q|--quiet").flag("--hook");
+        let a = parse(&spec, args)?;
+        if !a.pos.is_empty() {
+            return Err(exit(128, "usage: layr git adopt [-q]"));
+        }
+        // `here` followed git already, when it could.
+        let h = here(ctx)?;
+        let repo = &h.repo;
+        let line = h.line()?.clone();
+        if !gitbridge::follows_git(repo, &line) {
+            return Err(exit(1, format!("error: git is read only in line '{}': only a fast line follows git (layr line new --fast)", line.name)));
+        }
+        if a.has("--hook") {
+            // After git moved HEAD: wait for the line, follow, say nothing. git ended already.
+            let _ = crate::cmd::adopt_git(ctx, repo, &line, None);
+            return Ok(0);
+        }
+        let line = match crate::cmd::adopt_git(ctx, repo, &line, None)? {
+            Some(moved) => moved,
+            None => line,
+        };
+        gitbridge::check_git_head(repo, &line)?;
+        if !a.has("-q") {
+            let s = repo.state(&line.head)?;
+            outln!(ctx, "head is at {} {}", ids::short(&line.head), s.message.lines().next().unwrap_or(""));
+        }
+        Ok(0)
+    }
+
     /// Write the .git folder of `line` under the line lock, not the project lock. A save may move the
     /// head meanwhile: the folder then shows an older head, so it is written again (three tries).
     fn refresh_line_git(repo: &Repo, line: &crate::model::Line) -> Result<()> {
@@ -552,7 +586,7 @@ pub mod git {
     }
 
     pub fn run(ctx: &Ctx, args: &[String]) -> Result<i32> {
-        let (cmd, rest) = args.split_first().ok_or_else(|| exit(128, "usage: layr git <remote|fetch|pull|push|clone|sync>"))?;
+        let (cmd, rest) = args.split_first().ok_or_else(|| exit(128, "usage: layr git <remote|fetch|pull|push|clone|sync|adopt>"))?;
         match cmd.as_str() {
             "remote" => remote(ctx, rest),
             "fetch" => fetch(ctx, rest),
@@ -560,7 +594,8 @@ pub mod git {
             "push" => push(ctx, rest),
             "clone" => clone(ctx, rest),
             "sync" => sync(ctx, rest),
-            _ => Err(exit(128, "usage: layr git <remote|fetch|pull|push|clone|sync>")),
+            "adopt" => adopt(ctx, rest),
+            _ => Err(exit(128, "usage: layr git <remote|fetch|pull|push|clone|sync|adopt>")),
         }
     }
 }

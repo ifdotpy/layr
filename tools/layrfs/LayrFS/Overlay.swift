@@ -34,6 +34,16 @@ enum RelPath {
 
     static func join(_ dir: String, _ name: String) -> String { dir == "." ? name : dir + "/" + name }
 
+    static func name(_ p: String) -> String {
+        guard let i = p.lastIndex(of: "/") else { return p }
+        return String(p[p.index(after: i)...])
+    }
+
+    /// True for a relative path of names: no empty, `.` or `..` part, no leading `/`.
+    static func isPlain(_ p: String) -> Bool {
+        !p.isEmpty && p.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { $0 != "" && $0 != "." && $0 != ".." }
+    }
+
     /// The ancestors of `p`, nearest to the root first, without the root and without `p`.
     static func ancestors(_ p: String) -> [String] {
         var out: [String] = []
@@ -146,6 +156,11 @@ extension Backend: FileOpener {}
 /// A reader-writer lock: changes run one at a time, reads in parallel.
 final class Overlay: FileOpener {
     static let removedAttr = "com.layr.removed"
+    /// The name of the clone that a rename of a lower file makes beside its destination.
+    static let renamePrefix = ".layrfs-rename-"
+    /// The rename of a lower file in progress, an attribute of the upper root: a JSON object with
+    /// the clone `tmp`, the source `src` and the destination `dst`.
+    static let renamingAttr = "com.layr.renaming"
     static let hiddenAttrPrefix = "com.layr."
     static let quarantineAttr = "com.apple.quarantine"
     /// Volume folders that macOS services make at the root of a mount (FSEvents log, Spotlight,
@@ -204,6 +219,7 @@ final class Overlay: FileOpener {
             }
             for p in list where !p.isEmpty { removed[keys.key(p)] = p }
         }
+        try finishRenameLocked()
         let rootUpper = try upper.stat(".")
         alias[rootUpper.fileID] = rootIno
         var queue = ["."]
@@ -218,6 +234,37 @@ final class Overlay: FileOpener {
                 if e.vtype == .dir { queue.append(p) }
             }
         }
+    }
+
+    /// Completes or undoes the rename of a lower file that a crash interrupted (`rename`). With
+    /// the whiteout of the source in place, the clone takes the destination's name; without it,
+    /// the clone goes. Only the clone that the attribute names is touched.
+    private func finishRenameLocked() throws {
+        let data: Data
+        do { data = try upper.getXattr(".", name: Overlay.renamingAttr) } catch let e as PosixError where e.code == ENOATTR { return }
+        // A record that `rename` did not write stops the mount and stays for a look.
+        guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let tmp = o["tmp"], let src = o["src"], let dst = o["dst"]
+        else { throw PosixError(code: EIO, op: "overlay rename record \(String(decoding: data, as: UTF8.self))") }
+        do {
+            // Only a record that `rename` can write: plain relative paths, the clone beside the
+            // destination in an upper folder. Anything else leaves the disk as it is.
+            let parent = RelPath.parent(dst)
+            // Each folder on the way is a real folder (a link would lead out of the upper folder).
+            let dirs = parent == "." ? [] : RelPath.ancestors(parent) + [parent]
+            guard [tmp, src, dst].allSatisfy(RelPath.isPlain), RelPath.parent(tmp) == parent,
+                  RelPath.name(tmp).hasPrefix(Overlay.renamePrefix),
+                  dirs.allSatisfy({ (try? upper.stat($0))?.vtype == .dir })
+            else { throw PosixError(code: EIO, op: "overlay rename record \(String(decoding: data, as: UTF8.self))") }
+            let cloned = (try? upper.stat(tmp)) != nil
+            if removed[keys.key(src)] != nil {
+                if cloned { try upper.rename(tmp, dst) }
+                if removed[keys.key(dst)] == nil && lowerEntryLocked(dst) != nil { try addWhiteoutLocked(dst) }
+            } else if cloned {
+                try upper.unlink(tmp, isDir: false)
+            }
+        }
+        try upper.removeXattr(".", name: Overlay.renamingAttr)
     }
 
     // MARK: state checks (caller holds mu, or reads a value that only the caller changes)
@@ -306,7 +353,9 @@ final class Overlay: FileOpener {
                 out.append(fromUpper(e))
             }
         }
-        if lowerDir != nil, let d = lowerIndex.listing(path) {
+        if lowerDir != nil {
+            // A lower folder that cannot be read is no empty folder (rmdir would hide its files).
+            guard let d = lowerIndex.listing(path) else { throw PosixError(code: EIO, op: "overlay list lower \(path)") }
             for e in d.entries {
                 let k = keys.key(e.nameString)
                 if seen.contains(k) { continue }
@@ -386,10 +435,28 @@ final class Overlay: FileOpener {
         if l.vtype != .dir { throw PosixError(code: ENOTDIR, op: "overlay dir \(dir)") }
         try ensureUpperDirLocked(RelPath.parent(dir))
         try upper.mkdir(dir, mode: mode_t(l.perm | 0o700))
-        dequarantineLocked(dir)
-        if l.perm & 0o700 != 0o700 { try upper.chmod(dir, mode: mode_t(l.perm)) }
-        try? upper.utimes(dir, atime: l.accessTime, mtime: l.modifyTime)
-        let u = try upper.stat(dir)
+        let u: Entry
+        do {
+            dequarantineLocked(dir)
+            // The upper folder replaces the lower one for attribute reads: it takes the attributes.
+            for raw in try lower.listXattrs(dir) {
+                let name = String(decoding: raw, as: UTF8.self)
+                if name.hasPrefix(Overlay.hiddenAttrPrefix) { continue }
+                let value = try lower.getXattr(dir, name: name)
+                do {
+                    try upper.setXattr(dir, name: name, value: value, options: 0)
+                } catch where name.hasPrefix("com.apple.") {
+                    // The sandbox can refuse a system attribute (provenance): no content of the line.
+                }
+            }
+            if l.perm & 0o700 != 0o700 { try upper.chmod(dir, mode: mode_t(l.perm)) }
+            try? upper.utimes(dir, atime: l.accessTime, mtime: l.modifyTime)
+            u = try upper.stat(dir)
+        } catch {
+            // A folder that is not complete goes: the next change makes it again.
+            try? upper.unlink(dir, isDir: true)
+            throw error
+        }
         alias[u.fileID] = l.fileID
         upperTypes[keys.key(dir)] = .dir
     }
@@ -433,18 +500,21 @@ final class Overlay: FileOpener {
     private func addWhiteoutLocked(_ path: String) throws {
         let k = keys.key(path)
         let prefix = k + "/"
-        for key in removed.keys where key.hasPrefix(prefix) { removed[key] = nil }
-        removed[k] = path
-        try saveWhiteoutsLocked()
+        var next = removed
+        for key in next.keys where key.hasPrefix(prefix) { next[key] = nil }
+        next[k] = path
+        try saveWhiteoutsLocked(next)
     }
 
-    private func saveWhiteoutsLocked() throws {
-        if removed.isEmpty {
+    /// Writes the whiteouts `set`, then makes them the current ones: a failed write changes nothing.
+    private func saveWhiteoutsLocked(_ set: [String: String]) throws {
+        if set.isEmpty {
             do { try upper.removeXattr(".", name: Overlay.removedAttr) } catch let e as PosixError where e.code == ENOATTR {}
-            return
+        } else {
+            let data = try JSONSerialization.data(withJSONObject: set.values.sorted(), options: [])
+            try upper.setXattr(".", name: Overlay.removedAttr, value: data, options: 0)
         }
-        let data = try JSONSerialization.data(withJSONObject: removed.values.sorted(), options: [])
-        try upper.setXattr(".", name: Overlay.removedAttr, value: data, options: 0)
+        removed = set
     }
 
     /// Prepares a new upper entry at `path`: its parent folder exists in the upper folder.
@@ -488,15 +558,10 @@ final class Overlay: FileOpener {
         mutations &+= 1
     }
 
+    /// Hard links are not supported: layr saves each name of a link as its own file (the shadow
+    /// copies names one by one). ENOTSUP makes tools such as git and cargo copy instead.
     func link(from src: String, to dst: String) throws {
-        wlock()
-        defer { unlock() }
-        guard existsLocked(src) else { throw PosixError(code: ENOENT, op: "overlay link \(src)") }
-        try prepareNewLocked(dst)
-        _ = try copyUpLocked(src)
-        try upper.link(from: src, to: dst)
-        upperTypes[keys.key(dst)] = upperTypeLocked(src)
-        mutations &+= 1
+        throw PosixError(code: ENOTSUP, op: "overlay link \(src) -> \(dst)")
     }
 
     /// Removes the merged entry at `path`. A folder must be empty in the merged view.
@@ -515,13 +580,21 @@ final class Overlay: FileOpener {
         if isDir && !isDirNow { throw PosixError(code: ENOTDIR, op: "overlay rmdir \(path)") }
         if !isDir && isDirNow { throw PosixError(code: EISDIR, op: "overlay unlink \(path)") }
         if try isDirNow && !listLocked(path).isEmpty { throw PosixError(code: ENOTEMPTY, op: "overlay rmdir \(path)") }
-        if ut != nil {
-            let u = try upper.stat(path)
-            try upper.unlink(path, isDir: isDirNow)
-            upperTypes[keys.key(path)] = nil
-            if u.linkCount <= 1 || isDirNow { alias[u.fileID] = nil }
-        }
+        // The whiteout first: a failed remove of the upper copy leaves the changed content, never
+        // the lower content under the name.
+        let before = removed
         if l != nil { try addWhiteoutLocked(path) }
+        if ut != nil {
+            do {
+                let u = try upper.stat(path)
+                try upper.unlink(path, isDir: isDirNow)
+                upperTypes[keys.key(path)] = nil
+                if u.linkCount <= 1 || isDirNow { alias[u.fileID] = nil }
+            } catch {
+                if l != nil { try? saveWhiteoutsLocked(before) }
+                throw error
+            }
+        }
         mutations &+= 1
     }
 
@@ -543,16 +616,55 @@ final class Overlay: FileOpener {
         if dparent != "." && !existsLocked(dparent) { throw PosixError(code: ENOENT, op: "overlay rename to \(dst)") }
         // A rename that changes only the case of the name keeps the entry.
         let sameEntry = keys.key(src) == keys.key(dst)
+        // The destination is replaced in one rename (no step where it is gone): its upper entry
+        // by renameat, its lower entry by a whiteout after the rename.
+        var replacesUpper = false, replacesLower = false
         if !sameEntry && existsLocked(dst) {
             let dtype = upperTypeLocked(dst) ?? lowerEntryLocked(dst)!.vtype
             if type == .dir && dtype != .dir { throw PosixError(code: ENOTDIR, op: "overlay rename to \(dst)") }
             if type != .dir && dtype == .dir { throw PosixError(code: EISDIR, op: "overlay rename to \(dst)") }
-            try unlinkLocked(dst, isDir: dtype == .dir)
+            if dtype == .dir, try !listLocked(dst).isEmpty { throw PosixError(code: ENOTEMPTY, op: "overlay rename to \(dst)") }
+            replacesUpper = upperTypeLocked(dst) != nil
+            replacesLower = lowerEntryLocked(dst) != nil
         }
+        let replaced = replacesUpper ? try? upper.stat(dst) : nil
         try ensureUpperDirLocked(dparent)
+        // The whiteout of a lower source comes before the new name: a crash in between leaves the
+        // state before the rename (an upper source still shows) or one that the next mount
+        // completes (`finishRenameLocked`). Never a state with both names.
+        let sk0 = keys.key(src)
+        func unwhite() {
+            if sl != nil { var next = removed; next[sk0] = nil; try? saveWhiteoutsLocked(next) }
+        }
         if sut != nil {
-            try upper.rename(src, dst)
-            let sk = keys.key(src), dk = keys.key(dst)
+            do {
+                if sl != nil { try addWhiteoutLocked(src) }
+                try upper.rename(src, dst)
+            } catch { unwhite(); throw error }
+        } else {
+            // A lower source becomes a clone beside the destination, then takes its name.
+            let tmp = RelPath.join(dparent, Overlay.renamePrefix + UUID().uuidString)
+            let intent = try JSONSerialization.data(withJSONObject: ["tmp": tmp, "src": src, "dst": dst], options: [.sortedKeys])
+            try upper.setXattr(".", name: Overlay.renamingAttr, value: intent, options: 0)
+            var cloned = false
+            do {
+                try check(clonefileat(lower.rootFD, src, upper.rootFD, tmp, UInt32(CLONE_NOFOLLOW)), "clonefileat \(src) -> \(tmp)")
+                cloned = true
+                // The clone keeps the lock flags of the lower file: a locked file cannot move.
+                let u = try upper.stat(tmp)
+                if u.flags & lockFlags != 0 { try upper.setCommon(tmp, birth: nil, backup: nil, flags: u.flags & ~lockFlags) }
+                try addWhiteoutLocked(src)
+                try upper.rename(tmp, dst)
+            } catch {
+                unwhite()
+                if cloned { try? upper.unlink(tmp, isDir: false) }
+                try? upper.removeXattr(".", name: Overlay.renamingAttr)
+                throw error
+            }
+        }
+        if let r = replaced, r.linkCount <= 1 || r.vtype == .dir { alias[r.fileID] = nil }
+        let sk = keys.key(src), dk = keys.key(dst)
+        if sut != nil {
             upperTypes[sk] = nil
             upperTypes[dk] = type
             if type == .dir {
@@ -563,18 +675,27 @@ final class Overlay: FileOpener {
                 }
             }
         } else {
-            try check(clonefileat(lower.rootFD, src, upper.rootFD, dst, UInt32(CLONE_NOFOLLOW)), "clonefileat \(src) -> \(dst)")
             dequarantineLocked(dst)
-            var u = try upper.stat(dst)
-            if u.flags & lockFlags != 0 {
-                try upper.setCommon(dst, birth: nil, backup: nil, flags: u.flags & ~lockFlags)
-                u = try upper.stat(dst)
-            }
+            let u = try upper.stat(dst)
             alias[u.fileID] = sl!.fileID
-            upperTypes[keys.key(dst)] = type
+            upperTypes[dk] = type
         }
-        if sl != nil && !sameEntry { try addWhiteoutLocked(src) }
+        if replacesLower { try addWhiteoutLocked(dst) }
+        if sut == nil { try upper.removeXattr(".", name: Overlay.renamingAttr) }
         mutations &+= 1
+    }
+
+    /// Makes the upper folder durable: its files, the whiteouts (an attribute of its root) and
+    /// its entries. The data of every file that this volume wrote waits in the volume of the
+    /// upper folder, so the call syncs that volume.
+    func sync(wait: Bool, full: Bool) throws {
+        let flags = (wait ? SYNC_VOLUME_WAIT : 0) | (full ? SYNC_VOLUME_FULLSYNC : 0)
+        if sync_volume_np(upper.rootPath, flags) == 0 { return }
+        // The sandbox of the extension can refuse the volume call: the folder's own descriptor
+        // then syncs (its entries and the whiteouts), F_FULLFSYNC also the drive's cache.
+        if !wait { return }
+        if full && fcntl(upper.rootFD, F_FULLFSYNC) == 0 { return }
+        if fsync(upper.rootFD) != 0 { throw PosixError(code: errno, op: "fsync \(upper.rootPath)") }
     }
 
     var json: [String: Any] {

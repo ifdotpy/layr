@@ -360,7 +360,12 @@ pub fn repack_store(h: &Here) -> Result<(layr_objects::store::EvictReport, layr_
     let hot = crate::objstore::hot_trees(&h.repo.p, &store)?;
     drop(lock);
     let evicted = store.evict_hot(&hot)?;
-    let packed = store.pack()?;
+    let mut packed = store.pack()?;
+    // Packs of an older block size (4 MiB) get blocks of the current size (docs/objects.md).
+    let r = store.reblock()?;
+    packed.packs += r.packs;
+    packed.pack_bytes += r.pack_bytes;
+    packed.reblocked = r.reblocked;
     Ok((evicted, packed, started.elapsed().as_secs_f64()))
 }
 
@@ -383,6 +388,9 @@ pub fn maintain_for_gc(ctx: &Ctx, repo: &crate::repo::Repo, dry: bool, quiet: bo
                 outln!(ctx, "objects: {name}: {verb} {} state record(s), {} object(s), {} hot blob(s), {} bytes; {cold} {} hot blob(s), {} source bytes; {pack} {} existing loose object(s), {} loose bytes (plus new cold encodings)",
                     plan.prune.states, plan.prune.objects, plan.prune.blobs, plan.prune.bytes,
                     plan.evict.blobs, plan.evict.bytes, plan.pack_objects, plan.pack_bytes);
+                if plan.reblocked > 0 {
+                    outln!(ctx, "objects: {name}: wrote {} pack(s) of 4 MiB blocks again in 256 KiB blocks", plan.reblocked);
+                }
             }
         }
         Ok(())
@@ -414,18 +422,20 @@ fn repack(ctx: &Ctx, args: &[String]) -> Result<i32> {
             ctx,
             "{}",
             json!({"evicted_blobs": e.blobs, "evicted_bytes": e.bytes, "packs": p.packs, "packed_objects": p.objects,
-                "removed_loose": p.removed, "loose_bytes": p.loose_bytes, "pack_bytes": p.pack_bytes, "seconds": seconds})
+                "removed_loose": p.removed, "loose_bytes": p.loose_bytes, "pack_bytes": p.pack_bytes, "reblocked_packs": p.reblocked,
+                "seconds": seconds})
         );
     } else {
         outln!(
             ctx,
-            "repacked: {} hot blobs turned cold ({} bytes); {} objects ({} loose bytes) into {} packs of {} bytes in {:.2} s",
+            "repacked: {} hot blobs turned cold ({} bytes); {} objects ({} loose bytes) into {} packs of {} bytes{} in {:.2} s",
             e.blobs,
             e.bytes,
             p.objects,
             p.loose_bytes,
             p.packs,
             p.pack_bytes,
+            if p.reblocked > 0 { format!(" ({} packs of 4 MiB blocks written again)", p.reblocked) } else { String::new() },
             seconds
         );
     }

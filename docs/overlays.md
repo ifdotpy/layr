@@ -494,10 +494,9 @@ t58, t23, t37; unit test `prune_keeps_what_kept_states_reach_and_drops_the_rest`
 7. (migrate-parts also gives line heads their parts on folder overlays and sets the platform of an old `cache.<folder>` overlay whose states have one platform; t237.) Parts of folder overlays as v2 objects (built, partly): in a project with `objects.enabled`, a
    part of an overlay goes to the overlay's own object store (`meta/overlays/<overlay>/meta/objects`),
    written incrementally against the part before it (`objstore::enabled`, `record_states`). The
-   immutable flag of sealed files is handled by the store's clone hook. Left: the native copy of a
-   part stays (the overlay code reads parts as folders), so the space gain is in pushes and in
-   dedup, not yet on the local disk; history=last drops the part record, and its objects wait for
-   a repack that walks reachability. Test t236.
+   immutable flag of sealed files is handled by the store's clone hook. A part gives up its native
+   copy once its objects are durable, and `layr gc` prunes what no kept state reaches ("Local space
+   and history of parts" above). Test t236.
 8. Layr Cloud: a state with parts needs no API change (checked 2026-11-12 against layr-cloud
    `crates/layr-gateway`). Each overlay is already its own layer scope (`overlays/<name>/`) with
    its own `PUT /states/<state>` of one tree and times table, so a part is a state of its overlay's

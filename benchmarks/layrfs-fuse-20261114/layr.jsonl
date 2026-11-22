@@ -1,0 +1,73 @@
+{"tree":"layr","backend":"fuse","step":"import","ms":324}
+{"tree":"layr","backend":"fuse","step":"line new","ms":82}
+{"tree":"layr","backend":"fuse","step":"line delete (clean)","ms":69}
+{"tree":"layr","backend":"fuse","step":"git status (first)","ms":2035}
+{"tree":"layr","backend":"fuse","step":"git status (warm)","ms":38}
+{"tree":"layr","backend":"fuse","step":"rg -l TODO (first)","ms":307}
+{"tree":"layr","backend":"fuse","step":"rg -l TODO (warm)","ms":56}
+{"tree":"layr","backend":"fuse","step":"find -type f (warm)","ms":70}
+{"tree":"layr","backend":"fuse","step":"edit 10 files","ms":14}
+{"tree":"layr","backend":"fuse","step":"save 10","ms":71,"tree":"94b2c178c63b45fe8250aa5f8fb3c0243d5f6b224a96a2cead8eaf962840e7d4"}
+{"tree":"layr","backend":"fuse","step":"edit 10000 files (create)","ms":9886}
+{"tree":"layr","backend":"fuse","step":"save 10000","ms":2559,"tree":"71d6d797d4ad46cbe4d17934ff44c51d5ee3c359d8bdc19419ad166c2c8d7e57"}
+{"tree":"layr","backend":"fuse","step":"line delete (10010 changes)","ms":35}
+{"tree":"layr","backend":"fuse","step":"cargo build (full)","ms":124500}
+{"tree":"layr","backend":"fuse","step":"cargo build (touch main.rs)","ms":7847}
+{"tree":"layr","backend":"fuse","step":"cargo build (edit views.rs)","ms":286}
+{"tree":"layr","backend":"btrfs","step":"line new","ms":23}
+{"tree":"layr","backend":"btrfs","step":"line delete (clean)","ms":13}
+{"tree":"layr","backend":"btrfs","step":"git status (first)","ms":208}
+{"tree":"layr","backend":"btrfs","step":"git status (warm)","ms":9}
+{"tree":"layr","backend":"btrfs","step":"rg -l TODO (first)","ms":24}
+{"tree":"layr","backend":"btrfs","step":"rg -l TODO (warm)","ms":13}
+{"tree":"layr","backend":"btrfs","step":"find -type f (warm)","ms":13}
+{"tree":"layr","backend":"btrfs","step":"edit 10 files","ms":4}
+{"tree":"layr","backend":"btrfs","step":"save 10","ms":76,"tree":"54e2ca106c3f1b2c9766b419d1b135edbe5e332f9b86dbb9330779fe57214ed2"}
+{"tree":"layr","backend":"btrfs","step":"edit 10000 files (create)","ms":1207}
+{"tree":"layr","backend":"btrfs","step":"save 10000","ms":2988,"tree":"e6386b1e48d7baee606a0e1e6b2f6524591776d035f77f5df493608a08c50b51"}
+{"tree":"layr","backend":"btrfs","step":"line delete (10010 changes)","ms":67}
+{"tree":"layr","backend":"btrfs","step":"cargo build (full)","ms":90434}
+{"tree":"layr","backend":"btrfs","step":"cargo build (touch main.rs)","ms":7406}
+{"tree":"layr","backend":"btrfs","step":"cargo build (edit views.rs)","ms":241}
+{"tree":"layr","backend":"overlay","step":"line new","ms":21}
+{"tree":"layr","backend":"overlay","step":"line delete (clean)","ms":38}
+{"tree":"layr","backend":"overlay","step":"git status (first)","ms":331}
+{"tree":"layr","backend":"overlay","step":"git status (warm)","ms":10}
+{"tree":"layr","backend":"overlay","step":"rg -l TODO (first)","ms":17}
+{"tree":"layr","backend":"overlay","step":"rg -l TODO (warm)","ms":15}
+{"tree":"layr","backend":"overlay","step":"find -type f (warm)","ms":15}
+{"tree":"layr","backend":"overlay","step":"edit 10 files","ms":13}
+{"tree":"layr","backend":"overlay","step":"save 10","ms":52,"tree":"9eb86799fa0d427d328ed94ead5dc6c89672997ccd326114bc30d04eeb09456d"}
+{"tree":"layr","backend":"overlay","step":"edit 10000 files (create)","ms":1398}
+{"tree":"layr","backend":"overlay","step":"save 10000","ms":1735,"tree":"5529805b9bad070600f7b1c3ff352ecef18fa1468400fefebe6b7e8ccc8f8e3c"}
+{"tree":"layr","backend":"overlay","step":"line delete (10010 changes)","ms":2487}
+{"tree":"layr","backend":"overlay","step":"cargo build (full)","ms":79492}
+{"tree":"layr","backend":"overlay","step":"cargo build (touch main.rs)","ms":6236}
+{"tree":"layr","backend":"overlay","step":"cargo build (edit views.rs)","ms":291}
+{"tree":"layr","backend":"fuse-noopen","step":"line new","ms":24}
+{"tree":"layr","backend":"fuse-noopen","step":"line delete (clean)","ms":21}
+{"tree":"layr","backend":"fuse-noopen","step":"git status (first)","ms":934}
+{"tree":"layr","backend":"fuse-noopen","step":"git status (warm)","ms":29}
+{"tree":"layr","backend":"fuse-noopen","step":"rg -l TODO (first)","ms":122}
+{"tree":"layr","backend":"fuse-noopen","step":"rg -l TODO (warm)","ms":33}
+{"tree":"layr","backend":"fuse-noopen","step":"find -type f (warm)","ms":70}
+{"tree":"layr","backend":"fuse-noopen","step":"edit 10 files","ms":8}
+{"tree":"layr","backend":"fuse-noopen","step":"save 10","ms":43,"tree":"86415a6a601c379d2001988b63de95d14d3a914376fda6d910a98359c0aba070"}
+{"tree":"layr","backend":"fuse-noopen","step":"edit 10000 files (create)","ms":8626}
+{"tree":"layr","backend":"fuse-noopen","step":"save 10000","ms":673,"tree":"c0807016a3e072d53c3bd2e82ea35543a2120daf812566295b39750b017581eb"}
+{"tree":"layr","backend":"fuse-noopen","step":"line delete (10010 changes)","ms":34}
+{"tree":"layr","backend":"fuse-noopen","step":"cargo build (full)","ms":72473}
+{"tree":"layr","backend":"fuse-noopen","step":"cargo build (touch main.rs)","ms":7021}
+{"tree":"layr","backend":"fuse-noopen","step":"cargo build (edit views.rs)","ms":300}
+{"tree":"layr","backend":"btrfs","step":"cargo build (full) r2","ms":71212}
+{"tree":"layr","backend":"btrfs","step":"cargo build (touch main.rs) r2","ms":6860}
+{"tree":"layr","backend":"btrfs","step":"cargo build (edit views.rs) r2","ms":266}
+{"tree":"layr","backend":"fuse","step":"cargo build (full) r2","ms":64624}
+{"tree":"layr","backend":"fuse","step":"cargo build (touch main.rs) r2","ms":7297}
+{"tree":"layr","backend":"fuse","step":"cargo build (edit views.rs) r2","ms":404}
+{"tree":"layr","backend":"overlay","step":"cargo build (full) r2","ms":72464}
+{"tree":"layr","backend":"overlay","step":"cargo build (touch main.rs) r2","ms":8374}
+{"tree":"layr","backend":"overlay","step":"cargo build (edit views.rs) r2","ms":350}
+{"tree":"layr","backend":"fuse-noopen","step":"cargo build (full) r2","ms":68465}
+{"tree":"layr","backend":"fuse-noopen","step":"cargo build (touch main.rs) r2","ms":7293}
+{"tree":"layr","backend":"fuse-noopen","step":"cargo build (edit views.rs) r2","ms":252}

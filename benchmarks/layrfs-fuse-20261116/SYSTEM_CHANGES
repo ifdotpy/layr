@@ -1,0 +1,3 @@
+install /home/layr/layr (owned by layr)
+Mon Nov 16 00:30:37 CET 2026 restored /dev/null (was a regular file)
+Mon Nov 16 00:44:03 CET 2026 echo Y > /sys/module/fuse/parameters/enable_uring (FUSE over io_uring, until reboot)

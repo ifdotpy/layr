@@ -1,0 +1,238 @@
+{"v":"old","step":"line new","ms":1588,"round":1,"load":21.90}
+{"v":"old","step":"git status (first)","ms":433,"round":1,"load":21.90}
+{"v":"old","step":"git status (warm)","ms":69,"round":1,"load":21.90}
+{"v":"old","step":"git status (warm 2)","ms":79,"round":1,"load":21.90}
+{"v":"old","step":"git status after 10 edits","ms":112,"round":1,"load":21.90}
+{"v":"old","step":"git diff --stat","ms":60,"round":1,"load":21.90}
+{"v":"old","step":"git commit -a (10 files)","ms":193,"round":1,"load":21.90}
+{"v":"old","step":"head follows git commit","ms":3197,"round":1}
+{"v":"old","step":"git status after git commit","ms":127,"round":1,"load":21.99}
+{"v":"old","step":"git reset --hard HEAD~1","ms":235,"round":1,"load":21.99}
+{"v":"old","step":"head follows git reset","ms":2038,"round":1}
+{"v":"old","step":"git status after git reset","ms":153,"round":1,"load":21.99}
+{"v":"old","step":"layr save -a (10 files)","ms":2085,"round":1,"load":21.99}
+{"v":"old","step":"git status after layr save","ms":316,"round":1,"load":21.99}
+{"v":"old","step":"git status after layr save 2","ms":124,"round":1,"load":21.99}
+{"v":"old","step":"layr undo FAILED","ms":196,"round":1,"load":21.99}
+{"v":"old","step":"git status after layr undo","ms":82,"round":1,"load":21.99}
+{"v":"new","step":"line new","ms":1012,"round":1,"load":23.11}
+{"v":"new","step":"git status (first)","ms":438,"round":1,"load":23.11}
+{"v":"new","step":"git status (warm)","ms":52,"round":1,"load":23.11}
+{"v":"new","step":"git status (warm 2)","ms":52,"round":1,"load":23.11}
+{"v":"new","step":"git status after 10 edits","ms":74,"round":1,"load":23.11}
+{"v":"new","step":"git diff --stat","ms":53,"round":1,"load":23.11}
+{"v":"new","step":"git commit -a (10 files)","ms":107,"round":1,"load":23.11}
+{"v":"new","step":"head follows git commit","ms":3336,"round":1}
+{"v":"new","step":"git status after git commit","ms":86,"round":1,"load":23.34}
+{"v":"new","step":"git reset --hard HEAD~1","ms":214,"round":1,"load":23.34}
+{"v":"new","step":"head follows git reset","ms":2354,"round":1}
+{"v":"new","step":"git status after git reset","ms":102,"round":1,"load":23.34}
+{"v":"new","step":"layr save -a (10 files)","ms":2143,"round":1,"load":23.34}
+{"v":"new","step":"git status after layr save","ms":144,"round":1,"load":23.23}
+{"v":"new","step":"git status after layr save 2","ms":82,"round":1,"load":23.23}
+{"v":"new","step":"layr undo FAILED","ms":160,"round":1,"load":23.23}
+{"v":"new","step":"git status after layr undo","ms":88,"round":1,"load":23.23}
+{"v":"old","step":"line new","ms":923,"round":2,"load":23.23}
+{"v":"old","step":"git status (first)","ms":436,"round":2,"load":23.23}
+{"v":"old","step":"git status (warm)","ms":53,"round":2,"load":23.23}
+{"v":"old","step":"git status (warm 2)","ms":55,"round":2,"load":23.23}
+{"v":"old","step":"git status after 10 edits","ms":102,"round":2,"load":23.23}
+{"v":"old","step":"git diff --stat","ms":44,"round":2,"load":23.23}
+{"v":"old","step":"git commit -a (10 files)","ms":136,"round":2,"load":23.23}
+{"v":"old","step":"head follows git commit","ms":3032,"round":2}
+{"v":"old","step":"git status after git commit","ms":105,"round":2,"load":22.97}
+{"v":"old","step":"git reset --hard HEAD~1","ms":220,"round":2,"load":22.97}
+{"v":"old","step":"head follows git reset","ms":3172,"round":2}
+{"v":"old","step":"git status after git reset","ms":278,"round":2,"load":22.82}
+{"v":"old","step":"layr save -a (10 files)","ms":2446,"round":2,"load":22.82}
+{"v":"old","step":"git status after layr save","ms":247,"round":2,"load":22.82}
+{"v":"old","step":"git status after layr save 2","ms":66,"round":2,"load":22.82}
+{"v":"old","step":"layr undo FAILED","ms":138,"round":2,"load":22.82}
+{"v":"old","step":"git status after layr undo","ms":68,"round":2,"load":22.82}
+{"v":"new","step":"line new","ms":943,"round":2,"load":22.67}
+{"v":"new","step":"git status (first)","ms":437,"round":2,"load":22.67}
+{"v":"new","step":"git status (warm)","ms":61,"round":2,"load":22.67}
+{"v":"new","step":"git status (warm 2)","ms":67,"round":2,"load":22.67}
+{"v":"new","step":"git status after 10 edits","ms":77,"round":2,"load":22.67}
+{"v":"new","step":"git diff --stat","ms":51,"round":2,"load":22.67}
+{"v":"new","step":"git commit -a (10 files)","ms":112,"round":2,"load":22.67}
+{"v":"new","step":"head follows git commit","ms":2987,"round":2}
+{"v":"new","step":"git status after git commit","ms":92,"round":2,"load":23.82}
+{"v":"new","step":"git reset --hard HEAD~1","ms":218,"round":2,"load":23.82}
+{"v":"new","step":"head follows git reset","ms":2281,"round":2}
+{"v":"new","step":"git status after git reset","ms":94,"round":2,"load":23.82}
+{"v":"new","step":"layr save -a (10 files)","ms":1909,"round":2,"load":23.59}
+{"v":"new","step":"git status after layr save","ms":131,"round":2,"load":23.59}
+{"v":"new","step":"git status after layr save 2","ms":63,"round":2,"load":23.59}
+{"v":"new","step":"layr undo FAILED","ms":151,"round":2,"load":23.59}
+{"v":"new","step":"git status after layr undo","ms":75,"round":2,"load":23.59}
+{"v":"old","step":"line new","ms":869,"round":3,"load":24.59}
+{"v":"old","step":"git status (first)","ms":437,"round":3,"load":24.59}
+{"v":"old","step":"git status (warm)","ms":65,"round":3,"load":24.59}
+{"v":"old","step":"git status (warm 2)","ms":63,"round":3,"load":24.59}
+{"v":"old","step":"git status after 10 edits","ms":117,"round":3,"load":24.59}
+{"v":"old","step":"git diff --stat","ms":53,"round":3,"load":24.59}
+{"v":"old","step":"git commit -a (10 files)","ms":169,"round":3,"load":24.59}
+{"v":"old","step":"head follows git commit","ms":2882,"round":3}
+{"v":"old","step":"git status after git commit","ms":150,"round":3,"load":24.59}
+{"v":"old","step":"git reset --hard HEAD~1","ms":240,"round":3,"load":24.59}
+{"v":"old","step":"head follows git reset","ms":2381,"round":3}
+{"v":"old","step":"git status after git reset","ms":127,"round":3,"load":24.54}
+{"v":"old","step":"layr save -a (10 files)","ms":2172,"round":3,"load":24.54}
+{"v":"old","step":"git status after layr save","ms":255,"round":3,"load":24.54}
+{"v":"old","step":"git status after layr save 2","ms":56,"round":3,"load":24.54}
+{"v":"old","step":"layr undo FAILED","ms":152,"round":3,"load":24.54}
+{"v":"old","step":"git status after layr undo","ms":71,"round":3,"load":23.85}
+{"v":"new","step":"line new","ms":1008,"round":3,"load":23.85}
+{"v":"new","step":"git status (first)","ms":485,"round":3,"load":23.85}
+{"v":"new","step":"git status (warm)","ms":82,"round":3,"load":23.85}
+{"v":"new","step":"git status (warm 2)","ms":73,"round":3,"load":23.85}
+{"v":"new","step":"git status after 10 edits","ms":120,"round":3,"load":23.85}
+{"v":"new","step":"git diff --stat","ms":65,"round":3,"load":23.85}
+{"v":"new","step":"git commit -a (10 files)","ms":130,"round":3,"load":23.85}
+{"v":"new","step":"head follows git commit","ms":3363,"round":3}
+{"v":"new","step":"git status after git commit","ms":74,"round":3,"load":23.22}
+{"v":"new","step":"git reset --hard HEAD~1","ms":178,"round":3,"load":23.22}
+{"v":"new","step":"head follows git reset","ms":2257,"round":3}
+{"v":"new","step":"git status after git reset","ms":88,"round":3,"load":22.17}
+{"v":"new","step":"layr save -a (10 files)","ms":1688,"round":3,"load":22.17}
+{"v":"new","step":"git status after layr save","ms":188,"round":3,"load":22.17}
+{"v":"new","step":"git status after layr save 2","ms":68,"round":3,"load":22.17}
+{"v":"new","step":"layr undo FAILED","ms":143,"round":3,"load":22.17}
+{"v":"new","step":"git status after layr undo","ms":104,"round":3,"load":22.17}
+{"v":"old","step":"line new","ms":1048,"round":4,"load":21.11}
+{"v":"old","step":"git status (first)","ms":805,"round":4,"load":21.11}
+{"v":"old","step":"git status (warm)","ms":57,"round":4,"load":21.11}
+{"v":"old","step":"git status (warm 2)","ms":65,"round":4,"load":21.11}
+{"v":"old","step":"git status after 10 edits","ms":114,"round":4,"load":21.11}
+{"v":"old","step":"git diff --stat","ms":51,"round":4,"load":21.11}
+{"v":"old","step":"git commit -a (10 files)","ms":152,"round":4,"load":21.11}
+{"v":"old","step":"head follows git commit","ms":2471,"round":4}
+{"v":"old","step":"git status after git commit","ms":146,"round":4,"load":20.06}
+{"v":"old","step":"git reset --hard HEAD~1","ms":272,"round":4,"load":20.06}
+{"v":"old","step":"head follows git reset","ms":2223,"round":4}
+{"v":"old","step":"git status after git reset","ms":176,"round":4,"load":20.06}
+{"v":"old","step":"layr save -a (10 files)","ms":1988,"round":4,"load":19.66}
+{"v":"old","step":"git status after layr save","ms":300,"round":4,"load":19.66}
+{"v":"old","step":"git status after layr save 2","ms":62,"round":4,"load":19.66}
+{"v":"old","step":"layr undo FAILED","ms":165,"round":4,"load":19.66}
+{"v":"old","step":"git status after layr undo","ms":85,"round":4,"load":19.66}
+{"v":"new","step":"line new","ms":1101,"round":4,"load":19.66}
+{"v":"new","step":"git status (first)","ms":1247,"round":4,"load":20.08}
+{"v":"new","step":"git status (warm)","ms":75,"round":4,"load":20.08}
+{"v":"new","step":"git status (warm 2)","ms":67,"round":4,"load":20.08}
+{"v":"new","step":"git status after 10 edits","ms":111,"round":4,"load":20.08}
+{"v":"new","step":"git diff --stat","ms":69,"round":4,"load":20.08}
+{"v":"new","step":"git commit -a (10 files)","ms":172,"round":4,"load":20.08}
+{"v":"new","step":"head follows git commit","ms":2829,"round":4}
+{"v":"new","step":"git status after git commit","ms":150,"round":4,"load":20.08}
+{"v":"new","step":"git reset --hard HEAD~1","ms":215,"round":4,"load":20.08}
+{"v":"new","step":"head follows git reset","ms":2175,"round":4}
+{"v":"new","step":"git status after git reset","ms":95,"round":4,"load":19.44}
+{"v":"new","step":"layr save -a (10 files)","ms":1992,"round":4,"load":19.44}
+{"v":"new","step":"git status after layr save","ms":165,"round":4,"load":19.44}
+{"v":"new","step":"git status after layr save 2","ms":76,"round":4,"load":19.44}
+{"v":"new","step":"layr undo FAILED","ms":166,"round":4,"load":19.44}
+{"v":"new","step":"git status after layr undo","ms":87,"round":4,"load":19.44}
+{"v":"old","step":"line new","ms":900,"round":5,"load":18.60}
+{"v":"old","step":"git status (first)","ms":471,"round":5,"load":18.60}
+{"v":"old","step":"git status (warm)","ms":68,"round":5,"load":18.60}
+{"v":"old","step":"git status (warm 2)","ms":61,"round":5,"load":18.60}
+{"v":"old","step":"git status after 10 edits","ms":119,"round":5,"load":18.60}
+{"v":"old","step":"git diff --stat","ms":47,"round":5,"load":18.60}
+{"v":"old","step":"git commit -a (10 files)","ms":160,"round":5,"load":18.60}
+{"v":"old","step":"head follows git commit","ms":2900,"round":5}
+{"v":"old","step":"git status after git commit","ms":122,"round":5,"load":20.39}
+{"v":"old","step":"git reset --hard HEAD~1","ms":237,"round":5,"load":20.39}
+{"v":"old","step":"head follows git reset","ms":2134,"round":5}
+{"v":"old","step":"git status after git reset","ms":135,"round":5,"load":20.39}
+{"v":"old","step":"layr save -a (10 files)","ms":1748,"round":5,"load":19.72}
+{"v":"old","step":"git status after layr save","ms":248,"round":5,"load":19.72}
+{"v":"old","step":"git status after layr save 2","ms":57,"round":5,"load":19.72}
+{"v":"old","step":"layr undo FAILED","ms":165,"round":5,"load":19.72}
+{"v":"old","step":"git status after layr undo","ms":59,"round":5,"load":19.72}
+{"v":"new","step":"line new","ms":914,"round":5,"load":19.72}
+{"v":"new","step":"git status (first)","ms":444,"round":5,"load":18.78}
+{"v":"new","step":"git status (warm)","ms":59,"round":5,"load":18.78}
+{"v":"new","step":"git status (warm 2)","ms":61,"round":5,"load":18.78}
+{"v":"new","step":"git status after 10 edits","ms":82,"round":5,"load":18.78}
+{"v":"new","step":"git diff --stat","ms":55,"round":5,"load":18.78}
+{"v":"new","step":"git commit -a (10 files)","ms":107,"round":5,"load":18.78}
+{"v":"new","step":"head follows git commit","ms":2596,"round":5}
+{"v":"new","step":"git status after git commit","ms":67,"round":5,"load":18.78}
+{"v":"new","step":"git reset --hard HEAD~1","ms":172,"round":5,"load":18.78}
+{"v":"new","step":"head follows git reset","ms":1951,"round":5}
+{"v":"new","step":"git status after git reset","ms":76,"round":5,"load":17.84}
+{"v":"new","step":"layr save -a (10 files)","ms":1828,"round":5,"load":17.84}
+{"v":"new","step":"git status after layr save","ms":115,"round":5,"load":17.84}
+{"v":"new","step":"git status after layr save 2","ms":67,"round":5,"load":17.84}
+{"v":"new","step":"layr undo FAILED","ms":147,"round":5,"load":17.84}
+{"v":"new","step":"git status after layr undo","ms":64,"round":5,"load":17.84}
+{"v":"old","step":"line new","ms":803,"round":6,"load":17.21}
+{"v":"old","step":"git status (first)","ms":394,"round":6,"load":17.21}
+{"v":"old","step":"git status (warm)","ms":53,"round":6,"load":17.21}
+{"v":"old","step":"git status (warm 2)","ms":54,"round":6,"load":17.21}
+{"v":"old","step":"git status after 10 edits","ms":106,"round":6,"load":17.21}
+{"v":"old","step":"git diff --stat","ms":46,"round":6,"load":17.21}
+{"v":"old","step":"git commit -a (10 files)","ms":131,"round":6,"load":17.21}
+{"v":"old","step":"head follows git commit","ms":2559,"round":6}
+{"v":"old","step":"git status after git commit","ms":113,"round":6,"load":17.21}
+{"v":"old","step":"git reset --hard HEAD~1","ms":238,"round":6,"load":16.79}
+{"v":"old","step":"head follows git reset","ms":1988,"round":6}
+{"v":"old","step":"git status after git reset","ms":111,"round":6,"load":16.79}
+{"v":"old","step":"layr save -a (10 files)","ms":1678,"round":6,"load":16.79}
+{"v":"old","step":"git status after layr save","ms":215,"round":6,"load":16.79}
+{"v":"old","step":"git status after layr save 2","ms":53,"round":6,"load":16.79}
+{"v":"old","step":"layr undo FAILED","ms":145,"round":6,"load":16.79}
+{"v":"old","step":"git status after layr undo","ms":55,"round":6,"load":16.79}
+{"v":"new","step":"line new","ms":861,"round":6,"load":16.01}
+{"v":"new","step":"git status (first)","ms":397,"round":6,"load":16.01}
+{"v":"new","step":"git status (warm)","ms":61,"round":6,"load":16.01}
+{"v":"new","step":"git status (warm 2)","ms":63,"round":6,"load":16.01}
+{"v":"new","step":"git status after 10 edits","ms":77,"round":6,"load":16.01}
+{"v":"new","step":"git diff --stat","ms":50,"round":6,"load":16.01}
+{"v":"new","step":"git commit -a (10 files)","ms":114,"round":6,"load":16.01}
+{"v":"new","step":"head follows git commit","ms":2339,"round":6}
+{"v":"new","step":"git status after git commit","ms":66,"round":6,"load":15.21}
+{"v":"new","step":"git reset --hard HEAD~1","ms":156,"round":6,"load":15.21}
+{"v":"new","step":"head follows git reset","ms":1837,"round":6}
+{"v":"new","step":"git status after git reset","ms":63,"round":6,"load":15.21}
+{"v":"new","step":"layr save -a (10 files)","ms":1677,"round":6,"load":15.21}
+{"v":"new","step":"git status after layr save","ms":102,"round":6,"load":15.21}
+{"v":"new","step":"git status after layr save 2","ms":57,"round":6,"load":15.21}
+{"v":"new","step":"layr undo FAILED","ms":161,"round":6,"load":15.21}
+{"v":"new","step":"git status after layr undo","ms":81,"round":6,"load":15.21}
+{"v":"old","step":"line new","ms":1159,"round":7,"load":14.47}
+{"v":"old","step":"git status (first)","ms":496,"round":7,"load":14.47}
+{"v":"old","step":"git status (warm)","ms":68,"round":7,"load":14.47}
+{"v":"old","step":"git status (warm 2)","ms":73,"round":7,"load":14.47}
+{"v":"old","step":"git status after 10 edits","ms":178,"round":7,"load":14.47}
+{"v":"old","step":"git diff --stat","ms":79,"round":7,"load":14.47}
+{"v":"old","step":"git commit -a (10 files)","ms":144,"round":7,"load":14.47}
+{"v":"old","step":"head follows git commit","ms":2427,"round":7}
+{"v":"old","step":"git status after git commit","ms":100,"round":7,"load":13.87}
+{"v":"old","step":"git reset --hard HEAD~1","ms":202,"round":7,"load":13.87}
+{"v":"old","step":"head follows git reset","ms":1899,"round":7}
+{"v":"old","step":"git status after git reset","ms":117,"round":7,"load":13.87}
+{"v":"old","step":"layr save -a (10 files)","ms":1662,"round":7,"load":13.40}
+{"v":"old","step":"git status after layr save","ms":216,"round":7,"load":13.40}
+{"v":"old","step":"git status after layr save 2","ms":53,"round":7,"load":13.40}
+{"v":"old","step":"layr undo FAILED","ms":142,"round":7,"load":13.40}
+{"v":"old","step":"git status after layr undo","ms":51,"round":7,"load":13.40}
+{"v":"new","step":"line new","ms":809,"round":7,"load":13.40}
+{"v":"new","step":"git status (first)","ms":404,"round":7,"load":12.73}
+{"v":"new","step":"git status (warm)","ms":54,"round":7,"load":12.73}
+{"v":"new","step":"git status (warm 2)","ms":60,"round":7,"load":12.73}
+{"v":"new","step":"git status after 10 edits","ms":70,"round":7,"load":12.73}
+{"v":"new","step":"git diff --stat","ms":48,"round":7,"load":12.73}
+{"v":"new","step":"git commit -a (10 files)","ms":107,"round":7,"load":12.73}
+{"v":"new","step":"head follows git commit","ms":2559,"round":7}
+{"v":"new","step":"git status after git commit","ms":60,"round":7,"load":12.73}
+{"v":"new","step":"git reset --hard HEAD~1","ms":155,"round":7,"load":12.73}
+{"v":"new","step":"head follows git reset","ms":1801,"round":7}
+{"v":"new","step":"git status after git reset","ms":90,"round":7,"load":12.51}
+{"v":"new","step":"layr save -a (10 files)","ms":1518,"round":7,"load":12.51}
+{"v":"new","step":"git status after layr save","ms":132,"round":7,"load":12.51}
+{"v":"new","step":"git status after layr save 2","ms":53,"round":7,"load":12.51}
+{"v":"new","step":"layr undo FAILED","ms":135,"round":7,"load":12.51}
+{"v":"new","step":"git status after layr undo","ms":61,"round":7,"load":12.51}

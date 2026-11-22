@@ -8,6 +8,7 @@
      The install step sets the key to your store path:
        plutil -replace EnvironmentVariables.LAYR_ROOT -string "$LAYR_ROOT" ~/Library/LaunchAgents/ws.layr.daemon.plist
      The value below is the default store of a user at /Users/you. Logs: ~/Library/Logs/layr-daemon.log.
+     The program: layr in ~/.local/bin, else in /usr/local/bin (the macOS installer).
      See docs/follow.md. -->
 <plist version="1.0">
 <dict>
@@ -17,7 +18,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>exec "$HOME/.local/bin/layr" daemon &gt;&gt;"$HOME/Library/Logs/layr-daemon.log" 2&gt;&amp;1</string>
+        <string>l="$HOME/.local/bin/layr"; [ -x "$l" ] || l=/usr/local/bin/layr; exec "$l" daemon &gt;&gt;"$HOME/Library/Logs/layr-daemon.log" 2&gt;&amp;1</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

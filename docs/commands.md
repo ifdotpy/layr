@@ -11,7 +11,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | lines         | `line new <name> [<rev>] [--count N] [--json] [--view virtual]`, `line show <line> --none\|--virtual\|--folder [<path>]`, `line list [--json]`, `line delete`, `line rename`, `line move`, `tag`, `merge [--expect]`, `pick`, `invert`, `replay`, `adopt` |
 | access        | `access [list|grant [--until <30m|2h|1d>]|revoke|deny|allow|check]`, `protect [<pattern> --update <role> --check <names> --path <path>=<role> --approvals <n> --approvers <principals> --direct --rewrite <role> --no-expect | --remove]`, `approve [--withdraw] <state>`, `attest <kind> <rev> [--payload <file>]`, `attestations <rev> [--kind <kind>] [--json]` |
 | safety        | `undo`, `op log`, `save`, `try <state> -- <cmd>`, `try <state> --check <name>`, `bisect list [--json]`, `bisect run [--good <rev>] [--bad <rev>] [--auto] [--ref-log <ref>] [--json] -- <cmd>`, `gc [-n] [--repair] [--dedup]`, `du [<line>...] [--json]`, `du --store [--json]`, `du --volumes [--json]`, `fsck`, `reindex` |
-| Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`                             |
+| Git bridge    | `git remote`, `git fetch`, `git pull`, `git push [--squash] [--include-base <lines>]`, `git clone`, `git sync`, `git adopt`                |
 | remotes       | `remote add\|list\|self\|remove\|trust`, `remote public <remote> on\|off`, `sync <remote>`, `push <remote>`, `push [--dry-run]` (every layer to each of its remotes), `overlay remote add\|list\|remove`, `fetch <remote> [--line <name>,...] [--overlay <layer>,...] [--heads [--only-line <line>]]`, `pull <remote>`, `clone <url> [--line <line>,...] [--overlay <layer>,...] [--heads [--only-line <line>]]` (`--line` on clone takes only the caches of those lines; `--overlay` only those layers), `login <remote>` (Layr Cloud) |
 | OCI           | `push <oci-remote> <rev> [--runnable <name>] [--json]`, `access token <principal> [--until <duration>]`, `access token --revoke <principal>` |
 | records       | `op export`, `op import` (JSONL) |
@@ -27,7 +27,7 @@ This page is part of the [Layr documentation](../README.md#documentation).
 | review        | `comment <change> (-m <text>\|<text>) [--file <path> --line <a>[-<b>]] [--state <rev>\|--version vN] [--reply-to <id>] [--json]`, `comment reply <comment> -m <text> [--json]`, `comment resolve\|unresolve <comment> [--json]`, `react <comment or change> <name> [--remove] [--json]`, `review request\|cancel <change> <reviewer>... [--json]` (a reviewer is `person:<login>`, `user:<name or uid>`, a user name, or `machine:<name or id>`; see [review](review.md#review-threads-reactions-and-reviewers)) |
 | requests      | `request <kind> ... --person [--remote <name>] [--expires <epoch-ms>]`, `requests apply [--remote <name>] [--json]` |
 | person        | `person keys [--paper-key-out <path>] [--site <url>] [--store <url>]`, `person show [--json]`, `person accept`, `access person-key <login> <public-key>` |
-| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
+| setup         | `init [--allow-root-snapshots] [--volume <name>]`, `init [<project>] --from-git <checkout> [--line <name>] [--snapshots]`, `projects`, `project delete <project>` (a project without lines, admin only), `config`, `daemon [--allow-root-snapshots]`                             |
 | volumes       | `volume add <name> <path>`, `volume list [--json]`, `volume remove <name>`, `volume default <name>`, `project move <project> <volume>`, `clone <url> [<project>] --volume <name>`, `git clone <url> [<project>] --volume <name>` ([volumes](volumes.md)) |
 | store         | `store remove <path> [--force] [-q]` (deletes a whole store folder; see [Remove a store](#remove-a-store)), `store-version [--json]` ([store version](local-store-version.md)) |
 | JSON schemas  | `schema` (lists the schemas), `schema <name>` (prints one; see [JSON output](json.md)) |
@@ -65,6 +65,8 @@ snapshot fallback. APFS supplies change counters and clone identities. Set
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 
+A project made from a git checkout keeps its states as objects (store v2, [objects](objects.md)): `init --from-git` runs `layr migrate --delete-old` for its first states. `--snapshots` keeps snapshot storage (v1). `init` makes store v2 only with `--objects`.
+
 `init [<project>] --from-git <checkout>` makes a project from a Git checkout, in place. The
 history comes from the folder, with no network: the local branches resolve as `local/<branch>`
 and the branches of its `origin` as `origin/<branch>` (imported on first use). The project's
@@ -79,6 +81,14 @@ as `<checkout>.before-layr`, and the line moves to the checkout's path (`line mo
 changes files of the project, and the new line is protected. The command refuses a checkout with
 uncommitted changes, one with more worktrees, a subfolder of a checkout, and a checkout on
 another file system than the store. The project name is the folder name unless given.
+
+A shallow clone (`git clone --depth <n>`) is taken as it is: the history of the project ends at
+the commits where the history of the clone ends. The state of such a commit has no parents, and
+`layr log` and `git log` in a line stop there. The git store of the project names these commits
+in its `shallow` file, as git does, and the `.git` folder of each line gets them. A `layr git
+push` to a remote that has the earlier history (the `origin` of the clone) sends the new commits
+on top of it. A remote without that history refuses the push, as it refuses a push from a shallow
+git clone. A later `layr git fetch` brings new commits; it does not bring the earlier history.
 
 layr ignores what git ignores: the `.gitignore` and `.layrignore` files of the tree, and the
 local file `.git/info/exclude` of a line folder (below the root's rule files, as in git; it never
@@ -579,6 +589,74 @@ commit of the head) makes the next save, merge, undo, reset, pull, push or `layr
 and nothing moves. The message names the commit to reset `HEAD` to (`git reset --hard <commit>`
 undoes the git change); then the command can run again.
 A `.git` folder that the line owner made instead is left alone.
+
+### Git in a fast line
+
+In a fast line (`layr line new <name> --fast`) git can write. The line and git follow each other:
+
+- The folder shows `.git` as a link. The folder itself is in the cache root of the line
+  (`lines/.caches/<line id>/.git`), so it is not content of the line: status, saves and states
+  leave it out. It goes with the line.
+- `HEAD` is on a branch with the name of the line (a detached `HEAD` when the name is no branch
+  name for git). `git status` says `On branch <line>`.
+- **git moves `HEAD`** (`git commit`, `commit --amend`, `reset`, `checkout`, `switch`, `merge`,
+  `rebase`, `cherry-pick`): the head of the line follows. The new commits come into the git store
+  of the project and become states, with the author, the time and the message of each commit.
+  The head of the line moves to the state of `HEAD`, and the files stay as they are (as
+  `layr reset <state>` does). `layr git push` later sends these commits with the ids that git
+  gave them. A state of such a commit has objects (the objects of its first parent with the
+  changed paths), so a fast line can start from it.
+- **`layr undo` after a checkout** (`git checkout`, `git switch`): when git's reflog says that
+  `HEAD` last came from a branch (or a detached commit) by a checkout, and layr moves the head
+  back to its commit, git checks that branch out again. The files come back, and the branch that
+  `HEAD` was on stays where it is. When git refuses (a local change in the way), only `HEAD` goes
+  back, with a warning.
+- **layr moves the head** (save, merge, reset, undo, pull): the branch that `HEAD` is on moves to
+  the commit of the new head, and git makes the index of that commit from its own index
+  (`git reset --no-refresh` as the line owner): entries of files that did not change keep their
+  stat data. A folder without an index gets the index that layr keeps for the state.
+- When the head follows: a hook of the folder (`reference-transaction`, `post-rewrite`) starts
+  `layr git adopt --hook` in the background after git moves `HEAD` or a branch, so git does not
+  wait for it. Each layr command of the line owner in the line also checks first (one git
+  command), and waits up to 15 s for a move that is under way. So a layr command after a git
+  command always sees the new head, also when the git command ran without hooks. While a rebase,
+  a pick of several commits or a bisect is in progress, the line waits for its end.
+- The two never overwrite each other. A move of the head after git writes no ref of git: when git
+  moved `HEAD` again meanwhile, the next move follows that. A layr command moves the branch of
+  git only from the commit that both agreed on last (the file `layr-index` of the folder names
+  it); when git moved `HEAD` while the command ran, the branch of git stays, the command warns,
+  and the head follows git at the next command.
+- `layr git adopt [-q]` does the same by hand and prints the head. Use it to see why the head did
+  not follow: for example the line is protected, and git moved `HEAD` back.
+- When the head cannot follow, `HEAD` stays where git put it, the head of the line does not move,
+  and a command that moves the head (save, merge, reset, undo, pull, push) refuses. The message
+  names `layr git adopt`, and the `git reset --soft <commit>` that puts `HEAD` back.
+- Tags and remote refs of the project (`layr git fetch`) are refs of the folder. Branches and tags
+  that git made in the folder stay there: they are not refs of the project, and another line does
+  not see them. A branch is only a name for git: the line has one head, the commit of `HEAD`.
+- On Linux the folder has `core.fsmonitor` set to `layr fs view fsmonitor`: git asks the view of
+  the line which paths changed, and `git status` reads no folder that did not change.
+- Cache links (`fast_cache`) are links for git, and a pattern such as `target/` matches folders
+  only: layr adds `/<folder>` for each cache link to `info/exclude` of the folder, so
+  `git status` does not list them and `git clean -fd` keeps them. The fsmonitor hook answers a
+  worktree that is not a view (`git worktree add` to a plain folder) with a full scan, quietly.
+- The folder has clones of the packs of the git store in `objects/pack` (reflinks, owned by the
+  line owner). Git touches an object it already has instead of writing it again; it cannot touch
+  root's packs of the store, and wrote a copy of every object it hashed.
+- The folder has `checkout.workers = 0`: git writes the files of a checkout of 100 files or more
+  with one writer per core, which hides the wait of each request to the view.
+- The folder has `core.splitIndex` set: git writes the changed entries of the index to a small
+  `index` file and keeps the rest in a shared file (`sharedindex.<id>`). In a large tree a commit
+  or a status then writes kilobytes and not the whole index. A shared file that no index uses goes
+  after an hour.
+- Root reads and writes only files at the top of the folder (`index`, `layr-index`) through
+  descriptors. Refs are read and written by git commands that run as the line owner, and new
+  commits come to the git store of the project as a pack through a pipe.
+
+Limits: `git stash`, `git worktree` and submodules are not connected to layr (git keeps them in
+the folder). A remote that the line owner adds with `git remote add` is a remote of the folder
+only; use `layr git remote add`. A classic line stays read only for git.
+Measurements: [LayrFS lab](layrfs-lab.md#git-in-fast-lines-2026-11-16). Test: `tests/fast-git.sh`.
 
 `layr log --json` writes one state JSON object per line. History filters and `--auto` apply before output.
 

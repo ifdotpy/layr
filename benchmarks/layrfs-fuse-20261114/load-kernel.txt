@@ -1,0 +1,7 @@
+ 22:07:45 up  2:23,  3 users,  load average: 20.47, 17.72, 16.82
+%CPU COMMAND
+ 334 freecadcmd
+ 288 freecadcmd
+ 276 freecadcmd
+ 217 ccx
+ 144 java

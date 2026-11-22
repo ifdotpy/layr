@@ -722,7 +722,8 @@ pub fn add(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // lock. Both reads compare only the paths the specs can touch.
     let limit = add_scan_limit(&specs);
     let read = |line: &Line, quiet: &BTreeSet<String>| -> Result<(crate::repo::Temp, BTreeSet<String>, Vec<String>)> {
-        let work = h.repo.working(line);
+        // A fast line reads its shadow: its mount has no APFS file identities.
+        let work = h.repo.working_src(line)?;
         let (index, stage) = h.repo.index_source(line)?;
         let mut roots = vec![work.as_path()];
         if let Some(s) = &stage {
@@ -2095,10 +2096,6 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let current = repo.layers(&line)?;
     let layers = if a.has("--hard") && !a.has("--soft") { repo.layers_at(&line, &target)? } else { current.clone() };
     let target_view = if layers.is_empty() { None } else { Some(repo.assemble(&line, &target, &layers)?) };
-    let target_root = match &target_view {
-        Some(v) => v.path.clone(),
-        None => repo.state_root(&target)?,
-    };
     let mode = if a.has("--soft") {
         "soft"
     } else if a.has("--hard") {
@@ -2108,7 +2105,42 @@ pub fn reset(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         "mixed"
     };
+    // The tree of the target, for the modes that write files from it. A soft or mixed reset
+    // moves the head only: a state in the object store gets no folder for it.
+    // A state with objects and no folder (only line heads keep one): a copy of the folder of the
+    // head with the paths that differ, not a write of every file. It also shares its data with
+    // the working folder, so the comparison below needs no read of unchanged files.
+    #[cfg(not(target_os = "macos"))]
+    if target_view.is_none() && matches!(mode, "hard" | "keep") && !repo.p.has_state(&target) {
+        if let Err(e) = crate::objstore::build_state_near(repo, &target, &line.head) {
+            eprintln!("warning: state {} is built in full: {e:#}", crate::ids::short(&target));
+        }
+    }
+    let target_root = match (&target_view, mode) {
+        (Some(v), _) => v.path.clone(),
+        (None, "hard" | "keep") => repo.state_root(&target)?,
+        (None, _) => std::path::PathBuf::new(),
+    };
+    // A fast line: its scan has the objects of the working folder; with the objects of the target
+    // the comparison reads no file whose object ids are equal (a target folder written apart
+    // from the line shares no data with it).
+    #[cfg(target_os = "linux")]
+    if mode == "hard" && target_view.is_none() && crate::views::fast_of(repo, &line).is_some()
+        && crate::object_tree::registered(&target_root).is_none()
+    {
+        if let Ok(Some((_, r))) = crate::objstore::verified(&repo.p, &target) {
+            let reads = repo.p.meta_dir().join("object-reads");
+            if let Ok(tree) = crate::object_tree::ObjectTree::new(crate::objstore::open(&repo.p)?, r, &reads) {
+                crate::object_tree::register(&target_root, tree);
+            }
+        }
+    }
     let (index, _it) = repo.index_view(&line)?;
+    // A soft or mixed reset keeps the files: the state after the move reads the regenerable folders
+    // that the save before it found (no second walk).
+    if matches!(mode, "soft" | "mixed") {
+        crate::repo::reuse_regenerable_memo(&repo.working(&line));
+    }
     // The working folder is written under the line lock. The stage changes follow the commit.
     let wrote = match mode {
         "hard" => {

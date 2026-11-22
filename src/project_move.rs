@@ -239,6 +239,9 @@ pub fn move_project(store: &Store, project: &str, volume: &str) -> Result<Moved>
     let _t = crate::trace::begin(format!("project move {project}: project lock"));
     let _lock = line_locks.lock(&handle)?;
     drop(_t);
+    // The git blobs of the object store (docs/git-on-objects.md): a copy must not read the
+    // mount, and its server keeps files of the project open. The next command mounts it again.
+    crate::gitpack::unmount(&src.join("git"));
     let moved = handle.moved_paths();
     let mut watch = vec![src.clone()];
     watch.extend(moved.values().cloned());
@@ -341,6 +344,8 @@ pub fn delete_project(store: &Store, project: &str) -> Result<()> {
         let names: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
         bail!("project '{project}' has {} line(s): {}; delete them first (layr line delete)", names.len(), names.join(", "));
     }
+    // The server of the git blobs of the object store keeps files of the project open.
+    crate::gitpack::unmount(&dir.join("git"));
     if let Some((pid, path)) = in_use(std::slice::from_ref(&dir))? {
         bail!("project '{project}' is in use: process {pid} works in {}; stop it and run the delete again", path.display());
     }
@@ -372,6 +377,16 @@ fn finish(root: &Path, machine: &str, project: &str, from: &str, to: &str, src: 
     rewrite_lines(dst, &old, &new)?;
     for line in moved_folders(dst) {
         rewrite_alternates(&line, &old, &new)?;
+    }
+    // The git store names the folder of the blobs of the object store by its path.
+    let alternates = dst.join("git/objects/info/alternates");
+    if let Ok(text) = fs::read_to_string(&alternates) {
+        let (was, now) = (crate::gitpack::mount_dir(&src.join("git")), crate::gitpack::mount_dir(&dst.join("git")));
+        let fixed: String =
+            text.lines().map(|l| if Path::new(l.trim()) == was { format!("{}\n", now.display()) } else { format!("{l}\n") }).collect();
+        if fixed != text {
+            fsutil::atomic_write(&alternates, fixed.as_bytes(), 0o644)?;
+        }
     }
     let _t = crate::trace::begin(format!("project move {project}: remove the old folder"));
     if fs::symlink_metadata(src).is_ok() {

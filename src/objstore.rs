@@ -122,6 +122,65 @@ pub fn build_state(repo: &Repo, state: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// `build_state` from the snapshot of the state `near`: a copy of it with the paths that differ
+/// between the objects of the two states. For a state that has objects and no snapshot when a
+/// state near it has one (a commit that git made in a fast line, next to the old head of the
+/// line): the next save in the line needs the snapshot of the head, and `build_state` writes
+/// every file of the tree for it. False when `near` has no snapshot or no objects.
+#[cfg(not(target_os = "macos"))]
+pub fn build_state_near(repo: &Repo, state: &str, near: &str) -> Result<bool> {
+    let _lock = repo.p.lock_or_borrow()?;
+    if repo.p.has_state(state) {
+        return Ok(true);
+    }
+    let parent = near.to_string();
+    if !repo.p.has_state(&parent) {
+        return Ok(false);
+    }
+    let (Some((_, new)), Some((_, old))) = (verified(&repo.p, state)?, verified(&repo.p, &parent)?) else {
+        return Ok(false);
+    };
+    let _t = crate::trace::span(format!("build {} from {}", crate::ids::short(state), crate::ids::short(near)));
+    let reads = repo.p.meta_dir().join("object-reads");
+    let a = crate::repo::Snap::Objects(crate::object_tree::ObjectTree::new(open(&repo.p)?, old, &reads)?);
+    let b = crate::repo::Snap::Objects(crate::object_tree::ObjectTree::new(open(&repo.p)?, new, &reads)?);
+    // A file with the same content and another time gets its time too.
+    let (list, touched) = crate::changes::file_changes_and_touched(&a, &b)?;
+    std::fs::create_dir_all(repo.p.work_dir())?;
+    let work = repo.p.work_dir().join(crate::store::temp_name());
+    let built = (|| -> Result<crate::fs::OwnedCapture> {
+        crate::fs::snapshot(&repo.p.state_path(&parent), &work, false)?;
+        for c in &list {
+            if let Some(old_path) = c.old_path() {
+                crate::fsutil::remove_entry(&work, old_path)?;
+            }
+            if c.new().is_none() {
+                crate::fsutil::remove_entry(&work, c.path())?;
+            }
+        }
+        for path in list.iter().filter(|c| c.new().is_some()).map(|c| c.path()).chain(&touched) {
+            crate::fsutil::copy_entry(&b, path, &work, path, None)?;
+        }
+        crate::fs::freeze_path_owned(&work, &repo.p.state_path(state), crate::fs::CapturePurpose::State)
+    })();
+    let _ = crate::fs::remove(&work);
+    let captured = built.with_context(|| {
+        format!("cannot build state {} from state {}", crate::ids::short(state), crate::ids::short(near))
+    })?;
+    if let Err(error) = queue_native(&repo.p, state) {
+        return Err(captured.abort(error));
+    }
+    match repo.p.lock_or_borrow()?.write(|tx| tx.set_present(state, true)) {
+        Ok(()) => captured.release(),
+        Err(crate::db::CommitResolution::NotCommitted(error)) => return Err(captured.abort(error)),
+        Err(error) => {
+            captured.release();
+            return Err(error.into());
+        }
+    }
+    Ok(true)
+}
+
 /// The entry at `path` ("" is the root) of a tree, read from the objects (`layr show`).
 pub fn entry(store: &Store, root: &Id, path: &str) -> Result<crate::gitbridge::Entry> {
     use crate::gitbridge::Entry;
@@ -363,6 +422,17 @@ pub fn record_states(p: &Project, records: &mut [crate::model::DraftRecord]) -> 
         if state.kind.auxiliary() || state.tree.is_some() || !p.has_state(&state.id) {
             continue;
         }
+        // A snapshot of a fast line already has its objects (`object_tree::register`).
+        #[cfg(target_os = "linux")]
+        if let Some(t) = crate::object_tree::registered(&p.state_path(&state.id)) {
+            store.set_state(&state.id, &t.refs)?;
+            state.tree = Some(t.refs.tree.hex());
+            state.times = Some(t.refs.times.hex());
+            if !p.is_overlay() || state.cache_of.is_some() {
+                queue_native(p, &state.id)?;
+            }
+            continue;
+        }
         let source = crate::source::Source::of_state(p, &state.id)?;
         let options = layr_objects::WriteOptions {
             temperature: layr_objects::Temperature::Hot,
@@ -442,6 +512,31 @@ fn state_write_base(
     changed_write_base(refs, &parent, source)
 }
 
+/// The objects of the native tree `dst`, written for the paths that differ from `parent` (a
+/// read-only subvolume whose content has the objects `refs`).
+pub fn changed_objects(store: &Store, refs: StateRef, parent: &std::path::Path, dst: &std::path::Path) -> Result<StateRef> {
+    let parent = crate::repo::snap(parent);
+    let source = crate::repo::snap(dst);
+    let (base, paths) = changed_write_base(refs, &parent, &source)?.context("no incremental base")?;
+    let options = layr_objects::WriteOptions {
+        temperature: layr_objects::Temperature::Hot,
+        previous: None,
+        exclude: Vec::new(),
+        similar: false,
+    };
+    let written = layr_objects::write::write_changed_from(
+        store,
+        &SnapshotSource(&source),
+        &layr_objects::write::Base { tree: base.tree, times: base.times },
+        &paths,
+        &options,
+    )?;
+    Ok(StateRef {
+        tree: written.tree.context("object write gave no tree")?,
+        times: written.times.context("object write gave no times")?,
+    })
+}
+
 fn changed_write_base(
     refs: StateRef,
     parent: &crate::repo::Snap,
@@ -500,6 +595,8 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     let mut keep = keep;
     #[cfg(target_os = "macos")]
     keep.extend(crate::views::protected_states(&repo.p));
+    #[cfg(target_os = "macos")]
+    keep.extend(crate::views::kept_seeds(&repo.p));
     keep.extend(native_bases(repo)?);
     let mut ids = Vec::new();
     for entry in std::fs::read_dir(&dir)? {

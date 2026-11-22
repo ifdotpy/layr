@@ -15,6 +15,9 @@ pub fn set_config(locked: &crate::store::LockedProject<'_>, ctx: &Ctx, repo: &Re
     if key == Project::GC_EVICT_KEY && !value.is_null() && !matches!(value.as_str(), Some("on" | "off")) {
         return Err(error(ErrorKind::Failed, format!("{key} is on or off")));
     }
+    if key == "line.kind" && !value.is_null() && !matches!(value.as_str(), Some("fast" | "classic")) {
+        return Err(error(ErrorKind::Failed, "line.kind is fast or classic"));
+    }
     if !repo.p.is_overlay() {
         if let Some(rest) = key.strip_prefix("overlay.") {
             let name = rest.split('.').next().unwrap_or("");

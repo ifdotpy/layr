@@ -1,6 +1,7 @@
 /target
 *.img
 /.layr-retest
+/packaging/macos/build/
 
 # lychee's local link-check cache
 .lycheecache

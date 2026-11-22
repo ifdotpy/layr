@@ -324,7 +324,10 @@ fn plist_text(root: &Path, socket: Option<&Path>, exe: &Path) -> String {
             .replace("<string>ws.layr.daemon</string>", "<string>ws.layr.runner</string>")
             .replace("layr-daemon.log", "layr-runner.log")
             // The runner store's own program: another store may keep another layr version.
-            .replace("\"$HOME/.local/bin/layr\"", &format!("\"{}\"", escape(exe)))
+            .replace(
+                "l=\"$HOME/.local/bin/layr\"; [ -x \"$l\" ] || l=/usr/local/bin/layr; exec \"$l\"",
+                &format!("exec \"{}\"", escape(exe)),
+            )
             .replace(
                 &root_value,
                 &format!("{root_value}\n        <key>LAYR_SOCKET</key>\n        <string>{}</string>", escape(socket)),

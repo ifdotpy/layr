@@ -198,6 +198,16 @@ impl Temp {
 
 impl Drop for Temp {
     fn drop(&mut self) {
+        // The scan copy of a fast line stays for the next command (`views::fast_scan`).
+        #[cfg(target_os = "macos")]
+        if crate::views::release_scan(&self.path) {
+            match self.resource.take() {
+                Some(TemporaryResource::Capture(captured)) => captured.release(),
+                Some(TemporaryResource::Working(created)) => created.release(),
+                _ => {}
+            }
+            return;
+        }
         let _trace = crate::trace::named(|| format!("discard {}", self.path.display()));
         let result = match self.resource.take() {
             Some(TemporaryResource::Capture(captured)) => captured.discard(),
@@ -635,6 +645,20 @@ impl<'a> Repo<'a> {
         crate::source::storage::complete(&self.p, id)
     }
 
+    /// `objstore::build_state_near` from the head of a line of this machine whose folder the
+    /// store has: the head of the line that moves is usually near the state it moves to. The
+    /// first three heads are tried.
+    #[cfg(not(target_os = "macos"))]
+    fn build_near_a_head(&self, id: &str) -> bool {
+        let Ok(lines) = self.p.db.lines() else { return false };
+        lines
+            .iter()
+            .map(|l| l.head.clone())
+            .filter(|h| h != id && self.p.has_state(h))
+            .take(3)
+            .any(|h| crate::objstore::build_state_near(self, id, &h).unwrap_or(false))
+    }
+
     /// Every command that reads the tree of a state comes here (`state_root`, `state_src`). A
     /// state that retention evicted comes back from a store remote that holds it.
     fn check_state(&self, id: &str) -> Result<()> {
@@ -643,8 +667,16 @@ impl<'a> Repo<'a> {
         }
         // A migrated state comes back from the object store with its exact times
         // (docs/objects.md, section 13). A freed state has no owner: it stays freed.
-        if !matches!(self.p.db.state_flags(id)?, Some((_, true))) && crate::objstore::build_state(self, id)? {
-            return Ok(());
+        if !matches!(self.p.db.state_flags(id)?, Some((_, true))) {
+            // From the folder of a line head with the paths that differ (seconds instead of
+            // minutes for a large tree), else every file from the objects.
+            #[cfg(not(target_os = "macos"))]
+            if self.build_near_a_head(id) {
+                return Ok(());
+            }
+            if crate::objstore::build_state(self, id)? {
+                return Ok(());
+            }
         }
         // An imported state is built from git (docs/ownership.md, "States imported from Git"). A
         // copy on a store remote is the fallback when git cannot give the objects.
@@ -772,6 +804,65 @@ impl<'a> Repo<'a> {
     /// (`Project::line_folder`).
     pub fn working(&self, line: &Line) -> PathBuf {
         self.p.line_folder(&line.id, &line.name)
+    }
+
+    /// The folder to read a line's working content from. A fast line on macOS is a LayrFS (FSKit)
+    /// mount, which has no APFS clones, file ids or layr attributes: reads go to its shadow, an
+    /// APFS folder that the call brings up to the view (`views::fast_shadow`). Writes still go to
+    /// `working`.
+    pub fn working_src(&self, line: &Line) -> Result<PathBuf> {
+        #[cfg(target_os = "macos")]
+        if let Some(v) = crate::views::fast_of(self, line) {
+            crate::views::ensure_fast_mounted(self, line)?;
+            let shadow = crate::views::fast_shadow(&self.p, &v)?;
+            crate::views::note_mount_shadow(self, line, &shadow);
+            return Ok(shadow);
+        }
+        // A fast line whose server is gone (a restart, a crash of the service) is mounted again:
+        // its folder would read as empty or fail.
+        #[cfg(target_os = "linux")]
+        if line.machine == self.p.store.machine.id && crate::views::fast_of(self, line).is_some() {
+            crate::views::ensure_fast_mounted(self, line)?;
+        }
+        Ok(self.working(line))
+    }
+
+    /// The folder that holds the cache folders of `line` in its folder `w`: `w`, or for a fast line
+    /// its cache root (`fast_cache`), where the native cache trees live.
+    pub fn cache_base(&self, line: &Line, w: &Path) -> PathBuf {
+        crate::fast_cache::root_for(self, line, w).unwrap_or_else(|| w.to_path_buf())
+    }
+
+    /// The cache tree of `folder` of `line` in its folder `w` (`cache_base`).
+    /// A fast line's tree counts only while the folder's link names it: a tool that removed or
+    /// moved the link (`cargo clean`) left the folder without its cache.
+    pub fn cache_dir(&self, line: &Line, w: &Path, folder: &str) -> Result<PathBuf> {
+        let base = self.cache_base(line, w);
+        let c = fsutil::safe_join(&base, folder)?;
+        if base != w && !std::fs::read_link(fsutil::safe_join(&self.working(line), folder)?).is_ok_and(|t| t == c) {
+            return fsutil::safe_join(w, folder);
+        }
+        Ok(c)
+    }
+
+    /// `convert_cache` of the cache path `p` of `line` (a fast line keeps its caches apart).
+    pub fn convert_line_cache(&self, line: &Line, p: &str) -> Result<bool> {
+        let w = self.working(line);
+        if crate::fast_cache::root_for(self, line, &w).is_some() {
+            return crate::fast_cache::convert(self, line, p);
+        }
+        let (u, g) = self.owner_ids(line);
+        convert_cache(&w, p, u, g)
+    }
+
+    /// `uncache` of the folder `p` of `line` (a fast line keeps its caches apart).
+    pub fn uncache_line(&self, line: &Line, p: &str) -> Result<bool> {
+        let w = self.working(line);
+        if crate::fast_cache::root_for(self, line, &w).is_some() {
+            return crate::fast_cache::uncache(self, line, p);
+        }
+        let (u, g) = self.owner_ids(line);
+        uncache(&w, p, u, g)
     }
 
     pub fn owner_ids(&self, line: &Line) -> (u32, u32) {
@@ -958,7 +1049,7 @@ impl<'a> Repo<'a> {
                 resource = Some(TemporaryResource::Existing(crate::fs::retain_owned(&path)?));
                 return Ok(state);
             }
-            let w = self.working(line);
+            let w = self.working_src(line)?;
             recover_cache_replacements(&w)?;
             self.restore_caches(line)?;
             // A line whose next named save sends changes into an overlay (`private_view`): its automatic
@@ -1195,12 +1286,22 @@ impl<'a> Repo<'a> {
 
     /// Read-only snapshot of a line's working content.
     pub fn scan(&self, line: &Line) -> Result<Temp> {
-        let w = self.working(line);
+        #[cfg(target_os = "macos")]
+        if let Some(v) = crate::views::fast_of(self, line) {
+            if let Some(path) = crate::views::fast_scan(&self.p, &v)? {
+                return Ok(Temp::plain(path));
+            }
+        }
+        let w = self.working_src(line)?;
         if !w.exists() {
             bail!("line '{}' has no working folder on this machine", line.name);
         }
         let dst = self.p.scan_dir().join(crate::store::temp_name());
-        Temp::capture(&w, dst, crate::fs::Protection::Frozen, crate::fs::CapturePurpose::Scan)
+        let scan = Temp::capture(&w, dst, crate::fs::Protection::Frozen, crate::fs::CapturePurpose::Scan)?;
+        // A copy of a fast line's shadow differs from the start state at the same paths.
+        #[cfg(target_os = "macos")]
+        crate::views::copy_known(&w, &scan.path);
+        Ok(scan)
     }
 
     /// `scan` limited to the paths that `specs` name (APFS): a restore of a few files then
@@ -1210,7 +1311,7 @@ impl<'a> Repo<'a> {
         if specs.iter().any(|s| s.is_empty() || s.contains(['*', '?', '['])) {
             return self.scan(line);
         }
-        let w = self.working(line);
+        let w = self.working_src(line)?;
         let mut paths = BTreeSet::new();
         for spec in specs {
             let Ok(root) = fsutil::safe_join(&w, spec) else { continue };
@@ -1872,8 +1973,15 @@ impl<'a> Repo<'a> {
 
     fn status_report_selected(&self, line: &Line, selected: &SelectedIndex) -> Result<Status> {
         selected.validate_stage()?;
-        let work = self.working(line);
-        if std::env::var_os("LAYR_NO_STATUS_CACHE").is_some() {
+        let work = self.working_src(line)?;
+        // LAYR_NO_STATUS_CACHE=1 compares the whole folder every time (for comparisons).
+        // The shadow of a fast line needs no saved status: its compare reads the known paths only.
+        #[cfg(target_os = "macos")]
+        let known = crate::views::known_of(&work).is_some();
+        // The mount of a fast line (Linux) shows its cache links: its compare reads a snapshot.
+        #[cfg(not(target_os = "macos"))]
+        let known = crate::views::fast_of(self, line).is_some();
+        if std::env::var_os("LAYR_NO_STATUS_CACHE").is_some() || known {
             return Ok(self.status_selected(line, selected)?.0);
         }
         let started = crate::status_cache::clock()?;
@@ -2398,6 +2506,15 @@ impl<'a> Repo<'a> {
     pub fn restore_caches(&self, line: &Line) -> Result<()> {
         self.prepare_cache_locations(line)?;
         let (w, (u, g)) = (self.working(line), self.owner_ids(line));
+        if crate::fast_cache::root_for(self, line, &w).is_some() {
+            let mut candidates = self.cache_paths(&w)?;
+            for (_, f) in self.folder_overlays()? {
+                if !candidates.contains(&f) {
+                    candidates.push(f);
+                }
+            }
+            return crate::fast_cache::settle(self, line, &self.plain_caches(line)?, &candidates);
+        }
         for p in self.plain_caches(line)? {
             if let Some(register) = crate::fs::host().register_cache {
                 register(&fsutil::safe_join(&w, &p)?)?;
@@ -2432,7 +2549,7 @@ impl<'a> Repo<'a> {
         let mut stage = None;
         let mut out = Vec::new();
         for p in candidates {
-            let cp = fsutil::safe_join(&w, &p)?;
+            let cp = self.cache_dir(line, &w, &p)?;
             if !crate::fs::host().namespace.managed(&cp) {
                 continue;
             }
@@ -2477,7 +2594,7 @@ impl<'a> Repo<'a> {
         let mut stage = None;
         let mut out = Vec::new();
         for p in self.cache_paths(&w)? {
-            let cp = fsutil::safe_join(&w, &p)?;
+            let cp = self.cache_dir(line, &w, &p)?;
             if !crate::fs::host().namespace.managed(&cp) {
                 continue;
             }
@@ -2523,7 +2640,7 @@ impl<'a> Repo<'a> {
         };
         for (p, _, due) in overlays {
             if due {
-                self.prepare_capture(&fsutil::safe_join(&w, &p)?)?;
+                self.prepare_capture(&self.cache_dir(line, &w, &p)?)?;
             }
         }
         Ok(())
@@ -2644,6 +2761,11 @@ impl<'a> Repo<'a> {
             if let Err(e) = crate::gitbridge::advance_fallback_head(self, line, new_head) {
                 eprintln!("warning: .git fallback of line {} not updated: {e:#}", line.name);
             }
+        }
+        // A fast line's view takes the new head as the base of its unchanged folders.
+        #[cfg(target_os = "linux")]
+        if crate::views::fast_of(self, line).is_some() {
+            crate::views::fast_adopt(line, new_head);
         }
     }
 
@@ -3180,6 +3302,12 @@ fn literal_regenerable(w: &Path, dirs: &std::collections::HashSet<String>) -> Ve
 /// files; a layer is listed without its content). A folder inside an ignored folder is no
 /// candidate, as the walk does not enter ignored folders.
 fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, FileFingerprint>) -> Vec<String> {
+    regenerable_in_scan_with(w, scan, &[])
+}
+
+/// `regenerable_in_scan`, with `links`: the cache links of a fast line that `scan` leaves out (the
+/// scan of its shadow), which count as folders. A link to a cache tree counts as one too.
+fn regenerable_in_scan_with(w: &Path, scan: &BTreeMap<String, FileFingerprint>, links: &[String]) -> Vec<String> {
     let mut rule_dirs = std::collections::HashSet::from([String::new()]);
     for (rel, e) in scan {
         let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
@@ -3191,12 +3319,14 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, FileFingerprint>) -> Ve
     }
     let mut found = literal_regenerable(w, &rule_dirs);
     let (regenerable, ignored) = (Rules::limited(w, Some("regenerable"), rule_dirs.clone()), Rules::limited(w, None, rule_dirs));
-    for (rel, e) in scan {
-        if rel.is_empty()
-            || !matches!(e,FileFingerprint::Verified{stat,..} if stat.mode&0o170000==0o040000)
-            || rel == ".git"
-            || rel.starts_with(".git/")
-        {
+    let folder = |rel: &str, e: &FileFingerprint| match e {
+        FileFingerprint::Verified { stat, .. } if stat.mode & 0o170000 == 0o040000 => true,
+        FileFingerprint::Verified { stat, .. } if stat.mode & 0o170000 == 0o120000 => is_dir_link(w, rel),
+        _ => false,
+    };
+    let entries = scan.iter().map(|(rel, e)| (rel, folder(rel, e))).chain(links.iter().map(|rel| (rel, true)));
+    for (rel, is_folder) in entries {
+        if rel.is_empty() || !is_folder || rel == ".git" || rel.starts_with(".git/") {
             continue;
         }
         let parent = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
@@ -3212,6 +3342,10 @@ fn regenerable_in_scan(w: &Path, scan: &BTreeMap<String, FileFingerprint>) -> Ve
     found
 }
 
+fn is_dir_link(w: &Path, rel: &str) -> bool {
+    std::fs::read_link(w.join(rel)).is_ok_and(|t| crate::fast_cache::is_any_cache_target(&t))
+}
+
 /// `regenerable_folders` by a walk of the folders (the other systems, and a scan that fails).
 fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
     let _t = crate::trace::span("regenerable walk");
@@ -3221,15 +3355,19 @@ fn regenerable_by_walk(w: &Path) -> Result<Vec<String>> {
     let mut children = Vec::new();
     t.walk_folders(|dir, entries| {
         let mut enter = Vec::new();
-        for (name, is_dir) in entries {
+        for (name, is_dir, is_link) in entries {
             if matches!(name.as_str(), ".gitignore" | ".layrignore" | ".layrattributes") {
                 rule_dirs.insert(dir.to_string());
             }
             let rel = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-            if !is_dir || rel == ".git" {
+            // A fast line shows a cache folder as a link to its cache tree (`fast_cache`).
+            if !is_dir && !(*is_link && is_dir_link(w, &rel)) {
                 continue;
             }
-            if !root_only.ignored(&rel, true) {
+            if rel == ".git" {
+                continue;
+            }
+            if *is_dir && !root_only.ignored(&rel, true) {
                 enter.push(name.clone());
             }
             children.push(rel);
@@ -3265,22 +3403,63 @@ pub fn regenerable_memo(w: &Path) -> Result<Vec<String>> {
                 return Ok(found.clone());
             }
         }
+        // The mount of a fast line (macOS): its shadow has the same entries but the cache links,
+        // which its upper folder has. A scan of the mount goes through FSKit (seconds).
+        #[cfg(target_os = "macos")]
+        let found = match crate::views::mount_shadow(w) {
+            Some((shadow, upper)) => {
+                let scan = crate::fs::observe_tree(&shadow)?;
+                let links: Vec<String> = crate::views::cache_links_in(&upper)?.into_iter().map(|(rel, _)| rel).collect();
+                regenerable_in_scan_with(&shadow, &scan, &links)
+            }
+            None => regenerable_folders(w)?,
+        };
+        #[cfg(not(target_os = "macos"))]
         let found = regenerable_folders(w)?;
         *m = Some((w.to_path_buf(), found.clone()));
         Ok(found)
     })
 }
 
+/// Set the regenerable folders of the command for the working folder `w` (from a scan).
+pub fn set_regenerable_memo(w: &Path, found: Vec<String>) {
+    REGENERABLE.with(|m| *m.borrow_mut() = Some((w.to_path_buf(), found)));
+}
+
+/// Whether a list of regenerable folders is held (for tests).
+#[cfg(test)]
+pub fn regenerable_memo_is_set() -> bool {
+    REGENERABLE.with(|m| m.borrow().is_some())
+}
+
 /// Forget the regenerable folders. The dispatcher calls `begin_command` at the start of every
 /// command (CLI and daemon), so no command reads the list of an earlier one. A save clears it after
 /// its state, because a command can save twice (and a merge can change `.layrattributes`).
 pub fn clear_regenerable_memo() {
-    REGENERABLE.with(|m| *m.borrow_mut() = None);
+    let held = REGENERABLE.with(|m| m.borrow_mut().take());
+    CLEARED.with(|c| *c.borrow_mut() = held);
+}
+
+thread_local! {
+    /// The list that the last `clear_regenerable_memo` of the running command dropped
+    /// (`reuse_regenerable_memo`).
+    static CLEARED: std::cell::RefCell<Option<(PathBuf, Vec<String>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Take back the list that the last save of this command dropped. Call it only when nothing wrote
+/// the working folder `w` since that save: a soft or mixed reset moves the head and keeps the
+/// files, so the save after the move needs no second walk. A list of another folder stays dropped.
+pub fn reuse_regenerable_memo(w: &Path) {
+    let Some((path, found)) = CLEARED.with(|c| c.borrow_mut().take()) else { return };
+    if path == w && REGENERABLE.with(|m| m.borrow().is_none()) {
+        set_regenerable_memo(w, found);
+    }
 }
 
 /// Start a command: its regenerable folders are its own.
 pub fn begin_command() {
-    clear_regenerable_memo();
+    REGENERABLE.with(|m| *m.borrow_mut() = None);
+    CLEARED.with(|c| *c.borrow_mut() = None);
 }
 
 /// Create an empty nested subvolume for a regenerable cache at `path` in the working folder.
@@ -3955,7 +4134,36 @@ mod regenerable_memo_tests {
         assert_eq!(regenerable_memo(w)?, vec!["target".to_string()]);
         // The dispatcher (`cmd::run`, `service::run_as`) starts every command with `begin_command`.
         begin_command();
-        assert!(REGENERABLE.with_borrow(|memo| memo.is_none()));
+        assert!(!regenerable_memo_is_set());
+        // A list that a save dropped does not pass to the next command either.
+        set_regenerable_memo(w, vec!["target".to_string()]);
+        clear_regenerable_memo();
+        begin_command();
+        reuse_regenerable_memo(w);
+        assert!(!regenerable_memo_is_set());
+        Ok(())
+    }
+
+    #[test]
+    fn a_move_that_keeps_the_files_reuses_the_list_of_its_save() -> Result<()> {
+        begin_command();
+        let w = Path::new("/layr-test/regenerable-memo/reuse");
+        set_regenerable_memo(w, vec!["target".to_string()]);
+        clear_regenerable_memo();
+        assert!(!regenerable_memo_is_set());
+        // Another folder: the list stays dropped.
+        reuse_regenerable_memo(Path::new("/layr-test/regenerable-memo/other"));
+        assert!(!regenerable_memo_is_set());
+        set_regenerable_memo(w, vec!["target".to_string()]);
+        clear_regenerable_memo();
+        reuse_regenerable_memo(w);
+        assert_eq!(regenerable_memo(w)?, vec!["target".to_string()]);
+        // Once only: a second save drops it, and a second reuse finds nothing.
+        clear_regenerable_memo();
+        clear_regenerable_memo();
+        reuse_regenerable_memo(w);
+        assert!(!regenerable_memo_is_set());
+        begin_command();
         Ok(())
     }
 }

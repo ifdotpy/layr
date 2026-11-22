@@ -11,7 +11,7 @@ use layr_hashers::FastSet;
 use layr_hashers::{FastCryptographic, PurposeHasher};
 use layr_matching::Candidates;
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) use layr_fs_core::{ChangeDetail, ChangeRequest, ChangeScope};
 /// Candidate observations and content detail follow the caller's explicit semantic scope.

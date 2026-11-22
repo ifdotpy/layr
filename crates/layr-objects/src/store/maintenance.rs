@@ -48,6 +48,8 @@ pub struct MaintenancePlan {
     /// What the plan could not read and skipped: kept states and reached objects (`Store::damage`
     /// lists the damaged files for fsck). Maintenance of the rest goes on.
     pub damaged: Vec<String>,
+    /// Packs of an older, larger block size written again (`Store::reblock`), set by the caller.
+    pub reblocked: u64,
 }
 
 /// An object that `Store::problem` checks: the kind it must have (None: any), whether a hot blob
@@ -209,6 +211,18 @@ impl Store {
         hot_trees: &[Id],
         limit: MaintenanceLimit,
     ) -> Result<MaintenancePlan> {
+        self.plan_maintenance_keeping(keep, &HashSet::new(), hot_trees, limit)
+    }
+
+    /// `plan_maintenance` that also keeps the blobs of `blobs` and what their stored forms need:
+    /// another index names them, for example the git ids of a project (docs/git-on-objects.md).
+    pub fn plan_maintenance_keeping(
+        &self,
+        keep: &std::collections::BTreeSet<String>,
+        blobs: &HashSet<Id>,
+        hot_trees: &[Id],
+        limit: MaintenanceLimit,
+    ) -> Result<MaintenancePlan> {
         let mut plan = MaintenancePlan {
             packing: if limit == MaintenanceLimit::UNLIMITED { PackingScope::IncludingNewCold } else { PackingScope::Planned },
             ..Default::default()
@@ -234,7 +248,7 @@ impl Store {
                 }
             }
         }
-        let (reach, unreadable) = self.walk(&roots)?;
+        let (reach, unreadable) = self.walk(&roots, blobs)?;
         plan.damaged.extend(unreadable.values().cloned());
         // A kept record or object that cannot be read may name anything: the walk is incomplete, so
         // nothing is pruned until the damage is repaired or written again (fsck reports it).
@@ -281,12 +295,14 @@ impl Store {
         Ok(plan)
     }
 
-    /// Every object that `roots` reach, and those that cannot be read with why: a tree or times table
-    /// gives its children, any other object is checked with what it needs (`problem`). Each id is
-    /// visited once. An object that cannot be read ends its branch; an I/O error ends the walk.
-    pub(super) fn walk(&self, roots: &[StateRef]) -> Result<(HashSet<Id>, HashMap<Id, String>)> {
+    /// Every object that `roots` and the blobs of `blobs` reach, and those that cannot be read with
+    /// why: a tree or times table gives its children, any other object is checked with what it needs
+    /// (`problem`). Each id is visited once. An object that cannot be read ends its branch; an I/O
+    /// error ends the walk.
+    pub(super) fn walk(&self, roots: &[StateRef], blobs: &HashSet<Id>) -> Result<(HashSet<Id>, HashMap<Id, String>)> {
         let (mut reach, mut unreadable) = (HashSet::new(), HashMap::new());
         let mut work: Vec<_> = roots.iter().flat_map(|r| [(r.tree, Kind::Tree), (r.times, Kind::Times)]).collect();
+        work.extend(blobs.iter().map(|b| (*b, Kind::Blob)));
         while let Some((id, kind)) = work.pop() {
             let next: Result<Vec<(Id, Kind)>> = match kind {
                 Kind::Tree | Kind::Times if !reach.insert(id) => continue,
@@ -548,7 +564,7 @@ impl Store {
                 _ => None,
             })
             .collect();
-        let mut missing: Vec<(Id, String)> = self.walk(&roots)?.1.into_iter().filter(|(id, _)| !reported.contains(id)).collect();
+        let mut missing: Vec<(Id, String)> = self.walk(&roots, &HashSet::new())?.1.into_iter().filter(|(id, _)| !reported.contains(id)).collect();
         missing.sort();
         out.extend(missing.into_iter().map(|(id, reason)| Damage { item: Damaged::Missing(id), reason }));
         Ok(out)

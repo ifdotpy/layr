@@ -275,4 +275,6 @@ expect((try? idx.lookup(dir: manyIno, name: "renamed-1.txt"))?.size == 1004, "si
 compareIndex(idx, "after write and setattr")
 
 print(failures == 0 ? "SELFTEST PASS" : "SELFTEST FAIL (\(failures))")
+// exit() skips the defer above: the tree goes here.
+try? fm.removeItem(atPath: root)
 exit(failures == 0 ? 0 : 1)

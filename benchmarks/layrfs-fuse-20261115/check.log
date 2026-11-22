@@ -1,0 +1,44 @@
+ok   target is a link to the native cache folder
+ok   edits in the view
+ok   view content equals the native folder
+ok   status lists A, M, D and leaves out the cache
+ok   save gives the tree of the native folder ("tree":"99d25fed49589d7f03d597f5b3ff317a9a3fd1708fc508e99ee959e5b8a75386")
+ok   status is clean after the save
+ok   an edit after the save shows
+ok   the mount gives ENOTCONN after kill -9
+ok   the restart replayed the journal
+ok   edits after the restart
+ok   save after a crash gives the same tree
+ok   git add, commit and status in the view
+ok   the agent cannot list the store (0700, user layr)
+ok   the agent cannot remove a saved state
+ok   another user cannot read the mount
+ok   another user cannot ask for a save
+ok   the agent owns the files it sees
+ok   the upper folder belongs to layr
+ok   layr tool rg|find equal the real tools: start
+ok   git status with fsmonitor equals the plain run: start
+ok   git status with fsmonitor equals the plain run: start, again (token)
+ok   layr tool rg|find equal the real tools: after writes
+ok   git status with fsmonitor equals the plain run: after writes
+ok   layr tool rg|find equal the real tools: after renames
+ok   git status with fsmonitor equals the plain run: after renames
+ok   layr tool rg|find equal the real tools: after removals and a chmod
+ok   git status with fsmonitor equals the plain run: after removals and a chmod
+ok   layr tool rg|find equal the real tools: after a new folder
+ok   git status with fsmonitor equals the plain run: after a new folder
+ok   layr tool rg opens no file through the mount
+ok   a write is visible at once through the mount and to layr tool rg
+ok   content is the same at once after a save
+ok   layr tool rg|find equal the real tools: after a save
+ok   git status with fsmonitor equals the plain run: after a save
+ok   a write after a save is visible at once
+ok   layr tool rg|find equal the real tools: after kill -9 and a restart
+ok   git status with fsmonitor equals the plain run: after kill -9 and a restart
+ok   layr tool rg|find equal the real tools: after the restart, more edits
+ok   git status with fsmonitor equals the plain run: after the restart, more edits
+ok   a reset shows the head at once (names and pages invalidated)
+ok   layr tool rg|find equal the real tools: after a reset
+ok   git status with fsmonitor equals the plain run: after a reset
+ok   git used the hook's change lists ("fsmonitor":3 "fsmonitor_listed":1 )
+check: 43 passed, 0 failed

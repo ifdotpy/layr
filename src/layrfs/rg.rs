@@ -349,10 +349,12 @@ fn run_inner(
 
     // The files in output order, with the path that is printed.
     let root_bytes = root.as_os_str().as_bytes();
-    let mut files: Vec<(PathBuf, PathBuf, bool)> = Vec::new(); // (absolute, shown, explicit)
+    // (key, shown, explicit) in output order; the absolute paths follow in parallel: in a virtual
+    // line or a FUSE view each one is a lookup of the backing file.
+    let mut picked: Vec<(&[u8], PathBuf, bool)> = Vec::new();
     for t in &targets {
         match t {
-            Target::File { key, arg } => files.push((tree.content(root, key), PathBuf::from(arg), true)),
+            Target::File { key, arg } => picked.push((key.as_slice(), PathBuf::from(arg), true)),
             Target::Dir { key, arg } => {
                 let skip = if key.is_empty() { 0 } else { key.len() + 1 };
                 for f in index::below_set(&tree.visible, key) {
@@ -361,21 +363,28 @@ fn run_inner(
                     }
                     let mut shown = Vec::new();
                     shown_bytes(&mut shown, arg.as_deref(), &f[skip..]);
-                    // A virtual line reads the upper or the lower file directly, not the mount.
-                    let abs = if tree.overlay.is_some() {
-                        tree.content(root, f)
-                    } else {
-                        let mut abs = Vec::with_capacity(root_bytes.len() + 1 + f.len());
-                        abs.extend_from_slice(root_bytes);
-                        abs.push(b'/');
-                        abs.extend(f.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
-                        bytes_path(abs)
-                    };
-                    files.push((abs, bytes_path(shown), false));
+                    picked.push((f.as_slice(), bytes_path(shown), false));
                 }
             }
         }
     }
+    let backed = tree.overlay.is_some() || tree.content_of.is_some();
+    let files: Vec<(PathBuf, PathBuf, bool)> = picked
+        .into_par_iter()
+        .map(|(f, shown, explicit)| {
+            // A virtual line reads the upper or the lower file directly, not the mount.
+            let abs = if explicit || backed {
+                tree.content(root, f)
+            } else {
+                let mut abs = Vec::with_capacity(root_bytes.len() + 1 + f.len());
+                abs.extend_from_slice(root_bytes);
+                abs.push(b'/');
+                abs.extend(f.iter().map(|&b| if b == index::SEP { b'/' } else { b }));
+                bytes_path(abs)
+            };
+            (abs, shown, explicit)
+        })
+        .collect();
 
     if o.files {
         let mut listed = false;

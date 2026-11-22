@@ -171,6 +171,18 @@ fn line_move(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.validate_cache_locations(&l, &from, &to, crate::cache_overlay::CacheAccess::Live)?;
     crate::linepaths::register_with(&ctx.store.root, Some(&to));
     let back = a.pos.len() == 1;
+    // A fast line's folder is a mount: it is mounted again at the new folder.
+    if crate::views::fast_of(repo, &l).is_some() {
+        let done = crate::views::fast_move(repo, &l, &from, &to)
+            .and_then(|_| repo.p.set_moved_path(&l.id, if back { None } else { Some(&to) }));
+        crate::linepaths::register(&ctx.store.root);
+        done?;
+        // As for a folder line: the caches that the check before the move left for later.
+        let l = repo.line(&l.id)?;
+        repo.validate_cache_locations(&l, &to, &to, crate::cache_overlay::CacheAccess::Live)?;
+        outln!(ctx, "Moved line {} to {}", l.name, to.display());
+        return Ok(0);
+    }
     let done = crate::fsutil::rename_tree(&from, &to).map_err(anyhow::Error::from).and_then(|_| {
         let r = repo.p.set_moved_path(&l.id, if back { None } else { Some(&to) });
         if r.is_err() {
@@ -351,6 +363,8 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         .value("--owner")
         .value("--count")
         .value("--view")
+        .flag("--fast")
+        .flag("--classic")
         .flag("--json")
         .optional("--format")
         .value("--contains")
@@ -437,6 +451,12 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
             #[cfg(target_os = "macos")]
             let view = crate::views::of(repo, &l);
             check_merged(&l)?;
+            // A fast line whose server is gone (a restart of the service) shows an empty folder:
+            // mount it again, so the check below reads its files.
+            #[cfg(target_os = "linux")]
+            if !discard && crate::views::fast_of(repo, &l).is_some() {
+                crate::views::ensure_fast_mounted(repo, &l)?;
+            }
             // Unsaved changes in the folder of the line need an explicit --discard (or -f): -D
             // allows only unmerged saves.
             if !discard && repo.working(&l).exists() {
@@ -462,6 +482,21 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
                         ),
                     ));
                 }
+            }
+            // A fast line: as a folder line, unsaved changes need --discard above; the ones it
+            // has then become its final state (docs/layrfs-lab.md).
+            if crate::views::fast_of(repo, &l).is_some() {
+                let deleted = line_json(repo, &l);
+                #[cfg(target_os = "linux")]
+                crate::views::delete_layrfs(ctx, repo, &l, line_lock, discard, check_merged)?;
+                #[cfg(target_os = "macos")]
+                crate::cmd::view_ops::delete(ctx, repo, line_lock, &target, discard, check_merged)?;
+                if a.has("--json") {
+                    outln!(ctx, "{}", deleted);
+                } else {
+                    outln!(ctx, "Deleted line {} (was {}).", l.name, ids::short(&l.head));
+                }
+                continue;
             }
             // A virtual line: its unsaved changes come from its upper folder (docs/views.md).
             #[cfg(target_os = "macos")]
@@ -665,6 +700,64 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         }
         if owner == 0 && !ctx.caller.is_root() {
             return Err(exit(128, "fatal: only root can create a line owned by root"));
+        }
+        // The kind of line: fast (a LayrFS mount, Linux) or classic (a folder). Without a flag the
+        // project's `line.kind` decides; a fast default that cannot apply gives a classic line.
+        if a.has("--fast") && a.has("--classic") {
+            return Err(exit(2, "--fast and --classic exclude each other"));
+        }
+        let configured = repo.p.config_value("line.kind")?.and_then(|v| v.as_str().map(str::to_owned));
+        let fast = if a.has("--fast") {
+            if a.get("--view").is_some() || explicit_view.is_some() {
+                return Err(exit(2, "--fast makes a line from a state (no --view, no views/ start)"));
+            }
+            if let Err(why) = crate::views::fast_available(repo, &start) {
+                return Err(exit(1, format!("error: cannot make a fast line: {why}")));
+            }
+            true
+        } else if !a.has("--classic") && a.get("--view").is_none() && explicit_view.is_none() && configured.as_deref() == Some("fast") {
+            match crate::views::fast_available(repo, &start) {
+                Ok(()) => true,
+                Err(why) => {
+                    eprintln!("note: a classic line: {why}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if fast {
+            let names = match a.get("--count") {
+                Some(count) => {
+                    let count = count.parse::<usize>().map_err(|_| exit(128, "--count must be a positive integer"))?;
+                    repo.batch_line_names(name, count)?
+                }
+                None => vec![name.to_string()],
+            };
+            for n in names {
+                let l = crate::views::create_fast(ctx, repo, &n, &start, owner)?;
+                crate::fast_cache::start(ctx, repo, &l, &start, source.as_ref());
+                // The `.git` folder of a fast line, as `prepare_at` makes for other lines.
+                if let Err(e) = crate::gitbridge::make_git_folder(repo, &l, &start, &repo.working(&l)) {
+                    eprintln!("warning: line {} has no .git folder: {e:#}", l.name);
+                }
+                // The caches name the place of their build: relocate them at this line, as below.
+                let working = repo.working(&l);
+                if let Err(e) = repo
+                    .cache_candidates(&working)
+                    .and_then(|folders| repo.relocate_caches(&l, &folders, &working, crate::cache_overlay::CacheAccess::Prepared))
+                {
+                    eprintln!("warning: the caches of line {} start cold: {e:#}", l.name);
+                }
+                if a.has("--json") {
+                    outln!(ctx, "{}", line_json(repo, &l));
+                } else if a.has("--path") {
+                    outln!(ctx, "{}", repo.working(&l).display());
+                } else if !a.has("-q") {
+                    outln!(ctx, "Created fast line {} at {} from {}", l.name, repo.working(&l).display(), ids::short(&start));
+                }
+            }
+            return Ok(0);
         }
         match a.get("--view") {
             None | Some("folder") => {}
@@ -886,6 +979,8 @@ pub(crate) fn delete_recorded(
         repo.p.trash(&repo.working(l))?;
     }
     repo.p.set_moved_path(&l.id, None)?;
+    #[cfg(target_os = "linux")]
+    crate::views::drop_fast_files(repo, &l.id)?;
     #[cfg(target_os = "linux")]
     crate::views::forget(repo, &l.id)?;
     repo.drop_stage(l)?;

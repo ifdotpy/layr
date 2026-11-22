@@ -1,0 +1,46 @@
+{"tree":"linux","backend":"fuse","step":"line new","ms":28}
+{"tree":"linux","backend":"fuse","step":"line delete (clean)","ms":22}
+{"tree":"linux","backend":"fuse","step":"tool index ready","ms":1514}
+{"tree":"linux","backend":"fuse","step":"git status (cold)","ms":32833}
+{"tree":"linux","backend":"fuse","step":"git status (warm)","ms":99}
+{"tree":"linux","backend":"fuse","step":"git status, no fsmonitor (warm)","ms":123}
+{"tree":"linux","backend":"fuse","step":"rg -l TODO (first)","ms":3446}
+{"tree":"linux","backend":"fuse","step":"rg -l TODO (warm)","ms":2477}
+{"tree":"linux","backend":"fuse","step":"layr tool rg -l TODO (warm)","ms":548}
+{"tree":"linux","backend":"fuse","step":"find -type f (warm)","ms":128}
+{"tree":"linux","backend":"fuse","step":"layr tool find -type f (warm)","ms":18}
+{"tree":"linux","backend":"fuse","step":"edit 10 files","ms":19}
+{"tree":"linux","backend":"fuse","step":"save 10","ms":46,"tree":"46dfb6233422bf3eb8cc2dd91355bcbdf5b1f3a6bfcf082846cf70eaedd304be"}
+{"tree":"linux","backend":"fuse","step":"edit 10000 files (modify)","ms":6462}
+{"tree":"linux","backend":"fuse","step":"save 10000","ms":545,"tree":"4c80c43c3f17eb4c3a35b0258bfc3e7fc5543d5ebd2bfdbec9290280ce6ba402"}
+{"tree":"linux","backend":"fuse","step":"line delete (10010 changes)","ms":31}
+{"tree":"linux","backend":"btrfs","step":"line new","ms":15}
+{"tree":"linux","backend":"btrfs","step":"line delete (clean)","ms":13}
+{"tree":"linux","backend":"btrfs","step":"tool index ready","ms":938}
+{"tree":"linux","backend":"btrfs","step":"git status (cold)","ms":16015}
+{"tree":"linux","backend":"btrfs","step":"git status (warm)","ms":166}
+{"tree":"linux","backend":"btrfs","step":"rg -l TODO (first)","ms":212}
+{"tree":"linux","backend":"btrfs","step":"rg -l TODO (warm)","ms":197}
+{"tree":"linux","backend":"btrfs","step":"layr tool rg -l TODO (warm)","ms":153}
+{"tree":"linux","backend":"btrfs","step":"find -type f (warm)","ms":160}
+{"tree":"linux","backend":"btrfs","step":"layr tool find -type f (warm)","ms":15}
+{"tree":"linux","backend":"btrfs","step":"edit 10 files","ms":4}
+{"tree":"linux","backend":"btrfs","step":"save 10","ms":90,"tree":"b48a3301f9e5ca0b3aec002eb863e58825ea3ca4ecbe7649d654df00bd1e6d18"}
+{"tree":"linux","backend":"btrfs","step":"edit 10000 files (modify)","ms":291}
+{"tree":"linux","backend":"btrfs","step":"save 10000","ms":3290,"tree":"c6d371e105db1dcaa2ad0479386256f1329fb395f61880fd5386eb303e48144b"}
+{"tree":"linux","backend":"btrfs","step":"line delete (10010 changes)","ms":759}
+{"tree":"linux","backend":"overlay","step":"line new","ms":14}
+{"tree":"linux","backend":"overlay","step":"line delete (clean)","ms":19}
+{"tree":"linux","backend":"overlay","step":"tool index ready","ms":657}
+{"tree":"linux","backend":"overlay","step":"git status (cold)","ms":7556}
+{"tree":"linux","backend":"overlay","step":"git status (warm)","ms":165}
+{"tree":"linux","backend":"overlay","step":"rg -l TODO (first)","ms":227}
+{"tree":"linux","backend":"overlay","step":"rg -l TODO (warm)","ms":224}
+{"tree":"linux","backend":"overlay","step":"layr tool rg -l TODO (warm)","ms":164}
+{"tree":"linux","backend":"overlay","step":"find -type f (warm)","ms":155}
+{"tree":"linux","backend":"overlay","step":"layr tool find -type f (warm)","ms":16}
+{"tree":"linux","backend":"overlay","step":"edit 10 files","ms":10}
+{"tree":"linux","backend":"overlay","step":"save 10","ms":26,"tree":"28fe79b1e4fb52b2a311bff534139ed7d8faaa24bc69277b436148870bdb7084"}
+{"tree":"linux","backend":"overlay","step":"edit 10000 files (modify)","ms":3107}
+{"tree":"linux","backend":"overlay","step":"save 10000","ms":262,"tree":"381867c6e64430a777cbe784cb46ceef10d7aa7164ba522daf98c90edd4ee727"}
+{"tree":"linux","backend":"overlay","step":"line delete (10010 changes)","ms":1716}

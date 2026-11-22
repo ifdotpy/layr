@@ -1,0 +1,151 @@
+{"kind":"plain","step":"git status (warm)","ms":431,"round":1,"load":11.73}
+{"kind":"plain","step":"git status after 10 edits","ms":204,"round":1,"load":11.73}
+{"kind":"plain","step":"git diff --stat","ms":89,"round":1,"load":11.73}
+{"kind":"plain","step":"git commit -a (10 files)","ms":110,"round":1,"load":11.73}
+{"kind":"plain","step":"git reset --hard HEAD~1","ms":383,"round":1,"load":11.73}
+{"kind":"classic","step":"line new","ms":6258,"round":1,"load":11.35}
+{"kind":"classic","step":"git status (first)","ms":261,"round":1,"load":11.35}
+{"kind":"classic","step":"git status (warm)","ms":199,"round":1,"load":11.35}
+{"kind":"classic","step":"git status (warm 2)","ms":191,"round":1,"load":11.24}
+{"kind":"classic","step":"layr status (first)","ms":25628,"round":1,"load":11.78}
+{"kind":"classic","step":"git status after 10 edits","ms":206,"round":1,"load":11.78}
+{"kind":"classic","step":"git diff --stat","ms":54,"round":1,"load":11.78}
+{"kind":"classic","step":"layr save -a (10 files)","ms":66590,"round":1,"load":9.79}
+{"kind":"classic","step":"git status after layr save","ms":192,"round":1,"load":9.79}
+{"kind":"classic","step":"git log -n 5","ms":8,"round":1,"load":9.79}
+{"kind":"classic","step":"layr reset --hard head~1","ms":65233,"round":1,"load":13.89}
+{"kind":"classic","step":"git status after layr reset","ms":186,"round":1,"load":13.89}
+{"kind":"classic","step":"line delete","ms":43746,"round":1,"load":8.82}
+{"kind":"fast","step":"line new","ms":805,"round":1,"load":8.82}
+{"kind":"fast","step":"git status (first)","ms":401,"round":1,"load":8.82}
+{"kind":"fast","step":"git status (warm)","ms":49,"round":1,"load":8.82}
+{"kind":"fast","step":"git status (warm 2)","ms":49,"round":1,"load":8.82}
+{"kind":"fast","step":"layr status (first)","ms":202,"round":1,"load":8.82}
+{"kind":"fast","step":"git status after 10 edits","ms":104,"round":1,"load":8.82}
+{"kind":"fast","step":"git diff --stat","ms":43,"round":1,"load":8.82}
+{"kind":"fast","step":"git commit -a (10 files)","ms":127,"round":1,"load":8.82}
+{"kind":"fast","step":"layr status after git commit","ms":164,"round":1,"load":8.44}
+{"kind":"fast","step":"git status after git commit","ms":119,"round":1,"load":8.44}
+{"kind":"fast","step":"git commit -a, no hook","ms":143,"round":1,"load":8.44}
+{"kind":"fast","step":"layr git adopt","ms":1802,"round":1,"load":8.44}
+{"kind":"fast","step":"git reset --hard HEAD~1","ms":236,"round":1,"load":8.44}
+{"kind":"fast","step":"layr save -a (10 files)","ms":1618,"round":1,"load":8.08}
+{"kind":"fast","step":"git status after layr save","ms":227,"round":1,"load":8.08}
+{"kind":"fast","step":"git log -n 5","ms":7,"round":1,"load":8.08}
+{"kind":"fast","step":"layr reset --hard head~1","ms":38858,"round":1,"load":11.60}
+{"kind":"fast","step":"git status after layr reset","ms":370,"round":1,"load":11.60}
+{"kind":"fast","step":"git status, no fsmonitor","ms":184,"round":1,"load":11.60}
+{"kind":"fast","step":"line delete","ms":1049,"round":1,"load":11.60}
+{"kind":"plain","step":"git status (warm)","ms":272,"round":2,"load":11.60}
+{"kind":"plain","step":"git status after 10 edits","ms":170,"round":2,"load":11.60}
+{"kind":"plain","step":"git diff --stat","ms":46,"round":2,"load":11.60}
+{"kind":"plain","step":"git commit -a (10 files)","ms":121,"round":2,"load":11.60}
+{"kind":"plain","step":"git reset --hard HEAD~1","ms":355,"round":2,"load":11.60}
+{"kind":"classic","step":"line new","ms":25294,"round":2,"load":9.75}
+{"kind":"classic","step":"git status (first)","ms":184,"round":2,"load":9.75}
+{"kind":"classic","step":"git status (warm)","ms":178,"round":2,"load":9.75}
+{"kind":"classic","step":"git status (warm 2)","ms":184,"round":2,"load":9.75}
+{"kind":"classic","step":"layr status (first)","ms":24157,"round":2,"load":8.39}
+{"kind":"classic","step":"git status after 10 edits","ms":343,"round":2,"load":8.39}
+{"kind":"classic","step":"git diff --stat","ms":45,"round":2,"load":8.39}
+{"kind":"classic","step":"layr save -a (10 files)","ms":50083,"round":2,"load":9.56}
+{"kind":"classic","step":"git status after layr save","ms":179,"round":2,"load":9.56}
+{"kind":"classic","step":"git log -n 5","ms":10,"round":2,"load":9.56}
+{"kind":"classic","step":"layr reset --hard head~1","ms":63620,"round":2,"load":10.21}
+{"kind":"classic","step":"git status after layr reset","ms":221,"round":2,"load":10.21}
+{"kind":"classic","step":"line delete","ms":63275,"round":2,"load":7.21}
+{"kind":"fast","step":"line new","ms":786,"round":2,"load":7.21}
+{"kind":"fast","step":"git status (first)","ms":381,"round":2,"load":7.21}
+{"kind":"fast","step":"git status (warm)","ms":45,"round":2,"load":7.21}
+{"kind":"fast","step":"git status (warm 2)","ms":47,"round":2,"load":7.21}
+{"kind":"fast","step":"layr status (first)","ms":229,"round":2,"load":7.21}
+{"kind":"fast","step":"git status after 10 edits","ms":93,"round":2,"load":7.21}
+{"kind":"fast","step":"git diff --stat","ms":38,"round":2,"load":7.21}
+{"kind":"fast","step":"git commit -a (10 files)","ms":127,"round":2,"load":7.21}
+{"kind":"fast","step":"layr status after git commit","ms":183,"round":2,"load":7.51}
+{"kind":"fast","step":"git status after git commit","ms":100,"round":2,"load":7.51}
+{"kind":"fast","step":"git commit -a, no hook","ms":120,"round":2,"load":7.51}
+{"kind":"fast","step":"layr git adopt","ms":1707,"round":2,"load":7.51}
+{"kind":"fast","step":"git reset --hard HEAD~1","ms":280,"round":2,"load":7.51}
+{"kind":"fast","step":"layr save -a (10 files)","ms":1630,"round":2,"load":7.63}
+{"kind":"fast","step":"git status after layr save","ms":239,"round":2,"load":7.63}
+{"kind":"fast","step":"git log -n 5","ms":8,"round":2,"load":7.63}
+{"kind":"fast","step":"layr reset --hard head~1","ms":37723,"round":2,"load":11.00}
+{"kind":"fast","step":"git status after layr reset","ms":307,"round":2,"load":10.84}
+{"kind":"fast","step":"git status, no fsmonitor","ms":189,"round":2,"load":10.84}
+{"kind":"fast","step":"line delete","ms":1101,"round":2,"load":10.84}
+{"kind":"plain","step":"git status (warm)","ms":404,"round":3,"load":10.84}
+{"kind":"plain","step":"git status after 10 edits","ms":180,"round":3,"load":10.84}
+{"kind":"plain","step":"git diff --stat","ms":48,"round":3,"load":10.84}
+{"kind":"plain","step":"git commit -a (10 files)","ms":133,"round":3,"load":10.84}
+{"kind":"plain","step":"git reset --hard HEAD~1","ms":393,"round":3,"load":10.84}
+{"kind":"fast","step":"line new","ms":804,"round":3,"load":10.84}
+{"kind":"fast","step":"git status (first)","ms":434,"round":3,"load":10.84}
+{"kind":"fast","step":"git status (warm)","ms":56,"round":3,"load":10.84}
+{"kind":"fast","step":"git status (warm 2)","ms":57,"round":3,"load":10.84}
+{"kind":"fast","step":"layr status (first)","ms":245,"round":3,"load":10.84}
+{"kind":"fast","step":"git status after 10 edits","ms":109,"round":3,"load":10.84}
+{"kind":"fast","step":"git diff --stat","ms":42,"round":3,"load":10.84}
+{"kind":"fast","step":"git commit -a (10 files)","ms":131,"round":3,"load":10.84}
+{"kind":"fast","step":"layr status after git commit","ms":178,"round":3,"load":10.45}
+{"kind":"fast","step":"git status after git commit","ms":120,"round":3,"load":10.45}
+{"kind":"fast","step":"git commit -a, no hook","ms":135,"round":3,"load":10.45}
+{"kind":"fast","step":"layr git adopt","ms":1854,"round":3,"load":10.45}
+{"kind":"fast","step":"git reset --hard HEAD~1","ms":237,"round":3,"load":10.45}
+{"kind":"fast","step":"layr save -a (10 files)","ms":1538,"round":3,"load":10.26}
+{"kind":"fast","step":"git status after layr save","ms":285,"round":3,"load":10.26}
+{"kind":"fast","step":"git log -n 5","ms":10,"round":3,"load":10.26}
+{"kind":"fast","step":"layr reset --hard head~1","ms":36267,"round":3,"load":12.60}
+{"kind":"fast","step":"git status after layr reset","ms":237,"round":3,"load":12.60}
+{"kind":"fast","step":"git status, no fsmonitor","ms":189,"round":3,"load":12.07}
+{"kind":"fast","step":"line delete","ms":959,"round":3,"load":12.07}
+{"kind":"plain","step":"git status (warm)","ms":226,"round":4,"load":12.07}
+{"kind":"plain","step":"git status after 10 edits","ms":170,"round":4,"load":12.07}
+{"kind":"plain","step":"git diff --stat","ms":43,"round":4,"load":12.07}
+{"kind":"plain","step":"git commit -a (10 files)","ms":114,"round":4,"load":12.07}
+{"kind":"plain","step":"git reset --hard HEAD~1","ms":357,"round":4,"load":12.07}
+{"kind":"fast","step":"line new","ms":786,"round":4,"load":12.07}
+{"kind":"fast","step":"git status (first)","ms":384,"round":4,"load":12.07}
+{"kind":"fast","step":"git status (warm)","ms":48,"round":4,"load":12.07}
+{"kind":"fast","step":"git status (warm 2)","ms":52,"round":4,"load":12.07}
+{"kind":"fast","step":"layr status (first)","ms":224,"round":4,"load":12.07}
+{"kind":"fast","step":"git status after 10 edits","ms":103,"round":4,"load":12.07}
+{"kind":"fast","step":"git diff --stat","ms":43,"round":4,"load":12.07}
+{"kind":"fast","step":"git commit -a (10 files)","ms":143,"round":4,"load":12.07}
+{"kind":"fast","step":"layr status after git commit","ms":970,"round":4,"load":11.51}
+{"kind":"fast","step":"git status after git commit","ms":119,"round":4,"load":11.51}
+{"kind":"fast","step":"git commit -a, no hook","ms":130,"round":4,"load":11.51}
+{"kind":"fast","step":"layr git adopt","ms":1809,"round":4,"load":11.51}
+{"kind":"fast","step":"git reset --hard HEAD~1","ms":208,"round":4,"load":11.51}
+{"kind":"fast","step":"layr save -a (10 files)","ms":1370,"round":4,"load":10.98}
+{"kind":"fast","step":"git status after layr save","ms":210,"round":4,"load":10.98}
+{"kind":"fast","step":"git log -n 5","ms":7,"round":4,"load":10.98}
+{"kind":"fast","step":"layr reset --hard head~1","ms":34454,"round":4,"load":11.70}
+{"kind":"fast","step":"git status after layr reset","ms":221,"round":4,"load":11.70}
+{"kind":"fast","step":"git status, no fsmonitor","ms":190,"round":4,"load":11.70}
+{"kind":"fast","step":"line delete","ms":953,"round":4,"load":11.70}
+{"kind":"plain","step":"git status (warm)","ms":212,"round":5,"load":11.70}
+{"kind":"plain","step":"git status after 10 edits","ms":184,"round":5,"load":11.70}
+{"kind":"plain","step":"git diff --stat","ms":49,"round":5,"load":11.70}
+{"kind":"plain","step":"git commit -a (10 files)","ms":109,"round":5,"load":11.70}
+{"kind":"plain","step":"git reset --hard HEAD~1","ms":342,"round":5,"load":11.70}
+{"kind":"fast","step":"line new","ms":736,"round":5,"load":11.16}
+{"kind":"fast","step":"git status (first)","ms":386,"round":5,"load":11.16}
+{"kind":"fast","step":"git status (warm)","ms":69,"round":5,"load":11.16}
+{"kind":"fast","step":"git status (warm 2)","ms":61,"round":5,"load":11.16}
+{"kind":"fast","step":"layr status (first)","ms":233,"round":5,"load":11.16}
+{"kind":"fast","step":"git status after 10 edits","ms":111,"round":5,"load":11.16}
+{"kind":"fast","step":"git diff --stat","ms":46,"round":5,"load":11.16}
+{"kind":"fast","step":"git commit -a (10 files)","ms":135,"round":5,"load":11.16}
+{"kind":"fast","step":"layr status after git commit","ms":156,"round":5,"load":11.16}
+{"kind":"fast","step":"git status after git commit","ms":105,"round":5,"load":11.16}
+{"kind":"fast","step":"git commit -a, no hook","ms":121,"round":5,"load":11.16}
+{"kind":"fast","step":"layr git adopt","ms":1662,"round":5,"load":10.67}
+{"kind":"fast","step":"git reset --hard HEAD~1","ms":200,"round":5,"load":10.67}
+{"kind":"fast","step":"layr save -a (10 files)","ms":1345,"round":5,"load":10.67}
+{"kind":"fast","step":"git status after layr save","ms":209,"round":5,"load":10.67}
+{"kind":"fast","step":"git log -n 5","ms":7,"round":5,"load":10.67}
+{"kind":"fast","step":"layr reset --hard head~1","ms":33357,"round":5,"load":11.57}
+{"kind":"fast","step":"git status after layr reset","ms":235,"round":5,"load":11.57}
+{"kind":"fast","step":"git status, no fsmonitor","ms":182,"round":5,"load":11.57}
+{"kind":"fast","step":"line delete","ms":1020,"round":5,"load":11.57}

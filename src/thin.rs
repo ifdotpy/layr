@@ -297,17 +297,49 @@ impl Layered {
     }
 
     /// The entry at `rel` alone (no content below it) in the merged tree, as `scan` gives it.
+    /// An entry of the object base comes from its tree.
     pub fn entry(&self, rel: &str) -> Result<Option<ScanEntry>> {
         if self.layers.is_empty() {
             if let Some(o) = &self.object_base {
                 return crate::apfs::object_scan::entry(o, rel);
             }
         }
-        self.find(rel)?.map(|p| apfs::entry_of_path(&p)).transpose()
+        match self.locate(rel)? {
+            Some(Found::Path(p)) => apfs::entry_of_path(&p).map(Some),
+            Some(Found::Object(o)) => crate::apfs::object_scan::entry(o, rel),
+            None => Ok(None),
+        }
     }
 
     /// The path of `rel` in the layer that holds it. `None` when the tree has no such entry.
     pub fn find(&self, rel: &str) -> Result<Option<PathBuf>> {
+        match self.locate(rel)? {
+            Some(Found::Path(p)) => Ok(Some(p)),
+            Some(Found::Object(o)) => Ok(Some(o.path(rel)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The metadata of `rel` in the merged tree. An entry of the object base comes from its
+    /// tree: no file comes out of the store (`find` writes one).
+    pub fn meta(&self, rel: &str) -> Option<crate::fsutil::Meta> {
+        match self.locate(rel).ok()? {
+            Some(Found::Path(p)) => crate::fsutil::exact_metadata(&p, rel).map(|m| crate::fsutil::meta_of(&m)),
+            Some(Found::Object(o)) => o.meta(rel).ok().flatten(),
+            None => None,
+        }
+    }
+
+    /// The object base when `rel` comes from it (no layer holds or hides it).
+    pub fn object_of(&self, rel: &str) -> Option<&crate::object_tree::ObjectTree> {
+        match self.locate(rel).ok()? {
+            Some(Found::Object(o)) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Where `rel` is: a path in a layer, or the object base.
+    fn locate(&self, rel: &str) -> Result<Option<Found<'_>>> {
         for (i, l) in self.layers.iter().enumerate() {
             if i > 0 && hides(&self.layers[i - 1], rel) {
                 return Ok(None);
@@ -318,7 +350,7 @@ impl Layered {
                     return Ok(None);
                 }
                 if entries.contains_key(rel) {
-                    return Ok(Some(if rel.is_empty() { l.root.clone() } else { l.root.join(rel) }));
+                    return Ok(Some(Found::Path(if rel.is_empty() { l.root.clone() } else { l.root.join(rel) })));
                 }
                 continue;
             }
@@ -328,7 +360,7 @@ impl Layered {
             };
             match fs::symlink_metadata(&p) {
                 // On a volume that ignores case, `readme` also finds `README`: another path.
-                Ok(_) if crate::fsutil::exact_metadata(&p, rel).is_some() => return Ok(Some(p)),
+                Ok(_) if crate::fsutil::exact_metadata(&p, rel).is_some() => return Ok(Some(Found::Path(p))),
                 Ok(_) => continue,
                 Err(e) if not_found(&e) => continue,
                 Err(e) => return Err(e.into()),
@@ -339,7 +371,7 @@ impl Layered {
         }
         if let Some(o) = &self.object_base {
             if o.entry(rel)?.is_some() {
-                return Ok(Some(o.path(rel)?));
+                return Ok(Some(Found::Object(o)));
             }
         }
         Ok(None)
@@ -602,13 +634,23 @@ impl Diff {
     }
 }
 
+
+/// The extended attribute that macOS stamps on files written by a quarantined program.
+#[cfg(target_os = "macos")]
+pub(crate) const OS_MARKER: &[u8] = b"com.apple.provenance";
+
+/// The stored extended attributes of `p`, sorted (`stored_metadata_same`).
+#[cfg(target_os = "macos")]
+pub(crate) fn stored_xattrs(p: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut x: Vec<_> =
+        crate::sys::apfs_xattrs_where(p, |name| name != OS_MARKER)?.into_iter().filter(|(name, _)| name != OS_MARKER).collect();
+    x.sort();
+    Ok(x)
+}
+
 /// True when two entries of equal type carry the same extended attributes and ACL. Extended
 /// attributes and ACLs are not part of the scan: `same` runs first and this runs on entries
 /// that look equal. A change of them keeps the modification time.
-/// The extended attribute that macOS stamps on files written by a quarantined program.
-#[cfg(target_os = "macos")]
-const OS_MARKER: &[u8] = b"com.apple.provenance";
-
 #[cfg(target_os = "macos")]
 pub(crate) fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
     // The system stamps `com.apple.provenance` on a file and no user sets it, so it does not
@@ -2021,4 +2063,10 @@ impl crate::fsutil::Src for Layered {
             None
         }
     }
+}
+
+/// Where `Layered::locate` finds an entry.
+enum Found<'a> {
+    Path(PathBuf),
+    Object(&'a crate::object_tree::ObjectTree),
 }

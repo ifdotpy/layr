@@ -1,0 +1,2 @@
+{"step":"map","ms":434513,"out":{"objects":487377,"trees":54594,"raw_bytes":4676138109,"map_bytes":29729874,"walk_ms":1095,"hash_ms":431820}}
+{"step":"ids","git_blobs":487377,"map_blobs":487377,"git_only":1,"map_only":1}

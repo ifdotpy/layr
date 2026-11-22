@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub fn store(repo: &Repo) -> PathBuf {
-    repo.p.git_dir()
+    let s = repo.p.git_dir();
+    crate::gitpack::serve_if_used(&repo.p, &s);
+    s
 }
 
 pub fn has_store(repo: &Repo) -> bool {
@@ -171,6 +173,70 @@ pub fn init_store(repo: &Repo) -> Result<PathBuf> {
     Ok(s)
 }
 
+// ----- shallow history -----
+//
+// A shallow clone has commits whose parents it does not have. Git names them in the file
+// `shallow` of a repository and reads each one as a commit without parents. The git store of a
+// project keeps such a file when a fetch brought a history that ends this way (`init --from-git`
+// of a shallow clone); the temporary repository of a fetch and the `.git` folder of each line get
+// its commits too, because they borrow the objects of the store. The state of such a commit has
+// no parents, and its record keeps the exact commit (with the names of its parents).
+
+/// The commit ids of the lines of a `shallow` file.
+fn shallow_ids(text: &str) -> BTreeSet<String> {
+    text.lines().map(str::trim).filter(|l| l.len() == 40 && l.bytes().all(|b| b.is_ascii_hexdigit())).map(String::from).collect()
+}
+
+fn shallow_text(ids: &BTreeSet<String>) -> String {
+    ids.iter().map(|c| format!("{c}\n")).collect()
+}
+
+/// The commits of the git store `s` whose parents the store does not have.
+fn store_shallow(s: &Path) -> BTreeSet<String> {
+    shallow_ids(&std::fs::read_to_string(s.join("shallow")).unwrap_or_default())
+}
+
+/// Name `commits` in the `shallow` file of the git store `s`. The caller holds the lock of the
+/// Git refs (`fetch_write_lock`).
+fn add_shallow_locked(s: &Path, commits: &BTreeSet<String>) -> Result<()> {
+    let mut all = store_shallow(s);
+    let before = all.len();
+    all.extend(commits.iter().cloned());
+    if all.len() == before {
+        return Ok(());
+    }
+    fsutil::atomic_write(&s.join("shallow"), shallow_text(&all).as_bytes(), 0o644)
+}
+
+/// The `shallow` file of the `.git` folder of `line` names the shallow commits of the store (and
+/// keeps the ones that git added in a fast line). A folder that the line owner made is left alone.
+fn refresh_shallow(repo: &Repo, line: &Line) -> Result<()> {
+    let want = store_shallow(&store(repo));
+    if want.is_empty() {
+        return Ok(());
+    }
+    let w = git_base(repo, line);
+    let Ok(dir) = fsutil::open_dir_nofollow(&w.join(".git")) else { return Ok(()) };
+    if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
+        return Ok(());
+    }
+    let mut all = shallow_ids(&fsutil::read_at(&dir, "shallow").map(|c| String::from_utf8_lossy(&c).into_owned()).unwrap_or_default());
+    if want.is_subset(&all) {
+        return Ok(());
+    }
+    all.extend(want);
+    let text = shallow_text(&all);
+    let fast = follows_git(repo, line);
+    if !fast {
+        fsutil::git_writable(&w, true);
+    }
+    let r = fsutil::replace_at(&dir, "shallow", &mut |f| Ok((&*f).write_all(text.as_bytes())?), Some(repo.owner_ids(line)));
+    if !fast {
+        fsutil::git_writable(&w, false);
+    }
+    r
+}
+
 // ----- network operations as the caller -----
 
 /// Environment passed to git network commands from the caller.
@@ -256,7 +322,14 @@ fn is_ancestor(store: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
 /// the caller, so links or alternates in it cannot make root read another path. Runs under the
 /// Git refs lock, not the project lock. Returns the refs to record: a ref that would move back to
 /// an older commit (a concurrent fetch stored a newer one) keeps the newer commit.
-fn import_fetched(ctx: &Ctx, repo: &Repo, store: &Path, tmp: &Path, refs: &[(String, String)]) -> Result<Vec<(String, String)>> {
+fn import_fetched(
+    ctx: &Ctx,
+    repo: &Repo,
+    store: &Path,
+    tmp: &Path,
+    refs: &[(String, String)],
+    shallow: &BTreeSet<String>,
+) -> Result<Vec<(String, String)>> {
     if refs.is_empty() {
         return Ok(Vec::new());
     }
@@ -300,6 +373,15 @@ fn import_fetched(ctx: &Ctx, repo: &Repo, store: &Path, tmp: &Path, refs: &[(Str
     if !pack_status.success() || !index_status.success() {
         bail!("cannot import fetched git objects");
     }
+    // The fetched history ends at commits without their parents (a shallow source): the store
+    // names them before a ref shows them, so no command walks into a missing parent.
+    let known = store_shallow(store);
+    let ends: BTreeSet<String> = shallow
+        .iter()
+        .filter(|c| !known.contains(*c) && git_out(store, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok())
+        .cloned()
+        .collect();
+    add_shallow_locked(store, &ends)?;
 
     let mut out = Vec::with_capacity(refs.len());
     for (name, oid) in refs {
@@ -364,6 +446,11 @@ fn fetch_refspec(ctx: &Ctx, repo: &Repo, url: &str, remote: &str, refspec: &str)
         }
     }
     std::fs::write(tmp.join("packed-refs"), packed)?;
+    // The repository borrows the objects of the store, so it has the store's shallow commits.
+    let known = store_shallow(&s);
+    if !known.is_empty() {
+        std::fs::write(tmp.join("shallow"), shallow_text(&known))?;
+    }
     if rustix::process::geteuid().is_root() && ctx.caller.uid != 0 {
         let (u, g) = (ctx.caller.uid, ctx.caller.gid);
         let mut paths = Vec::new();
@@ -377,7 +464,12 @@ fn fetch_refspec(ctx: &Ctx, repo: &Repo, url: &str, remote: &str, refspec: &str)
         }
     }
     let mut c = base_cmd(&tmp);
-    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head"]).arg(url).arg(refspec).arg("+refs/tags/*:refs/tags/*");
+    // `--update-shallow`: a shallow source gives its branches (git skips them without it), and
+    // the repository then names the commits where the history ends.
+    c.args(["fetch", "-q", "--no-tags", "--no-write-fetch-head", "--update-shallow"])
+        .arg(url)
+        .arg(refspec)
+        .arg("+refs/tags/*:refs/tags/*");
     as_caller(ctx, &mut c, &tmp)?;
     let out = c.stdin(Stdio::null()).output().context("run git fetch")?;
     if !out.status.success() {
@@ -386,7 +478,14 @@ fn fetch_refspec(ctx: &Ctx, repo: &Repo, url: &str, remote: &str, refspec: &str)
     }
     test_sleep("LAYR_TEST_FETCH_SLEEP_MS");
     let refs = fetched_refs(ctx, &tmp, remote);
-    let r = refs.and_then(|refs| import_fetched(ctx, repo, &s, &tmp, &refs));
+    // The repository belongs to the caller: its `shallow` file is read through a descriptor of
+    // the folder, never through a link.
+    let shallow = fsutil::open_dir_nofollow(&tmp)
+        .ok()
+        .and_then(|dir| fsutil::read_at(&dir, "shallow"))
+        .map(|c| shallow_ids(&String::from_utf8_lossy(&c)))
+        .unwrap_or_default();
+    let r = refs.and_then(|refs| import_fetched(ctx, repo, &s, &tmp, &refs, &shallow));
     let _ = std::fs::remove_dir_all(&tmp);
     let prefix = format!("refs/remotes/");
     Ok(r?.into_iter().filter_map(|(name, oid)| name.strip_prefix(&prefix).map(|name| (name.to_string(), oid))).collect())
@@ -932,9 +1031,26 @@ pub(crate) fn mapped_state(repo: &Repo, oid: &str) -> Result<Option<String>> {
 /// Plan the records of the commits of `commit` that are not imported yet. Reads the Git objects and
 /// the records only: no project lock, no write.
 pub fn plan_import(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Result<ImportPlan> {
+    plan_import_over(ctx, repo, commit, refname, &[])
+}
+
+/// The state of a commit outside the walk of `plan_import_over`: a commit that a record maps, or
+/// a commit that layr made for a state without a record (`state_of_history_commit`).
+fn state_of_known_commit(repo: &Repo, oid: &str) -> Result<Option<String>> {
+    match mapped_state(repo, oid)? {
+        Some(st) => Ok(Some(st)),
+        None => state_of_history_commit(repo, oid),
+    }
+}
+
+/// `plan_import` without a walk of the whole history: the commits that `over` (commits with their
+/// states) reach are imported already. A parent outside the walk is found by its commit.
+fn plan_import_over(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str, over: &[(String, String)]) -> Result<ImportPlan> {
     let s = init_store(repo)?;
-    let revs = git_out(&s, &["rev-list", "--topo-order", "--reverse", "--parents", commit])?;
-    let mut states: BTreeMap<String, String> = BTreeMap::new();
+    let mut args: Vec<String> = ["rev-list", "--topo-order", "--reverse", "--parents", commit].map(String::from).to_vec();
+    args.extend(over.iter().map(|(c, _)| format!("^{c}")));
+    let revs = git_out(&s, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let mut states: BTreeMap<String, String> = over.iter().cloned().collect();
     let mut cat = CatFile::new(&s)?;
     let mut records = Vec::new();
     let mut imported = 0usize;
@@ -945,13 +1061,38 @@ pub fn plan_import(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Resul
         let state = match mapped_state(repo, oid)? {
             Some(st) => st,
             None => {
-                let parents: Vec<String> = git_parents
-                    .iter()
-                    .map(|p| states.get(*p).cloned().ok_or_else(|| anyhow!("Git parent {p} was not imported")))
-                    .collect::<Result<_>>()?;
+                let mut parents: Vec<String> = Vec::new();
+                for p in &git_parents {
+                    let known = match states.get(*p) {
+                        Some(st) => Some(st.clone()),
+                        None if !over.is_empty() => state_of_known_commit(repo, p)?,
+                        None => None,
+                    };
+                    let st = known.ok_or_else(|| anyhow!("Git parent {p} was not imported"))?;
+                    states.insert(p.to_string(), st.clone());
+                    parents.push(st);
+                }
                 let raw = cat.object(oid, "commit")?;
                 let (objects, changes) = import_changes(&raw, git_parents.first().copied(), &mut cat)?;
-                let (st, rec) = import_record(ctx, repo, oid, &raw, refname, parents, objects, changes)?;
+                // A commit that git made in a fast line: its state gets objects now, from the
+                // objects of its first parent and the changed paths. Without them the state has
+                // no tree until git builds one (`build_tree`), and no fast line starts from it.
+                let refs = match parents.first().filter(|_| !over.is_empty()) {
+                    Some(parent) => match commit_objects(repo, parent, &changes, &mut cat) {
+                        Ok(refs) => refs,
+                        Err(e) => {
+                            drop(crate::trace::named(|| format!("commit {oid} gets no objects: {e:#}")));
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                let (st, mut rec) = import_record(ctx, repo, oid, &raw, refname, parents, objects, changes)?;
+                if let (Some((store, refs)), Some(state)) = (refs, rec.states.first_mut()) {
+                    store.set_state(&state.id, &refs)?;
+                    state.tree = Some(refs.tree.hex());
+                    state.times = Some(refs.times.hex());
+                }
                 records.push((oid.to_string(), rec));
                 imported += 1;
                 if imported % IMPORT_PROGRESS_EVERY == 0 {
@@ -962,12 +1103,274 @@ pub fn plan_import(ctx: &Ctx, repo: &Repo, commit: &str, refname: &str) -> Resul
         };
         states.insert(oid.to_string(), state);
     }
-    Ok(ImportPlan {
-        records,
-        commit: commit.to_string(),
-        tip: states.remove(commit).context("Git tip was not imported")?,
-        refname: refname.to_string(),
-    })
+    // The tip of a walk without commits (git went back to an older commit) has its state already.
+    let tip = match states.remove(commit) {
+        Some(st) => Some(st),
+        None if !over.is_empty() => state_of_known_commit(repo, commit)?,
+        None => None,
+    };
+    Ok(ImportPlan { records, commit: commit.to_string(), tip: tip.context("Git tip was not imported")?, refname: refname.to_string() })
+}
+
+/// The paths that a commit changes, as a source of an object write over the objects of its
+/// first parent: `root` holds only the changed files (and the folders on the way to a change),
+/// and a folder lists the names of the parent's tree, without the removed ones, with its own.
+struct CommitSource<'a> {
+    root: &'a Path,
+    store: &'a layr_objects::Store,
+    base: layr_objects::Id,
+    removed: &'a BTreeSet<String>,
+}
+
+impl CommitSource<'_> {
+    /// The tree of the folder `relative` in the parent's objects; None when it has no such folder.
+    fn base_tree(&self, relative: &[u8]) -> Result<Option<layr_objects::Tree>> {
+        let mut tree = self.store.get_tree(&self.base)?;
+        for part in relative.split(|b| *b == b'/').filter(|p| !p.is_empty()) {
+            let next = tree.entries.iter().find(|e| e.name == part).and_then(|e| match &e.node {
+                layr_objects::Node::Dir { tree } => Some(*tree),
+                _ => None,
+            });
+            match next {
+                Some(id) => tree = self.store.get_tree(&id)?,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(tree))
+    }
+}
+
+impl layr_objects::write::Source for CommitSource<'_> {
+    fn path(&self, relative: &[u8]) -> Result<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(self.root.join(std::ffi::OsStr::from_bytes(relative)))
+    }
+
+    fn names(&self, relative: &[u8]) -> Result<Vec<Vec<u8>>> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut names: BTreeSet<Vec<u8>> = BTreeSet::new();
+        if let Some(tree) = self.base_tree(relative)? {
+            for e in tree.entries {
+                let child = if relative.is_empty() { e.name.clone() } else { [relative, b"/", &e.name].concat() };
+                if !std::str::from_utf8(&child).is_ok_and(|c| self.removed.contains(c)) {
+                    names.insert(e.name);
+                }
+            }
+        }
+        match std::fs::read_dir(self.path(relative)?) {
+            Ok(entries) => {
+                for e in entries {
+                    names.insert(e?.file_name().as_bytes().to_vec());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(names.into_iter().collect())
+    }
+}
+
+/// The objects of the state of a commit: the objects of the state `parent` of its first parent,
+/// with the changed paths read from the git objects (the files as `build_tree` writes them). The
+/// cost follows the changed paths. None when the parent has no objects.
+fn commit_objects(
+    repo: &Repo,
+    parent: &str,
+    changes: &Changes,
+    cat: &mut CatFile,
+) -> Result<Option<(layr_objects::Store, layr_objects::StateRef)>> {
+    let store = match crate::objstore::verified(&repo.p, parent)? {
+        Some((store, _)) => store,
+        // The state of an earlier commit of the same plan: its objects are not in a record yet.
+        None if crate::objstore::exists(&repo.p) => crate::objstore::open(&repo.p)?,
+        None => return Ok(None),
+    };
+    let Some(base) = store.state_ref(parent)? else { return Ok(None) };
+    if !store.has(&base.tree) || !store.has(&base.times) {
+        return Ok(None);
+    }
+    let _t = crate::trace::span("objects of a git commit");
+    std::fs::create_dir_all(repo.p.work_dir())?;
+    let tmp = crate::repo::Temp::plain(repo.p.work_dir().join(crate::store::temp_name()));
+    std::fs::create_dir(&tmp.path)?;
+    for (path, mode, oid) in &changes.write {
+        if mode == "160000" {
+            fsutil::make_parents(&tmp.path, &format!("{path}/x"), None)?;
+            continue;
+        }
+        let data = cat.object(oid, "blob")?;
+        place_blob(&tmp.path, mode, path, &data, None, None)?;
+    }
+    // The folder of a removed path stays (git has no folder without files), so it is read.
+    for path in &changes.removed {
+        fsutil::make_parents(&tmp.path, path, None)?;
+    }
+    let changed: Vec<Vec<u8>> =
+        changes.write.iter().map(|w| w.0.clone().into_bytes()).chain(changes.removed.iter().map(|p| p.clone().into_bytes())).collect();
+    let options =
+        layr_objects::WriteOptions { temperature: layr_objects::Temperature::Hot, previous: None, exclude: Vec::new(), similar: false };
+    let source = CommitSource { root: &tmp.path, store: &store, base: base.tree, removed: &changes.removed };
+    let written = layr_objects::write::write_changed_from(
+        &store,
+        &source,
+        &layr_objects::write::Base { tree: base.tree, times: base.times },
+        &changed,
+        &options,
+    )?;
+    let refs = layr_objects::StateRef {
+        tree: written.tree.context("object write gave no tree")?,
+        times: written.times.context("object write gave no times")?,
+    };
+    Ok(Some((store, refs)))
+}
+
+/// Objects (a tree and a times table in the object store) for the imported states that have none:
+/// from the objects of the first parent and the changed paths when that parent is an imported
+/// state with objects, else from the whole tree of the commit. Parents first; `state.tree`
+/// records name them (docs/git-on-objects.md). Returns the number of states that got objects.
+pub fn build_import_objects(ctx: &Ctx, repo: &Repo) -> Result<usize> {
+    if !has_store(repo) || !crate::objstore::exists(&repo.p) {
+        return Ok(0);
+    }
+    let p = &repo.p;
+    let mut pending: BTreeMap<String, String> = BTreeMap::new();
+    for id in p.db.kept_state_ids()? {
+        let Some(rec) = p.db.state(&id)? else { continue };
+        if rec.kind != StateKind::Import || rec.tree.is_some() || !p.db.has_git_import(&id)? {
+            continue;
+        }
+        if let Some(c) = stored_commit(repo, &id)? {
+            pending.insert(id, c);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let s = store(repo);
+    let store = crate::objstore::open(p)?;
+    let mut cat = CatFile::new(&s)?;
+    let mut made: BTreeMap<String, layr_objects::StateRef> = BTreeMap::new();
+    let mut batch = serde_json::Map::new();
+    let options =
+        layr_objects::WriteOptions { temperature: layr_objects::Temperature::Hot, previous: None, exclude: Vec::new(), similar: false };
+    let flush = |batch: &mut serde_json::Map<String, serde_json::Value>| -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let locked = repo.p.lock_or_borrow()?;
+        let mut rec = crate::model::DraftRecord::new("state.tree");
+        rec.data = serde_json::json!({ "states": std::mem::take(batch) });
+        repo.commit_record(&locked, ctx, rec)?;
+        Ok(())
+    };
+    loop {
+        let mut progress = false;
+        let ids: Vec<String> = pending.keys().cloned().collect();
+        for id in ids {
+            let rec = repo.state(&id)?;
+            let first = rec.parents.first().cloned();
+            // The objects of the first parent, when it is an imported state: its tree is the tree of
+            // the parent commit, so the changed paths give this one.
+            let base = match &first {
+                Some(parent) if pending.contains_key(parent) => continue,
+                Some(parent) => {
+                    let imported = p.db.state(parent)?.is_some_and(|s| s.kind == StateKind::Import);
+                    match (made.get(parent).copied(), imported) {
+                        (Some(r), _) => Some((parent.clone(), r)),
+                        (None, true) => crate::objstore::verified(p, parent)?.map(|(_, r)| (parent.clone(), r)),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+            let commit = pending.remove(&id).expect("pending state");
+            let raw = cat.object(&commit, "commit")?;
+            let parent_commit = base.as_ref().and_then(|(ps, _)| stored_commit(repo, ps).ok().flatten());
+            let refs = match (&base, parent_commit) {
+                (Some((ps, r)), Some(pc)) => {
+                    store.set_state(ps, r)?;
+                    let (_, changes) = import_changes(&raw, Some(&pc), &mut cat)?;
+                    commit_objects(repo, ps, &changes, &mut cat)?.map(|(_, refs)| refs)
+                }
+                _ => None,
+            };
+            let refs = match refs {
+                Some(r) => r,
+                None => {
+                    let _t = crate::trace::span(format!("objects of commit {} (whole tree)", &commit[..10]));
+                    std::fs::create_dir_all(p.work_dir())?;
+                    let tmp = crate::repo::Temp::plain(p.work_dir().join(crate::store::temp_name()));
+                    std::fs::create_dir(&tmp.path)?;
+                    materialize(&s, &commit, &tmp.path, None, None, None)?;
+                    let w = layr_objects::write_tree(&store, &tmp.path, &options)?;
+                    layr_objects::StateRef {
+                        tree: w.tree.context("object write gave no tree")?,
+                        times: w.times.context("object write gave no times")?,
+                    }
+                }
+            };
+            store.set_state(&id, &refs)?;
+            made.insert(id.clone(), refs);
+            batch.insert(id, serde_json::json!({"tree": refs.tree.hex(), "times": refs.times.hex()}));
+            if batch.len() >= 64 {
+                flush(&mut batch)?;
+            }
+            progress = true;
+        }
+        if pending.is_empty() || !progress {
+            break;
+        }
+    }
+    flush(&mut batch)?;
+    Ok(made.len())
+}
+
+/// The lock of the Git refs of a project (`fetch_write_lock`): no fetch adds objects meanwhile.
+pub fn refs_lock(repo: &Repo) -> Result<std::fs::File> {
+    fetch_write_lock(repo)
+}
+
+/// After the git store replaced its packs (`gitpack::drop_git_blobs`): the clones of the old packs
+/// in the `.git` folder of each fast line of this machine go, and the line gets clones of the new
+/// ones. It runs as the line owner (the folder is the owner's). A line that fails keeps its
+/// clones: they only hold space.
+pub fn refresh_line_packs(repo: &Repo, removed: &[String]) {
+    let s = store(repo);
+    let Ok(lines) = repo.lines() else { return };
+    let new: Vec<String> = std::fs::read_dir(s.join("objects/pack"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("pack-") && (n.ends_with(".pack") || n.ends_with(".idx") || n.ends_with(".rev")))
+        .collect();
+    for line in lines {
+        if line.machine != repo.p.store.machine.id || !follows_git(repo, &line) {
+            continue;
+        }
+        let Some((g, _)) = fast_git_folder(repo, &line) else { continue };
+        // `$1`: the pack folder of the line; `$2`: the pack folder of the store; then the names to
+        // remove, "--", and the names to clone (packs before their indexes).
+        let mut script = String::from("cd \"$1\" || exit 1; src=\"$2\"; shift 2; while [ \"$1\" != -- ]; do rm -f -- \"$1\"; shift; done; shift; ");
+        script.push_str("for f in \"$@\"; do [ -e \"$f\" ] || cp --reflink=auto -- \"$src/$f\" \"$f\" || rm -f -- \"$f\"; done");
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(&script).arg("sh").arg(g.join("objects/pack")).arg(s.join("objects/pack"));
+        for r in removed {
+            for ext in ["pack", "idx", "rev", "bitmap"] {
+                c.arg(format!("{r}.{ext}"));
+            }
+        }
+        c.arg("--");
+        let mut order = new.clone();
+        order.sort_by_key(|n| (n.ends_with(".idx"), n.clone()));
+        c.args(order);
+        if crate::privs::command_as(&mut c, repo.owner_ids(&line).0, &[]).is_err() {
+            continue;
+        }
+        if let Err(e) = c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {
+            eprintln!("warning: the git packs of line {} stay as they were: {e}", line.name);
+        }
+    }
 }
 
 /// Write a plan in chunks of `IMPORT_CHUNK` records. Each chunk holds the project lock for its
@@ -1009,6 +1412,18 @@ pub fn commit_import(ctx: &Ctx, repo: &Repo, plan: ImportPlan, guard: Option<Opt
             repo.commit_record(&locked, ctx, rec)?;
         }
         return Ok((tip, fresh));
+    }
+}
+
+/// A reflink clone of the whole of `src` into the empty file `dst` (Linux); an error where the
+/// file system or the system has none, and the caller copies.
+fn clone_fd(src: &std::fs::File, dst: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    return rustix::fs::ioctl_ficlone(dst, src).map_err(std::io::Error::from);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (src, dst);
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
 
@@ -1454,7 +1869,7 @@ fn work_tree(repo: &Repo, source: &crate::repo::Snap, paths: &[String], keep: &m
 /// A checkout borrowed from one immutable source, owning any temporary trees until Git has
 /// finished both the index command and its refresh. It cannot survive or mutate its source.
 struct ExportCheckout<'source> {
-    source: &'source crate::repo::Snap,
+    _source: &'source crate::repo::Snap,
     root: PathBuf,
     _keep: Vec<crate::repo::Temp>,
 }
@@ -1467,12 +1882,7 @@ impl<'source> ExportCheckout<'source> {
             None => repo.complete(source.clone(), &mut keep)?,
             Some(paths) => work_tree(repo, source, paths, &mut keep)?,
         };
-        Ok(Self { source, root, _keep: keep })
-    }
-
-    fn is_thin(&self) -> bool {
-        use crate::fsutil::Src;
-        self.source.folder().is_none()
+        Ok(Self { _source: source, root, _keep: keep })
     }
 }
 
@@ -1562,6 +1972,7 @@ fn repair_cache(repo: &Repo) -> Result<bool> {
         return Ok(false);
     }
     let damaged = repo.p.dir.join(format!("git-damaged-{}", ids::new_id()));
+    crate::gitpack::unmount(&s);
     forget_objects();
     std::fs::rename(&s, &damaged)?;
     std::fs::set_permissions(&damaged, std::fs::Permissions::from_mode(0o700))?;
@@ -1676,7 +2087,10 @@ fn restore_import(
             git_parents.push(std::str::from_utf8(parent)?.to_string());
         }
     }
-    if git_parents != parents {
+    // A state without parents for a commit with parents: the history ends at this commit (the
+    // import came from a shallow clone). The store names it as a shallow commit below.
+    let ends_history = parents.is_empty() && !git_parents.is_empty();
+    if git_parents != parents && !ends_history {
         bail!("stored Git parents do not match state {}", ids::short(&state.id));
     }
     let s = &export.store;
@@ -1738,6 +2152,10 @@ fn restore_import(
     }
     let commit = repo.p.db.git_commit_of(&state.id)?.context("Git import has no commit ID")?;
     write_object(s, "commit", &raw, &commit)?;
+    if ends_history {
+        let _refs_lock = fetch_write_lock(repo)?;
+        add_shallow_locked(s, &BTreeSet::from([commit.clone()]))?;
+    }
     git_out(s, &["update-ref", &history_ref(&state.id), &commit])?;
     Ok(commit)
 }
@@ -2326,20 +2744,21 @@ fn commit_tree(
         git_out(s, &["update-ref", refname, &commit])?;
         drop(commit_write);
         // Keep the index for the next export and for lines made from this state.
-        keep_index(repo, &state.id, &tmp_idx, inherited, &checkout)?;
+        keep_index(repo, &state.id, &tmp_idx, inherited)?;
         Ok(commit)
     })();
     let _ = std::fs::remove_file(&tmp_idx);
     res
 }
 
-/// Keep `idx` as the index of `state` unless it has one. An index that is not a copy of an
-/// earlier index gets its stat data from one refresh. The file appears complete or not at
-/// all: other processes copy kept indexes without the project lock.
-fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool, checkout: &ExportCheckout<'_>) -> Result<()> {
-    let _retain = crate::trace::span("git export index retention");
+/// Keep `idx` as the index of `state` unless it has one. Only a copy of an earlier index is
+/// kept: its stat data are valid. An index from the tree of a commit has no stat data, and a
+/// refresh would read every file of the state; `line_commit` makes one when a line needs it.
+/// The file appears complete or not at all: other processes copy kept indexes without the
+/// project lock.
+fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool) -> Result<()> {
     let dst = index_path(repo, state);
-    if dst.exists() {
+    if dst.exists() || !inherited {
         return Ok(());
     }
     let tmp = dst.with_file_name(format!("{state}.{}.tmp", ids::new_id()));
@@ -2348,9 +2767,6 @@ fn keep_index(repo: &Repo, state: &str, idx: &Path, inherited: bool, checkout: &
         let _ = std::fs::remove_file(&tmp);
     }
     r.context("keep the git index of the exported state")?;
-    if !inherited {
-        let _ = refresh_index(repo, state, checkout);
-    }
     Ok(())
 }
 
@@ -2393,25 +2809,6 @@ pub fn line_commit(repo: &Repo, state: &str) -> Result<String> {
         build_index(repo, state, &c, prev.as_deref())?;
     }
     Ok(c)
-}
-
-fn refresh_index(repo: &Repo, state: &str, checkout: &ExportCheckout<'_>) -> Result<()> {
-    // An index made from the previous index and the changed paths of a thin state has valid
-    // stat data already; a refresh would need a complete tree.
-    if checkout.is_thin() {
-        return Ok(());
-    }
-    let _t = crate::trace::span("git index refresh");
-    let s = store(repo);
-    let _command = crate::trace::span("git index refresh command");
-    base_cmd(&s)
-        .env("GIT_INDEX_FILE", index_path(repo, state))
-        .env("GIT_WORK_TREE", &checkout.root)
-        .args(["-c", "core.checkStat=minimal", "-c", "core.trustctime=false", "update-index", "-q", "--refresh"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    Ok(())
 }
 
 /// Push a prepared commit to `refs/heads/<branch>` of the remote, as the caller.
@@ -2464,6 +2861,12 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
             }
         }
     }
+    // Blobs that the git store reads from the object store (`gitpack`) are not compressed, and
+    // git sends a reused entry as it is: a compressed pack of the push goes first (git prefers a
+    // local pack).
+    if crate::gitpack::uses_folder(&s) {
+        compressed_pack(&s, commit, before.as_deref())?;
+    }
     let mut c = base_cmd(&s);
     c.args(["push", "-q", url]);
     let spec = format!("{}{commit}:refs/heads/{branch}", if force { "+" } else { "" });
@@ -2484,6 +2887,30 @@ pub fn push(ctx: &Ctx, repo: &Repo, url: &str, commit: &str, branch: &str, force
     Ok(())
 }
 
+/// A compressed pack in the git store of the objects of `commit` that `have` (when the store has
+/// it) does not reach.
+fn compressed_pack(s: &Path, commit: &str, have: Option<&str>) -> Result<()> {
+    let mut c = base_cmd(s);
+    c.args(["pack-objects", "--revs", "--no-reuse-object", "--local", "-q"])
+        .arg(s.join("objects/pack/pack"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = c.spawn().context("start git pack-objects")?;
+    {
+        let mut input = child.stdin.take().context("git pack-objects has no input")?;
+        writeln!(input, "{commit}")?;
+        if let Some(h) = have.filter(|h| git_out(s, &["cat-file", "-e", &format!("{h}^{{commit}}")]).is_ok()) {
+            writeln!(input, "^{h}")?;
+        }
+    }
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("git pack-objects failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
 // ----- the .git folder of a line -----
 
 /// Give a new working folder a `.git` folder (a nested subvolume) so tools that call git see the
@@ -2496,7 +2923,14 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         }
         init_store(repo)?;
     }
-    let g = w.join(".git");
+    // The folder of a fast line is a LayrFS mount, which holds no nested subvolume: its `.git`
+    // folder lives in the cache root of the line, and the mount shows it as a link.
+    let base = repo.cache_base(line, w);
+    let fast = base != w;
+    if fast {
+        crate::fast_cache::ensure_root(repo, line)?;
+    }
+    let g = base.join(".git");
     if let Ok(m) = std::fs::symlink_metadata(&g) {
         if m.is_dir() && !crate::fs::host().namespace.managed(&g) && std::fs::read_dir(&g)?.next().is_none() {
             std::fs::remove_dir(&g)?;
@@ -2510,13 +2944,39 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
         std::fs::create_dir_all(g.join(d))?;
     }
     std::fs::write(g.join("objects/info/alternates"), format!("{}\n", s.join("objects").display()))?;
-    std::fs::write(
-        g.join("config"),
-        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tcheckStat = minimal\n\ttrustctime = false\n\tlogallrefupdates = false\n",
-    )?;
+    // The folder borrows the objects of the store, so it has the store's shallow commits.
+    let shallow = store_shallow(&s);
+    if !shallow.is_empty() {
+        std::fs::write(g.join("shallow"), shallow_text(&shallow))?;
+    }
+    let mut config =
+        String::from("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tcheckStat = minimal\n\ttrustctime = false\n");
+    if fast {
+        // Git writes this folder, and the line follows (`git_moved`).
+        config.push_str(&fast_config());
+        // A split index: git writes the changed entries to `index` and keeps the rest in a shared
+        // file, so a commit or a status in a large tree writes kilobytes, not the whole index.
+        // Layr replaces `index` with a whole index; git splits it again at its next write. A
+        // shared file that no index uses goes after an hour.
+        config.push_str("\tsplitIndex = true\n[splitIndex]\n\tsharedIndexExpire = 1.hour.ago\n");
+        // Each file that a checkout writes costs several requests to the view (unlink, create,
+        // writes, getattr): writers in parallel hide their wait (git uses them from 100 files).
+        // Kernel tree, 1,260 files: 2.4 s with one writer, 1.7 s with one per core.
+        config.push_str("[checkout]\n\tworkers = 0\n");
+        write_hooks(&g)?;
+    } else {
+        config.push_str("\tlogallrefupdates = false\n");
+    }
+    std::fs::write(g.join("config"), config)?;
     // The project's local ignore patterns (`ignore.local`, from `init --from-git`): git and layr read them.
-    let local: Vec<String> =
+    let mut local: Vec<String> =
         repo.p.config_value("ignore.local")?.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    // The cache links of a fast line are links for git; it leaves them out (`fast_cache::link`).
+    if fast {
+        if let Some(root) = crate::fast_cache::root_for(repo, line, w) {
+            local.extend(crate::fast_cache::links(&root, w).into_iter().map(|rel| format!("/{rel}")));
+        }
+    }
     std::fs::write(g.join("info/exclude"), local.iter().map(|p| format!("{p}\n")).collect::<String>())?;
     // The state's own commit; if it cannot be made, the nearest commit a record names.
     let anc = match line_commit(repo, state) {
@@ -2528,9 +2988,20 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
             ancestor
         }
     };
-    match &anc {
-        Some((_, c)) => std::fs::write(g.join("HEAD"), format!("{c}\n"))?,
-        None => std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n")?,
+    // A fast line is on a branch with the name of the line, so `git commit` moves that branch.
+    let branch = Some(line.name.as_str()).filter(|n| fast && branch_name_ok(n));
+    match (&anc, branch) {
+        (anc, Some(b)) => {
+            if let Some((_, c)) = anc {
+                if let Some(parent) = Path::new(b).parent() {
+                    std::fs::create_dir_all(g.join("refs/heads").join(parent))?;
+                }
+                std::fs::write(g.join("refs/heads").join(b), format!("{c}\n"))?;
+            }
+            std::fs::write(g.join("HEAD"), format!("ref: refs/heads/{b}\n"))?;
+        }
+        (Some((_, c)), None) => std::fs::write(g.join("HEAD"), format!("{c}\n"))?,
+        (None, None) => std::fs::write(g.join("HEAD"), "ref: refs/heads/main\n")?,
     }
     if anc.as_ref().is_none_or(|(ancestor, _)| ancestor != state) {
         let head = std::fs::read_to_string(g.join("HEAD"))?;
@@ -2548,6 +3019,9 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     if let Some((_, c)) = &anc {
         std::fs::write(g.join(INDEX_OF), format!("{c}\n"))?;
     }
+    if fast {
+        clone_store_packs(&s, &g);
+    }
     let (u, gid) = repo.owner_ids(line);
     let mut paths = Vec::new();
     fsutil::walk(&g, "", &mut |rel, _| {
@@ -2558,9 +3032,356 @@ pub fn make_git_folder(repo: &Repo, line: &Line, state: &str, w: &Path) -> Resul
     for p in paths {
         fsutil::chown_nofollow(&g.join(p), u, gid)?;
     }
+    if fast {
+        crate::fast_cache::link(w, ".git", &g, u, gid)?;
+        return Ok(());
+    }
     // Read only for git: a git write needs lock files and new objects; layr writes through descriptors.
-    fsutil::git_writable(w, false);
+    fsutil::git_writable(&base, false);
     Ok(())
+}
+
+/// Where the last move of HEAD came from, when it was a checkout (`git checkout`, `git switch`)
+/// from the branch or the detached commit that is `c` now: `refs/heads/<branch>`, or the commit.
+/// Git's reflog of HEAD names it ("checkout: moving from <from> to <to>"). None for every other
+/// last move (a commit, a reset, a move by layr).
+fn checkout_source(repo: &Repo, line: &Line, g: &Path, c: &str) -> Option<String> {
+    let out = owner_git(repo, line, g).ok()?.args(["reflog", "-1", "--format=%gs", "HEAD"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let from = text.trim().strip_prefix("checkout: moving from ")?.rsplit_once(" to ")?.0.to_string();
+    if from.len() == 40 && from.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (from == c).then_some(from);
+    }
+    if !branch_name_ok(&from) {
+        return None;
+    }
+    let r = format!("refs/heads/{from}");
+    let out = owner_git(repo, line, g).ok()?.args(["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")]).output().ok()?;
+    (String::from_utf8_lossy(&out.stdout).trim() == c).then_some(r)
+}
+
+/// Clones (reflinks) of the packs of the git store in `objects/pack` of the `.git` folder `g` of a
+/// fast line, which then belong to the line owner. Before git skips the write of an object that it
+/// has, it touches the file that holds it (freshen); a pack of the store (root's) cannot be
+/// touched, so git wrote a copy of every object: `add -A` into a new index (a checkpoint of T3
+/// Code) wrote 96,705 loose objects for the Linux tree (1.6 GB, 45 s of CPU). No clone, no copy:
+/// a plain copy of the packs would cost more than it saves.
+fn clone_store_packs(store: &Path, g: &Path) {
+    let (src, dst) = (store.join("objects/pack"), g.join("objects/pack"));
+    let Ok(rd) = std::fs::read_dir(&src) else { return };
+    if std::fs::create_dir_all(&dst).is_err() {
+        return;
+    }
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(base) = name.strip_suffix(".idx") else { continue };
+        // The index last: git finds a pack by its index.
+        let parts = [format!("{base}.pack"), format!("{base}.rev"), name.clone()];
+        let mut made = Vec::new();
+        let cloned = parts.iter().all(|part| {
+            let from = src.join(part);
+            if !from.exists() && !part.ends_with(".pack") && !part.ends_with(".idx") {
+                return true;
+            }
+            let to = dst.join(part);
+            let ok = std::fs::File::open(&from)
+                .and_then(|f| std::fs::File::create_new(&to).map(|t| (f, t)))
+                .and_then(|(f, t)| {
+                    made.push(to.clone());
+                    clone_fd(&f, &t)
+                })
+                .is_ok();
+            ok
+        });
+        if !cloned {
+            for p in made {
+                let _ = std::fs::remove_file(p);
+            }
+            return;
+        }
+    }
+}
+
+// ----- git in a fast line -----
+//
+// The `.git` folder of a fast line is writable for git. Each side follows the other:
+// - layr moves the head of the line (save, merge, reset, undo, pull): `refresh_git_folder` moves
+//   git's HEAD (the branch it is on) to the commit of the new head.
+// - git moves HEAD (commit, amend, reset, checkout, merge, rebase): `git_moved` brings the new
+//   commits into the project's git store and imports them as states; the caller then moves the
+//   head of the line to the state of HEAD and keeps the files (a mixed reset). A hook of the
+//   folder runs `layr git adopt` after such a move, and each layr command of the line owner in
+//   the line checks for it first.
+// The file `layr-index` of the folder names the commit of the last time the two sides agreed.
+//
+// The folder belongs to the line owner. Root reads and writes only files at its top through
+// descriptors; everything below goes through git commands that run as the line owner.
+
+thread_local! {
+    /// The commit of git's HEAD while the head of a fast line moves to its state (`following_git`).
+    static FOLLOWING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f`, which moves the head of a fast line to the state of git's HEAD `commit`. During it
+/// the checks of the line's `.git` folder take `commit` as agreed: the move leaves HEAD and
+/// git's index as they are, and `layr-index` names the commit once the head has moved. A command
+/// that reads `layr-index` without the line lock never sees the commit before the head is there.
+pub fn following_git<T>(commit: &str, f: impl FnOnce() -> T) -> T {
+    FOLLOWING.with(|c| *c.borrow_mut() = Some(commit.to_string()));
+    let out = f();
+    FOLLOWING.with(|c| *c.borrow_mut() = None);
+    out
+}
+
+fn following(commit: &str) -> bool {
+    FOLLOWING.with(|c| c.borrow().as_deref() == Some(commit))
+}
+
+/// True when git may write the `.git` folder of `line`, and the line follows it: a fast line.
+pub fn follows_git(repo: &Repo, line: &Line) -> bool {
+    crate::views::fast_of(repo, line).is_some()
+}
+
+/// A line name that git takes as a branch name (a subset of `git check-ref-format`).
+fn branch_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        && !name.contains("..")
+        && !name.contains("//")
+        && name.split('/').all(|part| !part.is_empty() && !part.starts_with(['.', '-']) && !part.ends_with('.') && !part.ends_with(".lock"))
+}
+
+/// This program for a line of git's config or of a hook: quoted for a shell. None for a path
+/// that cannot stand in either.
+fn exe_for_shell() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.to_str()?;
+    (!exe.contains(['\'', '"', '\\', '\n'])).then(|| format!("'{exe}'"))
+}
+
+/// The settings of the `.git` folder of a fast line. On Linux git asks the view which paths
+/// changed (docs/layrfs-fuse.md), so `git status` reads no folder that did not change.
+fn fast_config() -> String {
+    match exe_for_shell().filter(|_| cfg!(target_os = "linux")) {
+        Some(exe) => format!("\tfsmonitor = {exe} fs view fsmonitor\n\tuntrackedCache = true\n"),
+        None => String::new(),
+    }
+}
+
+/// The hooks of the `.git` folder of a fast line: after git moves HEAD or a branch, the head of
+/// the line follows. A hook never fails git: the next layr command in the line follows too.
+fn write_hooks(g: &Path) -> Result<()> {
+    let Some(exe) = exe_for_shell() else { return Ok(()) };
+    std::fs::create_dir_all(g.join("hooks"))?;
+    let head = "#!/bin/sh\n# Made by layr: the head of the line follows git (layr git adopt).\n";
+    // The command runs on after the hook ends: git does not wait for the head of the line.
+    let moved = format!(
+        "{head}[ \"$1\" = committed ] || exit 0\nwhile read -r old new ref; do\n\tcase \"$ref\" in\n\tHEAD|refs/heads/*) {exe} git adopt --hook </dev/null >/dev/null 2>&1 & exit 0 ;;\n\tesac\ndone\nexit 0\n"
+    );
+    // A rebase or an amend ends here; its last ref update came while it was still in progress.
+    let rewritten = format!("{head}{exe} git adopt --hook </dev/null >/dev/null 2>&1 &\nexit 0\n");
+    for (name, text) in [("reference-transaction", moved), ("post-rewrite", rewritten)] {
+        std::fs::write(g.join("hooks").join(name), text)?;
+        std::fs::set_permissions(g.join("hooks").join(name), std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// A git command in the `.git` folder `g` of `line`, run as the line owner without hooks and
+/// without the owner's own git settings.
+fn owner_git(repo: &Repo, line: &Line, g: &Path) -> Result<Command> {
+    let mut c = Command::new("git");
+    c.args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]);
+    let env = [
+        ("GIT_DIR".to_string(), g.to_string_lossy().into_owned()),
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+        ("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string()),
+        ("GIT_CONFIG_NOSYSTEM".to_string(), "1".to_string()),
+    ];
+    crate::privs::command_as(&mut c, repo.owner_ids(line).0, &env)?;
+    c.current_dir(g).stdin(Stdio::null());
+    Ok(c)
+}
+
+/// The commit of git's HEAD in the `.git` folder `g` of a fast line. None for a branch without
+/// a commit, and when git cannot read the folder.
+fn owner_head(repo: &Repo, line: &Line, g: &Path) -> Option<String> {
+    let out = owner_git(repo, line, g).ok()?.args(["rev-parse", "--verify", "-q", "HEAD^{commit}"]).output().ok()?;
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit())).then_some(head)
+}
+
+/// The `.git` folder that layr made for the fast line `line`: its path and an open descriptor.
+fn fast_git_folder(repo: &Repo, line: &Line) -> Option<(PathBuf, std::fs::File)> {
+    if !has_store(repo) || !follows_git(repo, line) {
+        return None;
+    }
+    let base = git_base(repo, line);
+    let dir = fsutil::open_dir_nofollow(&base.join(".git")).ok()?;
+    fsutil::is_layer(&base, ".git", &fsutil::meta_of(&dir.metadata().ok()?)).then(|| (base.join(".git"), dir))
+}
+
+/// The commit that `layr-index` names: where git's HEAD was when the two sides last agreed.
+fn agreed_commit(dir: &std::fs::File) -> String {
+    fsutil::read_at(dir, INDEX_OF).map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default()
+}
+
+/// True when the folder has a regular file `name` (a link does not count).
+fn has_file_at(dir: &std::fs::File, name: &str) -> bool {
+    rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|st| rustix::fs::FileType::from_raw_mode(st.st_mode) == rustix::fs::FileType::RegularFile)
+}
+
+/// `git reset --no-refresh` in the `.git` folder `g` of the fast line `line`, as its owner: the
+/// index becomes the tree of HEAD. False when git fails.
+fn owner_index_reset(repo: &Repo, line: &Line, g: &Path) -> bool {
+    let Ok(mut c) = owner_git(repo, line, g) else { return false };
+    c.env("GIT_WORK_TREE", repo.working(line)).args(["reset", "-q", "--no-refresh"]);
+    c.stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+/// True while a git command of several steps runs in the folder (a rebase, a pick of several
+/// commits, a bisect): HEAD moves at each step, and the line follows when the command ends.
+fn git_in_progress(dir: &std::fs::File) -> bool {
+    ["rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG"]
+        .iter()
+        .any(|n| rustix::fs::statat(dir, *n, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).is_ok())
+}
+
+/// True when git's HEAD in the fast line `line` is not where the two sides last agreed (one git
+/// command, no lock): `git_moved` then says what to do.
+pub fn git_head_differs(repo: &Repo, line: &Line) -> bool {
+    let Some((g, dir)) = fast_git_folder(repo, line) else { return false };
+    !git_in_progress(&dir) && owner_head(repo, line, &g).is_some_and(|head| agreed_commit(&dir) != head)
+}
+
+/// Git moved HEAD of the fast line `line` to a commit that is not the commit of the line's head:
+/// the commit and its state, after the new commits came into the project's git store and their
+/// states were recorded (`plan_import_over`). None when HEAD did not move, or a git command of
+/// several steps is in progress. The caller holds the line lock; it moves the head of the line
+/// to the state and then calls `git_followed`.
+pub fn git_moved(ctx: &Ctx, repo: &Repo, line: &Line) -> Result<Option<(String, String)>> {
+    let Some((g, dir)) = fast_git_folder(repo, line) else { return Ok(None) };
+    if git_in_progress(&dir) {
+        return Ok(None);
+    }
+    let Some(head) = owner_head(repo, line, &g) else { return Ok(None) };
+    // The usual case costs one git command: HEAD is where layr left it.
+    if agreed_commit(&dir) == head {
+        return Ok(None);
+    }
+    let expected = export_commit(repo, &line.head).ok();
+    if expected.as_deref() == Some(head.as_str()) || repo.p.db.git_commits_of(&line.head)?.contains(&head) {
+        git_followed(repo, line, &head)?;
+        return Ok(None);
+    }
+    let _t = crate::trace::span("follow git");
+    take_objects(repo, line, &g, &head, expected.as_deref())?;
+    let over: Vec<(String, String)> = expected.into_iter().map(|c| (c, line.head.clone())).collect();
+    let plan = plan_import_over(ctx, repo, &head, &format!("git/{}", line.name), &over)?;
+    let made: Vec<(String, String)> =
+        plan.records.iter().filter_map(|(oid, rec)| rec.states.first().map(|st| (st.id.clone(), oid.clone()))).collect();
+    let (state, _) = commit_import(ctx, repo, plan, None)?;
+    // The snapshot of each new state, from the snapshot of its first parent (parents first),
+    // and the snapshot of the state of HEAD when git went to an earlier commit, from the old
+    // head of the line. The line still keeps the snapshot of its old head now; the next save in
+    // the line starts from the snapshot of the new head.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut near: Vec<(String, String)> = Vec::new();
+        for (st, _) in &made {
+            if let Some(parent) = repo.state(st)?.parents.first() {
+                near.push((st.clone(), parent.clone()));
+            }
+        }
+        near.push((state.clone(), line.head.clone()));
+        for (st, from) in &near {
+            if let Err(e) = crate::objstore::build_state_near(repo, st, from) {
+                drop(crate::trace::named(|| format!("state {} gets no snapshot: {e:#}", ids::short(st))));
+            }
+        }
+    }
+    // The index of each new state, from the index of its first parent and the changed paths
+    // (parents first). A later save in the line copies it; without it the save reads the tree
+    // of the commit and every file of the state.
+    for (st, commit) in &made {
+        let prev = repo.state(st)?.parents.first().cloned().filter(|p| index_path(repo, p).exists());
+        if let (Some(prev), false) = (prev, index_path(repo, st).exists()) {
+            if let Err(e) = build_index(repo, st, commit, Some(&prev)) {
+                drop(crate::trace::named(|| format!("state {} gets no git index: {e:#}", ids::short(st))));
+            }
+        }
+    }
+    Ok(Some((head, state)))
+}
+
+/// Record that the head of the fast line `line` is at the state of git's HEAD `commit`. Git's
+/// index stays as git left it.
+pub fn git_followed(repo: &Repo, line: &Line, commit: &str) -> Result<()> {
+    let Some((_, dir)) = fast_git_folder(repo, line) else { return Ok(()) };
+    let text = format!("{commit}\n");
+    fsutil::replace_at(&dir, INDEX_OF, &mut |f| Ok((&*f).write_all(text.as_bytes())?), Some(repo.owner_ids(line)))
+}
+
+/// Bring the objects of `want` that `have` does not reach from the `.git` folder `g` of a fast
+/// line into the project's git store. The pack comes through a pipe from a git that runs as the
+/// line owner: root never opens the folder (`import_fetched`).
+fn take_objects(repo: &Repo, line: &Line, g: &Path, want: &str, have: Option<&str>) -> Result<()> {
+    let s = init_store(repo)?;
+    if git_out(&s, &["cat-file", "-e", &format!("{want}^{{commit}}")]).is_ok() {
+        return Ok(());
+    }
+    // Objects that the folder borrows from the store (its alternate) stay out of the pack.
+    let mut pack = owner_git(repo, line, g)?;
+    pack.args(["pack-objects", "--stdout", "--revs", "--local", "-q"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut pack = pack.spawn().context("start git pack-objects")?;
+    {
+        let mut input = pack.stdin.take().context("git pack-objects has no input")?;
+        writeln!(input, "{want}")?;
+        if let Some(h) = have {
+            writeln!(input, "^{h}")?;
+        }
+    }
+    let mut out = pack.stdout.take().context("git pack-objects has no output")?;
+    // A pack without objects is no input for index-pack.
+    let mut header = [0u8; 12];
+    let complete = out.read_exact(&mut header).is_ok();
+    let count = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    let stored = if complete && &header[..4] == b"PACK" && count > 0 {
+        let mut index = base_cmd(&s)
+            .args(["index-pack", "--stdin", "--fix-thin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("start git index-pack")?;
+        let copied = (|| -> Result<()> {
+            let mut input = index.stdin.take().context("git index-pack has no input")?;
+            input.write_all(&header)?;
+            std::io::copy(&mut out, &mut input)?;
+            Ok(())
+        })();
+        let done = index.wait_with_output()?;
+        copied.is_ok() && done.status.success()
+    } else {
+        let _ = std::io::copy(&mut out, &mut std::io::sink());
+        true
+    };
+    let packed = pack.wait_with_output()?;
+    if !packed.status.success() || !stored {
+        bail!("cannot read the commits of the line's .git folder: {}", String::from_utf8_lossy(&packed.stderr).trim());
+    }
+    if git_out(&s, &["cat-file", "-e", &format!("{want}^{{commit}}")]).is_err() {
+        bail!("commit {want} of the line's .git folder did not reach the project's git store");
+    }
+    Ok(())
+}
+
+/// The folder that holds the `.git` folder of `line`: its working folder, or for a fast line its
+/// cache root (`make_git_folder`).
+fn git_base(repo: &Repo, line: &Line) -> PathBuf {
+    let w = repo.working(line);
+    repo.cache_base(line, &w)
 }
 
 const PACKED_HEADER: &str = "# pack-refs with: peeled fully-peeled sorted \n";
@@ -2617,7 +3438,11 @@ pub fn refresh_all_packed_refs(repo: &Repo) -> Result<()> {
 }
 
 fn refresh_packed_refs_to(repo: &Repo, line: &Line, want: &str) -> Result<()> {
-    let w = repo.working(line);
+    refresh_shallow(repo, line)?;
+    if follows_git(repo, line) {
+        return refresh_fast_refs(repo, line, want);
+    }
+    let w = git_base(repo, line);
     let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
         Ok(d) => d,
         Err(_) => return Ok(()),
@@ -2643,21 +3468,24 @@ fn refresh_packed_refs_to(repo: &Repo, line: &Line, want: &str) -> Result<()> {
 /// The folder belongs to the line owner, so all access goes through descriptors of the `.git`
 /// folder and never follows a link the owner made.
 pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
-    let g = repo.working(line).join(".git");
+    let w = git_base(repo, line);
+    let g = w.join(".git");
     let dir = match fsutil::open_dir_nofollow(&g) {
         Ok(d) => d,
         Err(_) => return Ok(()),
     };
     // Only the subvolume layr made; a .git folder the line owner made is its own.
     {
-        if !fsutil::is_layer(&repo.working(line), ".git", &fsutil::meta_of(&dir.metadata()?)) {
+        if !fsutil::is_layer(&w, ".git", &fsutil::meta_of(&dir.metadata()?)) {
             return Ok(());
         }
+    }
+    if follows_git(repo, line) {
+        return refresh_fast_git_folder(repo, line, &g, &dir);
     }
     // A HEAD that is not a regular file (for example a link) is replaced.
     let cur = fsutil::read_at(&dir, "HEAD").map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
     let c = line_commit(repo, &line.head)?;
-    let w = repo.working(line);
     // HEAD is written before the index: a command killed between the two leaves HEAD at the commit
     // and the old index, so the folder is complete only when INDEX_OF also names it (feedback item 62).
     let indexed = fsutil::read_at(&dir, INDEX_OF).map(|c| String::from_utf8_lossy(&c).trim().to_string()).unwrap_or_default();
@@ -2671,6 +3499,170 @@ pub fn refresh_git_folder(repo: &Repo, line: &Line) -> Result<()> {
     let r = write_git_folder(repo, line, &dir, &c);
     fsutil::git_writable(&w, false);
     r
+}
+
+/// `refresh_packed_refs` of a fast line. Git owns the `packed-refs` file there (it can hold the
+/// branches of the line owner), so the tags and remote refs of the bridge store go in through
+/// `git update-ref`: each one is set, and a remote ref that the store no longer has goes. Tags
+/// that the store does not have stay: the line owner made them.
+fn refresh_fast_refs(repo: &Repo, line: &Line, want: &str) -> Result<()> {
+    let Some((g, _)) = fast_git_folder(repo, line) else { return Ok(()) };
+    let parse = |text: &str| -> BTreeMap<String, String> {
+        text.lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with('^'))
+            .filter_map(|l| l.split_once(' '))
+            .map(|(oid, name)| (name.to_string(), oid.to_string()))
+            .collect()
+    };
+    let want = parse(want);
+    let out = owner_git(repo, line, &g)?.args(["for-each-ref", "--format=%(objectname) %(refname)", "refs/tags", "refs/remotes"]).output()?;
+    if !out.status.success() {
+        bail!("git for-each-ref failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let have = parse(&String::from_utf8_lossy(&out.stdout));
+    let mut input = String::new();
+    for (name, oid) in &want {
+        if have.get(name) != Some(oid) {
+            input.push_str(&format!("update {name} {oid}\n"));
+        }
+    }
+    for name in have.keys().filter(|n| n.starts_with("refs/remotes/") && !want.contains_key(*n)) {
+        input.push_str(&format!("delete {name}\n"));
+    }
+    if input.is_empty() {
+        return Ok(());
+    }
+    let mut c = owner_git(repo, line, &g)?;
+    let mut child = c.args(["update-ref", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
+    child.stdin.take().context("git update-ref has no input")?.write_all(input.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!("git update-ref failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// `refresh_git_folder` of a fast line: the branch that git's HEAD is on moves to the commit of
+/// the line's head, and the index is the one of that state. Nothing is written when git's HEAD
+/// is at that commit already and the two sides agreed on it (git made the commit: its index stays).
+fn refresh_fast_git_folder(repo: &Repo, line: &Line, g: &Path, dir: &std::fs::File) -> Result<()> {
+    let c = {
+        let _t = crate::trace::span("git: export commit");
+        export_commit(repo, &line.head)?
+    };
+    let head = {
+        let _t = crate::trace::span("git: HEAD of the folder");
+        owner_head(repo, line, g)
+    };
+    let agreed = agreed_commit(dir);
+    // The head of the line follows git (`following_git`): git's refs and index stay. Git may
+    // have moved HEAD again meanwhile; the next `git_moved` sees that.
+    if FOLLOWING.with(|f| f.borrow().is_some()) {
+        if head.as_deref() == Some(c.as_str()) && agreed != c {
+            let text = format!("{c}\n");
+            fsutil::replace_at(dir, INDEX_OF, &mut |f| Ok((&*f).write_all(text.as_bytes())?), Some(repo.owner_ids(line)))?;
+        }
+        return Ok(());
+    }
+    if head.as_deref() == Some(c.as_str()) && agreed == c {
+        return Ok(());
+    }
+    // Git makes the index from its own one below (`owner_index_reset`); the index that layr keeps
+    // for the state (a walk that hashes every file of a state it has none for) only when git has
+    // no index.
+    let have_index = has_file_at(dir, "index");
+    let c = {
+        let _t = crate::trace::span("git: commit of the state");
+        if have_index { export_commit(repo, &line.head)? } else { line_commit(repo, &line.head)? }
+    };
+    if head.as_deref() != Some(c.as_str()) {
+        // Git's branch moves only from the commit that the two sides agreed on. Git moved HEAD
+        // while this command ran: its commit stays on the branch, and the line follows it next.
+        let moved_by_git = !agreed.is_empty() && head.as_deref().is_some_and(|h| h != agreed);
+        if moved_by_git {
+            bail!(
+                "git moved HEAD to {} while the command ran; the branch of git stays there (run 'layr git adopt')",
+                head.as_deref().unwrap_or_default()
+            );
+        }
+        // Back to where a checkout came from (`layr undo` after `git checkout`): git checks that
+        // branch (or commit) out again, so its files come back and the branch that HEAD is on now
+        // stays. When git refuses (a local change in the way), HEAD only goes back.
+        let back = checkout_source(repo, line, g, &c);
+        if let Some(b) = &back {
+            let mut co = owner_git(repo, line, g)?;
+            co.env("GIT_WORK_TREE", repo.working(line)).args(["-c", "checkout.workers=0", "checkout", "-q"]);
+            match b.strip_prefix("refs/heads/") {
+                Some(name) => co.arg(name),
+                None => co.args(["--detach", b.as_str()]),
+            };
+            let out = co.output()?;
+            if out.status.success() {
+                return finish_fast_refresh(repo, line, g, dir, &c, have_index);
+            }
+            eprintln!(
+                "warning: git did not check out {} again ({}); HEAD goes back, the files stay",
+                b.trim_start_matches("refs/heads/"),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let mut update = owner_git(repo, line, g)?;
+        match &back {
+            Some(b) if b.starts_with("refs/heads/") => {
+                update.args(["symbolic-ref", "-m", "layr: back to the branch of the head", "HEAD", b]);
+            }
+            Some(_) => {
+                update.args(["update-ref", "--no-deref", "-m", "layr: back to the commit of the head", "HEAD", &c]);
+            }
+            None => {
+                update.args(["update-ref", "-m", "layr: the head of the line", "HEAD", &c]);
+            }
+        }
+        if back.as_deref().is_none_or(|b| !b.starts_with("refs/heads/")) {
+            if let Some(old) = head.as_deref() {
+                update.arg(old);
+            }
+        }
+        let out = update.output()?;
+        if !out.status.success() {
+            bail!("git update-ref HEAD failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+    }
+    finish_fast_refresh(repo, line, g, dir, &c, have_index)
+}
+
+/// The end of `refresh_fast_git_folder`: the index of HEAD, and the agreed commit `c`.
+fn finish_fast_refresh(repo: &Repo, line: &Line, g: &Path, dir: &std::fs::File, c: &str, have_index: bool) -> Result<()> {
+    crate::store::failpoint("git-folder-half");
+    let own = Some(repo.owner_ids(line));
+    // Git makes the index of HEAD from its own index: entries that stay keep their stat data
+    // (the files did not change), and a split index stays split, so git writes kilobytes and
+    // not the whole index of a large tree. Without an index of git, the index that layr keeps.
+    let _t = crate::trace::span("git: index of HEAD");
+    if !(have_index && owner_index_reset(repo, line, g)) {
+        if have_index {
+            line_commit(repo, &line.head)?;
+        }
+        let idx = index_path(repo, &line.head);
+        if idx.exists() {
+            fsutil::replace_at(
+                dir,
+                "index",
+                &mut |f| {
+                    let src = std::fs::File::open(&idx)?;
+                    if clone_fd(&src, f).is_err() {
+                        std::io::copy(&mut std::fs::File::open(&idx)?, &mut &*f)?;
+                    }
+                    Ok(())
+                },
+                own,
+            )?;
+        } else {
+            fsutil::unlink_at(dir, "index");
+        }
+    }
+    let text = format!("{c}\n");
+    fsutil::replace_at(dir, INDEX_OF, &mut |f| Ok((&*f).write_all(text.as_bytes())?), own)
 }
 
 /// Carry an unchanged, verified fallback across a Layr head move whose Git refresh failed.
@@ -2740,7 +3732,10 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
     if !has_store(repo) {
         return Ok(());
     }
-    let w = repo.working(line);
+    if follows_git(repo, line) {
+        return check_fast_git_head(repo, line);
+    }
+    let w = git_base(repo, line);
     let dir = match fsutil::open_dir_nofollow(&w.join(".git")) {
         Ok(d) => d,
         Err(_) => return Ok(()),
@@ -2796,6 +3791,28 @@ pub fn check_git_head(repo: &Repo, line: &Line) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `check_git_head` of a fast line. Git may move HEAD there, and the line follows before a
+/// command runs (`git_moved`). When it could not follow, the head of the line does not move: a
+/// new state would become a child of the old head and git's commit would leave HEAD.
+fn check_fast_git_head(repo: &Repo, line: &Line) -> Result<()> {
+    let Some((g, dir)) = fast_git_folder(repo, line) else { return Ok(()) };
+    let Some(head) = owner_head(repo, line, &g) else { return Ok(()) };
+    if agreed_commit(&dir) == head || following(&head) {
+        return Ok(());
+    }
+    let Ok(expected) = export_commit(repo, &line.head) else { return Ok(()) };
+    if head == expected || repo.p.db.git_commits_of(&line.head)?.contains(&head) {
+        return Ok(());
+    }
+    if git_in_progress(&dir) {
+        bail!("A git rebase, pick or bisect is in progress in this line. Finish it or stop it (for example 'git rebase --abort'), then run the command again.");
+    }
+    bail!(
+        "git moved HEAD of this line to {head}, and the head of the line did not follow.\n\
+         Run 'layr git adopt' to see why. To put HEAD back, run:\n  git reset --soft {expected}"
+    );
 }
 
 // ----- reads of imported states from git -----
@@ -3040,7 +4057,10 @@ pub fn has_commits(repo: &Repo, commits: &[String]) -> Result<Vec<bool>> {
 /// A pack of the objects of `new` that `covered` does not reach: the objects of the commits a remote
 /// store lacks, without the ones it already has.
 pub fn pack_commits(repo: &Repo, new: &[String], covered: &[String]) -> Result<Vec<u8>> {
-    revision_output(&store(repo), "pack-objects", &["--stdout", "--revs", "-q"], new, covered)
+    let s = store(repo);
+    // Entries that the object store serves are not compressed: make them again.
+    let reuse = if crate::gitpack::uses_folder(&s) { "--no-reuse-object" } else { "--reuse-object" };
+    revision_output(&s, "pack-objects", &["--stdout", "--revs", "-q", reuse], new, covered)
 }
 
 fn revision_output(git_dir: &Path, subcommand: &str, args: &[&str], new: &[String], covered: &[String]) -> Result<Vec<u8>> {

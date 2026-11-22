@@ -184,7 +184,8 @@ mod imp {
         let lines = p.db.lines()?;
         let folders = p.line_folders();
         for line in lines {
-            if line.machine == p.store.machine.id {
+            // A LayrFS line is a mount: after a restart its folder is empty until it mounts again.
+            if line.machine == p.store.machine.id && !crate::views::is_layrfs_line(p, &line.id) {
                 refuse_emptied(&format!("working folder of line {}", line.name), &folders.path(p, &line.id, &line.name))?;
             }
         }

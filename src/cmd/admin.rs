@@ -283,16 +283,15 @@ pub(crate) fn save_expected_head(ctx: &Ctx, args: &[String], expected_head: Opti
             // its files stay out of the state. A folder with versioned files is no cache; one
             // that an older layr made a cache becomes a plain folder again, so the state keeps
             // its files.
-            let (u, g) = repo.owner_ids(&l);
             for p in &versioned {
-                match crate::repo::uncache(&repo.working(&l), p, u, g) {
+                match repo.uncache_line(&l, p) {
                     Ok(again) => note(format!("{p}: {}", if again { VERSIONED_AGAIN } else { VERSIONED })),
                     Err(e) => refuse(e, &mut refusals)?,
                 }
             }
             let mut refused = Vec::new();
             for p in &caches {
-                if let Err(e) = crate::repo::convert_cache(&repo.working(&l), p, u, g) {
+                if let Err(e) = repo.convert_line_cache(&l, p) {
                     refuse(e, &mut refusals)?;
                     refused.push(p.clone());
                 }
@@ -378,14 +377,13 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
         eprintln!("layr: abandoned cache copies remain until the next cache save: {e:#}");
     }
     let w = repo.working(l);
-    let (u, g) = repo.owner_ids(l);
     let mut ready = Vec::new();
     let mut refused = Vec::new();
     for p in repo.line_cache_paths(l)?.0 {
         if !only.is_empty() && !only.contains(&p) {
             continue;
         }
-        if let Err(e) = crate::repo::convert_cache(&w, &p, u, g) {
+        if let Err(e) = repo.convert_line_cache(l, &p) {
             // A refused folder is refused again under the lock, where the save reports it. It is
             // not pruned either: a process writes to it.
             if e.downcast_ref::<crate::repo::CacheRefused>().is_none() {
@@ -400,12 +398,13 @@ fn prepare_caches(repo: &Repo, l: &Line, only: &[String]) -> Result<Vec<String>>
     }
     // The source times that the caches saw go with them (docs/cache-overlays.md, section 20). A failure costs a build
     // only, so it is a warning.
-    if let Err(e) = crate::source_times::record(&w, &ready, (u, g)) {
+    let (u, g) = repo.owner_ids(l);
+    if let Err(e) = crate::source_times::record_in(&w, &repo.cache_base(l, &w), &ready, (u, g)) {
         eprintln!("warning: source file times of the caches not recorded: {e:#}");
     }
     // The copy of each cache folder that the overlay save takes under the lock is made here, before it.
     for p in &ready {
-        let cp = fsutil::safe_join(&w, p)?;
+        let cp = repo.cache_dir(l, &w, p)?;
         if crate::fs::host().namespace.managed(&cp) {
             repo.prepare_capture(&cp)?;
         }
@@ -712,6 +711,24 @@ fn undo_save(ctx: &Ctx, repo: &Repo, r: &Record, force: bool) -> Result<i32> {
 /// Revert the working changes of an operation (from `after` to `before`). Only what the operation
 /// changed goes back: a path that later work changed keeps its content.
 fn revert_working(repo: &Repo, line: &Line, before: &str, after: &str, force: bool) -> Result<()> {
+    // A fast line: the two states as objects. A folder of a state that only the object store
+    // holds would be written in full, and two such folders share no data, so the comparison read
+    // every file (minutes for the Linux tree). The scan of a fast line has its objects too.
+    #[cfg(target_os = "linux")]
+    if crate::views::fast_of(repo, line).is_some() {
+        if let (Ok(a @ crate::repo::Snap::Objects(_)), Ok(b @ crate::repo::Snap::Objects(_))) =
+            (repo.state_src(after), repo.state_src(before))
+        {
+            let cur = repo.scan(line)?;
+            let later: BTreeSet<String> = changes::file_changes(&a, &cur.path)?
+                .into_iter()
+                .flat_map(|c| [Some(c.path().clone()), c.old_path().cloned()])
+                .flatten()
+                .collect();
+            repo.apply_delta(&a, &b, &repo.working(line), repo.own(line), &later, force)?;
+            return Ok(());
+        }
+    }
     // An automatic state of the view of an overlay keeps the working content in that overlay's store.
     let (after_root, after_full) = repo.working_source(line, after)?;
     let (before_root, before_full) = repo.working_source(line, before)?;
@@ -1923,6 +1940,22 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let h = here(ctx)?;
     h.repo.require(ctx, "gc")?;
+    // Copies that fast lines no longer need (docs/layrfs-lab.md).
+    #[cfg(target_os = "linux")]
+    if !a.has("-n") {
+        // Test hooks: shorter ages than a day and ten minutes.
+        let hours = ctx.env("LAYR_FAST_SEED_HOURS").and_then(|v| v.parse::<u64>().ok()).unwrap_or(24);
+        let minutes = ctx.env("LAYR_FAST_RO_MINUTES").and_then(|v| v.parse::<u64>().ok()).unwrap_or(10);
+        match crate::views::sweep_fast(
+            &h.repo,
+            std::time::Duration::from_secs(hours * 3600),
+            std::time::Duration::from_secs(minutes * 60),
+        ) {
+            Ok(n) if n > 0 && !a.has("-q") => outln!(ctx, "removed {n} unused fast line copies"),
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: fast line copies: {e:#}"),
+        }
+    }
     // The layers on disk, read once: the bases check, the repair and the thin-state upkeep share them.
     let (disk_bases, bases_diff) = h.repo.p.layer_bases_check()?;
     // Test hook (tests/t120-bases-check.sh): wait after the read of the layers, so a test can make
@@ -1976,6 +2009,12 @@ pub fn gc(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // Retirement only frees space: an overlay that cannot open must not stop the object maintenance below.
         if let Err(e) = crate::objstore::retire_native(&h.repo) {
             eprintln!("warning: native copies not retired: {e:#}");
+        }
+        // The files of the git history live once, in the object store (docs/git-on-objects.md).
+        match crate::gitpack::maintain(ctx, &h.repo) {
+            Ok(Some(line)) if !a.has("-q") => outln!(ctx, "{line}"),
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: the git store keeps its blobs: {e:#}"),
         }
     }
     super::objects::maintain_for_gc(ctx, &h.repo, a.has("-n"), a.has("-q"))?;
@@ -2489,7 +2528,7 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let name = a
         .pos
         .first()
-        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>] [--no-objects], or layr init [<project>] --from-git <checkout>"))?;
+        .ok_or_else(|| exit(128, "usage: layr init <project> [--from <folder> | --git <url>] [--line main] [--volume <name>] [--objects], or layr init [<project>] --from-git <checkout> [--snapshots]"))?;
     let line_name = a.get("--line").unwrap_or("main").to_string();
     let owner = match a.get("--owner") {
         Some(o) if ctx.caller.is_root() => o.parse::<u32>().or_else(|_| -> Result<u32> {
@@ -2754,9 +2793,9 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// `<checkout>.before-layr` and the line moves to the checkout's path. Refused: uncommitted
 /// changes, more than one worktree, another file system.
 fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().value("--from-git").value("--line").value("--volume").flag("-q|--quiet");
+    let spec = Spec::new().value("--from-git").value("--line").value("--volume").flag("--snapshots").flag("-q|--quiet");
     let a = parse(&spec, args)?;
-    let usage = "usage: layr init [<project>] --from-git <checkout> [--line <name>]";
+    let usage = "usage: layr init [<project>] --from-git <checkout> [--line <name>] [--snapshots]";
     let from = a.get("--from-git").ok_or_else(|| exit(128, usage))?;
     let src = if from.starts_with('/') { std::path::PathBuf::from(from) } else { ctx.cwd.join(from) };
     let src = crate::privs::as_caller_fs(ctx, || Ok(src.canonicalize()?))
@@ -2878,6 +2917,14 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Err(e) = run(&ctx.store.root, &["line", "move", &line_name, &src.to_string_lossy()]) {
         let _ = std::fs::rename(&backup, &src);
         return Err(e.context(format!("the line stays at {}; the checkout is back at {}", w.display(), src.display())));
+    }
+    if !a.has("--snapshots") {
+        if let Err(e) = run(&ctx.store.root, &["migrate", &name, "--delete-old"]) {
+            eprintln!("warning: project {name} keeps snapshot storage (v1); `layr migrate` moves it later: {e:#}");
+        } else if let Err(e) = run(&src, &["gc", "-q"]) {
+            // The files of the history then live once, in the object store (docs/git-on-objects.md).
+            eprintln!("warning: the git store of {name} keeps its blobs until `layr gc`: {e:#}");
+        }
     }
     if !a.has("-q") {
         let locals = git_text(&["-C", &backup.to_string_lossy(), "for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])

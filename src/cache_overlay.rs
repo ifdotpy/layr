@@ -90,6 +90,9 @@ pub enum CacheAccess {
 struct CacheFolder<'a> {
     root: &'a Path,
     relative: &'a str,
+    /// A fast line keeps its cache trees in its cache root and shows each with a link
+    /// (`fast_cache`): its mount cannot hold one.
+    fast: Option<Line>,
 }
 
 /// Where a line takes caches from.
@@ -178,6 +181,20 @@ struct Provenance {
 }
 
 pub(crate) const PROVENANCE: &str = ".layr-cache-location";
+
+/// Remove the cache folder `folder` of `tree` (at `path`) when it holds only its provenance
+/// marker: a cache that a line move or a new checkout brought with it and no build has written.
+/// The rmdir is atomic, so output that a build writes meanwhile stays (the folder is then not
+/// empty and the caller refuses as before).
+fn only_provenance_goes(tree: &crate::tree::Tree, root: &Path, path: &Path, folder: &str) -> bool {
+    let is_dir = path.symlink_metadata().is_ok_and(|m| m.is_dir());
+    let only_marker = is_dir
+        && std::fs::read_dir(path).is_ok_and(|rd| {
+            let names: Vec<_> = rd.filter_map(|e| e.ok().map(|e| e.file_name())).collect();
+            names.len() == 1 && names[0] == PROVENANCE
+        });
+    only_marker && fsutil::remove_entry(root, &format!("{folder}/{PROVENANCE}")).is_ok() && tree.rmdir(folder)
+}
 
 impl Provenance {
     fn fits(&self, other: &Self) -> bool {
@@ -369,7 +386,11 @@ impl<'a> Repo<'a> {
 
     fn cache_folder<'f>(&self, line: &Line, state: &str, root: &'f Path, folder: &'f str) -> Result<Option<CacheFolder<'f>>> {
         Ok(match self.folder_kind_at(line, state, root, folder)? {
-            FolderIn::Cache => Some(CacheFolder { root, relative: folder }),
+            FolderIn::Cache => Some(CacheFolder {
+                root,
+                relative: folder,
+                fast: crate::fast_cache::root_for(self, line, root).map(|_| line.clone()),
+            }),
             FolderIn::Versioned | FolderIn::Other => None,
         })
     }
@@ -378,10 +399,28 @@ impl<'a> Repo<'a> {
     /// empty live folder without losing output from builds that do not share Layr's line lock.
     fn cold_cache(&self, cache: &CacheFolder<'_>, at: &Path, access: CacheAccess, uid: u32, gid: u32) -> Result<()> {
         let (root, folder) = (cache.root, cache.relative);
+        if let Some(line) = &cache.fast {
+            let base = crate::fast_cache::ensure_root(self, line)?;
+            let tree_path = fsutil::safe_join(&base, folder)?;
+            if tree_path.symlink_metadata().is_ok() || fsutil::safe_join(root, folder)?.symlink_metadata().is_ok() {
+                anyhow::ensure!(access == CacheAccess::Prepared,
+                    "cache {folder}: incompatible or missing location provenance; cannot exclude active builds; output left intact. Stop builds and remove the cache folder. Before rebuilding, declare this exact folder regenerable (a literal .layrattributes rule or the regenerable config list), then rerun Layr to establish cold output; a wildcard alone cannot initialize an absent folder");
+                if tree_path.symlink_metadata().is_ok() {
+                    fsutil::remove_entry(&base, folder)?;
+                }
+            }
+            let tree = crate::tree::Tree::open(&base)?;
+            tree.mkdirs_for(folder, Some((uid, gid)))?;
+            tree.create_subvolume(folder)?;
+            let dir = tree.open_folder(folder)?;
+            self.provenance(folder, root, at)?.write(&dir, uid, gid)?;
+            tree.chown(folder, uid, gid)?;
+            return crate::fast_cache::link(root, folder, &tree_path, uid, gid);
+        }
         let path = fsutil::safe_join(root, folder)?;
         let tree = crate::tree::Tree::open(root)?;
         if path.symlink_metadata().is_ok() {
-            anyhow::ensure!(access == CacheAccess::Prepared || tree.rmdir(folder),
+            anyhow::ensure!(access == CacheAccess::Prepared || tree.rmdir(folder) || only_provenance_goes(&tree, root, &path, folder),
                 "cache {folder}: incompatible or missing location provenance; cannot exclude active builds; output left intact. Stop builds and remove the cache folder. Before rebuilding, declare this exact folder regenerable (a literal .layrattributes rule or the regenerable config list), then rerun Layr to establish cold output; a wildcard alone cannot initialize an absent folder");
             if access == CacheAccess::Prepared {
                 fsutil::remove_entry(root, folder)?;
@@ -810,7 +849,7 @@ impl<'a> Repo<'a> {
         // caches per view): it goes to the cache of that view, which only readers of X read.
         let view = self.line_view_top(line)?;
         for p in paths {
-            let cp = fsutil::safe_join(w, p)?;
+            let cp = self.cache_dir(line, w, p)?;
             if !crate::fs::host().namespace.managed(&cp) {
                 continue;
             }
@@ -1059,8 +1098,7 @@ impl<'a> Repo<'a> {
         let unbuilt = self.unbuilt_file(line).exists();
         let mut out = Vec::new();
         for (name, folder) in self.folder_overlays()? {
-            if damaged.contains(&folder) || !fsutil::safe_join(&w, &folder).is_ok_and(|p| crate::fs::host().namespace.managed(&p))
-            {
+            if damaged.contains(&folder) || !self.cache_dir(line, &w, &folder).is_ok_and(|p| crate::fs::host().namespace.managed(&p)) {
                 continue;
             }
             let orepo = self.overlay_repo(&name)?;
@@ -1218,14 +1256,23 @@ impl<'a> Repo<'a> {
             }
             let _t =
                 crate::trace::named(|| format!("take_caches {folder} of line {} from state {sid} (line {})", line.name, line.id));
-            let cp = fsutil::safe_join(w, &folder)?;
+            // A fast line keeps the tree in its cache root and shows it with a link (`fast_cache`).
+            let fast = crate::fast_cache::root_for(self, line, w).is_some();
+            let base = if fast { crate::fast_cache::ensure_root(self, line)? } else { w.to_path_buf() };
+            let cp = fsutil::safe_join(&base, &folder)?;
             if cp.symlink_metadata().is_ok() {
+                fsutil::remove_entry(&base, &folder)?;
+            }
+            if fast && fsutil::safe_join(w, &folder)?.symlink_metadata().is_ok() {
                 fsutil::remove_entry(w, &folder)?;
             }
-            fsutil::make_parents(w, &folder, Some((uid, gid)))?;
+            fsutil::make_parents(&base, &folder, Some((uid, gid)))?;
             let uniform = crate::fs::cache(&orepo.state_root(&sid)?, &cp)?;
             let source_owner = orepo.p.db.state(&sid)?.and_then(|s| s.cache_by);
             crate::repo::give_cache_tree(&cp, uniform == layr_fs_core::OwnerLayout::Uniform, source_owner, uid, gid)?;
+            if fast {
+                crate::fast_cache::link(w, &folder, &cp, uid, gid)?;
+            }
             taken.push((name, folder, sid));
         }
         Ok(taken)
@@ -1288,7 +1335,12 @@ impl<'a> Repo<'a> {
                 "cache {folder}: incoming cache has no compatible live provenance; output left intact"
             );
             if have.as_ref() != Some(&wanted) {
-                let root = w.join(format!(".layr-cache-take-{}", ids::new_id()));
+                // A fast line stages in its cache root: its mount cannot hold a cache tree.
+                let stage = match crate::fast_cache::root_for(self, line, &w) {
+                    Some(_) => crate::fast_cache::ensure_root(self, line)?,
+                    None => w.clone(),
+                };
+                let root = stage.join(format!(".layr-cache-take-{}", ids::new_id()));
                 std::fs::create_dir(&root)?;
                 fsutil::chown_nofollow(&root, uid, gid)?;
                 staged = Some(crate::repo::Temp::existing(root.clone())?);
@@ -1320,7 +1372,16 @@ impl<'a> Repo<'a> {
             let made = {
                 let _lock = orepo.p.lock_maintenance()?;
                 let ol = self.ensure_build_line(&_lock, ctx, &orepo, &name, &info, line, &info.root)?;
-                let cp = fsutil::safe_join(&w, &folder)?;
+                let fast = crate::fast_cache::root_for(self, line, &w).is_some();
+                let base = if fast { crate::fast_cache::ensure_root(self, line)? } else { w.clone() };
+                let cp = fsutil::safe_join(&base, &folder)?;
+                let linked = |r: Result<()>| -> Result<()> {
+                    r?;
+                    if fast {
+                        crate::fast_cache::link(&w, &folder, &cp, uid, gid)?;
+                    }
+                    Ok(())
+                };
                 if ol.head == sid && matches!(from, Source::ExactState(_, _, _)) {
                     if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         return Err(error(
@@ -1330,9 +1391,9 @@ impl<'a> Repo<'a> {
                     }
                     let src = incoming.clone();
                     if cp.symlink_metadata().is_err() {
-                        fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
+                        fsutil::make_parents(&base, &folder, Some((uid, gid)))?;
                         crate::fs::snapshot(&src, &cp, false)?;
-                        crate::repo::give_tree(&cp, uid, gid)?;
+                        linked(crate::repo::give_tree(&cp, uid, gid))?;
                     } else {
                         let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
                         crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)?;
@@ -1362,14 +1423,14 @@ impl<'a> Repo<'a> {
                     let r = if crate::repo::holds_files_in(&self.state_src(&line.head)?, &folder) {
                         Err(error(ErrorKind::Failed, format!("error: {folder} holds files of the line's head; it is no cache")))
                     } else if empty {
-                        (|| -> Result<()> {
+                        linked((|| -> Result<()> {
                             if cp.symlink_metadata().is_ok() {
-                                fsutil::remove_entry(&w, &folder)?;
+                                fsutil::remove_entry(&base, &folder)?;
                             }
-                            fsutil::make_parents(&w, &folder, Some((uid, gid)))?;
+                            fsutil::make_parents(&base, &folder, Some((uid, gid)))?;
                             crate::fs::snapshot(&src, &cp, false)?;
                             crate::repo::give_tree(&cp, uid, gid)
-                        })()
+                        })())
                     } else {
                         let ours: BTreeSet<String> = files_of(&cp)?.into_iter().collect();
                         crate::overlay::union_ops(&ours, files_of(&src)?).apply(&cp, &src, own)
@@ -1471,8 +1532,14 @@ impl<'a> Repo<'a> {
             return Ok(());
         }
         let (uid, gid) = self.owner_ids(line);
+        // A fast line keeps its cache trees apart, each shown by a link (`fast_cache`).
+        let fast_root = crate::fast_cache::root_for(self, line, root);
         for folder in folders {
             let Some(cache) = self.cache_folder(line, &line.head, root, folder)? else { continue };
+            if let Some(croot) = &fast_root {
+                self.relocate_fast(line, folder, root, croot, working, access, uid, gid)?;
+                continue;
+            }
             let path = fsutil::safe_join(root, folder)?;
             let meta = path.symlink_metadata();
             if meta.as_ref().is_ok_and(|m| !m.is_dir()) {
@@ -1517,6 +1584,92 @@ impl<'a> Repo<'a> {
             }
         }
         Ok(())
+    }
+
+    /// `relocate_folders` for the cache `folder` of fast line `line`, whose trees live under
+    /// `croot`: the tree carries the provenance, the line a link to it. A plain folder at the path
+    /// waits for `fast_cache::settle`; a missing one gets a cold tree; a tree without provenance
+    /// (made by this line before provenance existed) gets it.
+    #[allow(clippy::too_many_arguments)]
+    fn relocate_fast(
+        &self,
+        line: &Line,
+        folder: &str,
+        root: &Path,
+        croot: &Path,
+        working: &Path,
+        access: CacheAccess,
+        uid: u32,
+        gid: u32,
+    ) -> Result<()> {
+        let w = self.working(line);
+        let tree_path = fsutil::safe_join(croot, folder)?;
+        let wanted = self.provenance(folder, root, working)?;
+        if !crate::fast_cache::is_link(&w, folder, &tree_path) {
+            match fsutil::safe_join(&w, folder)?.symlink_metadata() {
+                // A plain folder that a tool made at the path: as for a classic line, only a
+                // private copy may replace it (a live build may write in it).
+                Ok(m) if m.is_dir() => {
+                    anyhow::ensure!(access == CacheAccess::Prepared, "cache {folder}: incompatible or missing location provenance; cannot exclude active builds; output left intact. Stop builds and remove the cache folder. Before rebuilding, declare this exact folder regenerable (a literal .layrattributes rule or the regenerable config list), then rerun Layr to establish cold output; a wildcard alone cannot initialize an absent folder");
+                    fsutil::remove_entry(&w, folder)?;
+                }
+                Ok(_) => return Ok(()),
+                Err(_) if access == CacheAccess::Live && root != working => return Ok(()),
+                Err(_) => {}
+            }
+            return self.cold_fast(line, folder, &wanted, uid, gid);
+        }
+        // Through the folder's descriptor, as the other readers: a FIFO in place of the marker
+        // must not block the command.
+        let have = crate::fsutil::open_dir_nofollow(&tree_path).ok().and_then(|dir| Provenance::read_at(&dir));
+        if have.as_ref() == Some(&wanted) {
+            return Ok(());
+        }
+        let Some(have) = have else {
+            let dir = crate::fsutil::open_dir_nofollow(&tree_path)?;
+            return preserve_directory_mtime(&dir, || wanted.write(&dir, uid, gid));
+        };
+        anyhow::ensure!(access == CacheAccess::Prepared, "cache {folder}: incompatible or missing location provenance; cannot exclude active builds; output left intact. Stop builds and remove the cache folder. Before rebuilding, declare this exact folder regenerable (a literal .layrattributes rule or the regenerable config list), then rerun Layr to establish cold output; a wildcard alone cannot initialize an absent folder");
+        if !wanted.fits(&have) {
+            return self.cold_fast(line, folder, &wanted, uid, gid);
+        }
+        let dir = crate::fsutil::open_dir_nofollow(&tree_path)?;
+        preserve_directory_mtime(&dir, || Ok(rustix::fs::unlinkat(&dir, PROVENANCE, rustix::fs::AtFlags::empty())?))?;
+        let outcome = match self.relocation_setting(line, folder) {
+            Ok(setting) => {
+                let done = crate::cache_hook::relocate(setting.as_deref(), &tree_path, &wanted.location.target, uid);
+                if !done.log.is_empty() {
+                    eprintln!("layr: relocate {}", done.log);
+                }
+                done.outcome
+            }
+            Err(e) => {
+                eprintln!("layr: relocate {folder}: not relocated: {e:#}");
+                crate::cache_hook::Relocation::Cold
+            }
+        };
+        if let crate::cache_hook::Relocation::Reused { changed } = outcome {
+            let dir = crate::fsutil::open_dir_nofollow(&tree_path)?;
+            publish_relocated(&dir, &wanted, uid, gid, changed)
+        } else {
+            eprintln!("layr: {folder}: relocation failed; starting cold");
+            self.cold_fast(line, folder, &wanted, uid, gid)
+        }
+    }
+
+    /// A new empty cache tree for `folder` of fast line `line`, with its provenance and its link.
+    /// An old tree goes first (a moved link keeps it, `fast_cache::free_tree`).
+    fn cold_fast(&self, line: &Line, folder: &str, wanted: &Provenance, uid: u32, gid: u32) -> Result<()> {
+        let w = self.working(line);
+        let croot = crate::fast_cache::ensure_root(self, line)?;
+        let tree_path = fsutil::safe_join(&croot, folder)?;
+        if tree_path.symlink_metadata().is_ok() {
+            crate::fast_cache::free_tree(self, line, &w, &tree_path)?;
+        }
+        crate::repo::make_cache(&croot, folder, uid, gid)?;
+        let dir = crate::fsutil::open_dir_nofollow(&tree_path)?;
+        wanted.write(&dir, uid, gid)?;
+        crate::fast_cache::link(&w, folder, &tree_path, uid, gid)
     }
 
     /// Use the settings of the part this line took, including a view-only cache or a fallback
@@ -1805,6 +1958,23 @@ fn build_running(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cache_folder_with_only_its_marker_goes_and_output_stays() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-cache-marker-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("target"))?;
+        std::fs::create_dir_all(root.join("dist"))?;
+        std::fs::write(root.join("target").join(PROVENANCE), "{}")?;
+        std::fs::write(root.join("dist").join(PROVENANCE), "{}")?;
+        std::fs::write(root.join("dist/out"), "build output")?;
+        let tree = crate::tree::Tree::open(&root)?;
+        assert!(only_provenance_goes(&tree, &root, &root.join("target"), "target"));
+        assert!(!root.join("target").exists(), "a folder with only the marker goes");
+        assert!(!only_provenance_goes(&tree, &root, &root.join("dist"), "dist"));
+        assert!(root.join("dist/out").exists() && root.join("dist").join(PROVENANCE).exists(), "output and its marker stay");
+        std::fs::remove_dir_all(&root)?;
+        Ok(())
+    }
     use crate::overlay::folder_path;
 
     #[test]
@@ -1831,7 +2001,7 @@ mod tests {
         std::fs::create_dir_all(working.join("target"))?;
         let working_cleanup = crate::repo::Temp::existing(working.clone())?;
         std::fs::write(working.join("target/unknown"), "old output")?;
-        let cache = CacheFolder { root: &working, relative: "target" };
+        let cache = CacheFolder { root: &working, relative: "target", fast: None };
         repo.cold_cache(
             &cache,
             &working,

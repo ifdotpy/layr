@@ -88,24 +88,50 @@ pub fn delete(
     // The caller holds lifecycle -> line, including the deletion's initial safety checks.
     let l = target.validate(repo)?;
     let at = repo.working(&l);
-    // Validate the mounted identity before our own unmount changes it. The caller's
-    // lifecycle and line leases exclude management changes while we capture the
-    // exposed mountpoint; that identity then protects the preparation gap.
-    let unmounted_target = if is_mounted(&at) {
-        unmount(&at)?;
-        Some(crate::lineops::DeleteTarget::capture(repo, &l)?)
-    } else {
-        None
+    // Unmount first: a write after the read of the final state would be lost. The upper folder
+    // holds the changes without the mount. The mark keeps other processes (a fast line mounts
+    // again on use) from mounting it meanwhile; a failure before the record mounts it again.
+    hold_unmounted(&l);
+    mark_unmounting(&repo.p, &l.id)?;
+    let was_mounted = is_mounted(&at);
+    let remount = || {
+        unmark_unmounting(&repo.p, &l.id);
+        if was_mounted && !is_mounted(&at) {
+            if let Err(e) = mount(&dir(&repo.p, &l.id), &at) {
+                eprintln!("warning: cannot mount the line {} again: {e:#}", l.name);
+            }
+        }
     };
-    let target = unmounted_target.as_ref().unwrap_or(target);
-    let (_lock, fresh, last, staged) =
+    let prepared = (|| {
+        // Validate the mounted identity before our own unmount changes it. The caller's
+        // lifecycle and line leases exclude management changes while we capture the
+        // exposed mountpoint; that identity then protects the preparation gap.
+        let unmounted_target = if was_mounted {
+            unmount(&at)?;
+            Some(crate::lineops::DeleteTarget::capture(repo, &l)?)
+        } else {
+            None
+        };
+        let target = unmounted_target.as_ref().unwrap_or(target);
         crate::cmd::branch::prepare_deletion(ctx, repo, &l, line_lock, upper(&repo.p, &l.id).exists(), discard, || {
             let fresh = target.validate(repo)?;
             repo.authorize_line(ctx, &fresh, crate::repo::LineOp::Manage)?;
             check(&fresh)?;
             Ok(fresh)
-        })?;
-    crate::cmd::branch::delete_recorded(&_lock, ctx, repo, &fresh, last, at.exists(), staged)?;
+        })
+    })();
+    let (_lock, fresh, last, staged) = match prepared {
+        Ok(p) => p,
+        Err(e) => {
+            remount();
+            return Err(e);
+        }
+    };
+    if let Err(e) = crate::cmd::branch::delete_recorded(&_lock, ctx, repo, &fresh, last, at.exists(), staged) {
+        remount();
+        return Err(e);
+    }
+    crate::fast_cache::remove(&repo.p, &fresh.id)?;
     repo.p.trash(&dir(&repo.p, &fresh.id))?;
     drop(_lock);
     if let Err(e) = repo.finish_line_delete_caches(ctx) {
@@ -121,7 +147,6 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos.is_empty() || a.pos.len() > 2 || modes != 1 || (a.pos.len() == 2 && !a.has("--folder")) {
         return Err(exit(2, "usage: layr line show <line> --folder [<path>] | --none | --virtual"));
     }
-    require_enabled(ctx)?;
     let h = here(ctx)?;
     let repo = &h.repo;
     let l = repo.line(&a.pos[0])?;
@@ -129,6 +154,10 @@ pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let Some(mut v) = of_line(&repo.p, &l.id) else {
         return Err(exit(1, format!("line {} has a folder; only virtual lines change their view for now", l.name)));
     };
+    // Fast lines are not experimental.
+    if !v.fast {
+        require_enabled(ctx)?;
+    }
     if h.line.as_ref().is_some_and(|c| c.id == l.id) || ctx.cwd.starts_with(repo.working(&l)) {
         return Err(exit(1, "run this command outside the line's folder: its mount changes"));
     }

@@ -37,6 +37,10 @@ impl CaptureSession {
     }
 
     pub(crate) fn prepare(&self, source: &Path, directory: &Path) -> Result<()> {
+        // A fast line's copy comes from its shadow at the snapshot (`source_of`), not before.
+        if crate::views::is_fast_mount(source) {
+            return Ok(());
+        }
         let Some((driver, location)) = preparation(directory)? else {
             return Ok(());
         };

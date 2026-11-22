@@ -69,9 +69,10 @@ impl Default for Options {
             chunk_min_file: 1 << 20,
             delta_max: 64 << 20,
             max_depth: 16,
-            // 4 MiB: a read decodes one block, 13 times faster than one stream per pack, for 4.2%
-            // more bytes (docs/objects.md section 15).
-            block_size: 4 << 20,
+            // 256 KiB: git reads files of the object store through the git pack folder, and
+            // small blocks make `git log -p` 3 times and `blame` 2 times faster than 4 MiB blocks,
+            // for 10% more pack bytes (docs/objects.md section 15).
+            block_size: 256 << 10,
             pack_plain_max: 56 << 20,
             pack_level: 19,
             pack_long: true,
@@ -160,6 +161,8 @@ pub struct PackReport {
     pub removed: u64,
     pub loose_bytes: u64,
     pub pack_bytes: u64,
+    /// Packs of an older, larger block size that `Store::reblock` wrote again.
+    pub reblocked: u64,
     /// Loose objects whose body did not decode: left loose.
     pub unreadable: Vec<String>,
 }
@@ -182,14 +185,24 @@ struct LoadedPack {
 
 impl LoadedPack {
     fn index(&self) -> Result<&LazyIndex> {
+        self.index_if_present()?.ok_or_else(|| anyhow::anyhow!("pack {} has no index", self.id))
+    }
+
+    /// The index, or None when the index file went before this process read it: a reblock of
+    /// another process wrote the objects into new packs first.
+    fn index_if_present(&self) -> Result<Option<&LazyIndex>> {
         if let Some(i) = self.index.get() {
-            return Ok(i);
+            return Ok(Some(i));
         }
+        let bytes = match fs::read(&self.index_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("pack {}", self.id)),
+        };
         let parsed = damage_of(|| {
-            LazyIndex::parse(fs::read(&self.index_path)?, &self.id, self.data.metadata()?.len())
-                .with_context(|| format!("pack {}", self.id))
+            LazyIndex::parse(bytes, &self.id, self.data.metadata()?.len()).with_context(|| format!("pack {}", self.id))
         })?;
-        Ok(self.index.get_or_init(|| parsed))
+        Ok(Some(self.index.get_or_init(|| parsed)))
     }
 }
 
@@ -205,7 +218,7 @@ impl PackSet {
     fn find(&self, id: &Id, last: &AtomicU32) -> Result<Option<(u32, pack::Entry)>> {
         let hint = last.load(Ordering::Relaxed) as usize;
         if let Some(p) = self.packs.get(hint) {
-            if let Some(e) = p.index()?.find(id)? {
+            if let Some(e) = p.index_if_present()?.map(|i| i.find(id)).transpose()?.flatten() {
                 return Ok(Some((hint as u32, e)));
             }
         }
@@ -213,7 +226,7 @@ impl PackSet {
             if n == hint {
                 continue;
             }
-            if let Some(e) = p.index()?.find(id)? {
+            if let Some(e) = p.index_if_present()?.map(|i| i.find(id)).transpose()?.flatten() {
                 last.store(n as u32, Ordering::Relaxed);
                 return Ok(Some((n as u32, e)));
             }
@@ -341,6 +354,21 @@ impl Store {
         Self::open_leased(root, keying, lease)
     }
 
+    /// `open_existing` without the shared prune lease for the handle's lifetime: a long-lived
+    /// reader (the server of a fast line) takes `lease` around each write, so a prune can run
+    /// between them. It reads only objects of states that the project keeps.
+    pub fn open_existing_unleased(root: &Path, keying: Keying) -> Result<Store> {
+        let lease = Self::prune_lease(root)?;
+        Self::open_leased(root, keying, lease)
+    }
+
+    /// A shared prune lease until the returned file is dropped (`open_existing_unleased`).
+    pub fn lease(&self) -> Result<File> {
+        let lease = Self::prune_lease(&self.root)?;
+        rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockShared)?;
+        Ok(lease)
+    }
+
     fn open_leased(root: &Path, keying: Keying, lease: File) -> Result<Store> {
         let config = fs::read_to_string(root.join("config.json"))?;
         let current = format!("{{\"ids\":\"{}\",\"v\":{FORMAT_VERSION}}}\n", keying.name());
@@ -406,6 +434,11 @@ impl Store {
     }
 
     /// The whole file of a hot blob, if the store has one.
+    /// Where the hot copy of a blob would be, without checking that it is there.
+    pub fn hot_candidate(&self, id: &Id) -> PathBuf {
+        self.fan("blobs", id)
+    }
+
     pub fn hot_path(&self, id: &Id) -> Option<PathBuf> {
         let p = self.fan("blobs", id);
         p.is_file().then_some(p)
@@ -456,10 +489,17 @@ impl Store {
                 Some(p) => p.clone(),
                 None => {
                     let data_path = self.root.join("packs").join(format!("{name}.pack"));
-                    let data = File::open(&data_path).with_context(|| match data_path.exists() {
-                        true => format!("open pack {name}"),
-                        false => format!("pack {name} has an index but no data"),
-                    })?;
+                    let data = match File::open(&data_path) {
+                        Ok(f) => f,
+                        // A reblock removes the index first, then the data.
+                        Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.join("packs").join(format!("{name}.idx")).exists() => {
+                            continue
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                            return Err(e).with_context(|| format!("pack {name} has an index but no data"))
+                        }
+                        Err(e) => return Err(e).with_context(|| format!("open pack {name}")),
+                    };
                     let index_path = self.root.join("packs").join(format!("{name}.idx"));
                     Arc::new(LoadedPack { id, data, index: OnceLock::new(), index_path })
                 }
@@ -733,6 +773,25 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Store `data` as a hot blob (a file in `blobs/`) and return its id.
+    pub fn put_hot_bytes(&self, data: &[u8]) -> Result<(Id, u64)> {
+        let id = self.keying.id(Kind::Blob, data);
+        let len = data.len() as u64;
+        if self.fan("blobs", &id).exists() {
+            return Ok((id, len));
+        }
+        let tmp = self.temp();
+        if let Err(e) = fs::write(&tmp, data) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        if self.publish(&tmp, &self.fan("blobs", &id))? {
+            self.added.objects.fetch_add(1, Ordering::Relaxed);
+            self.added.bytes.fetch_add(len, Ordering::Relaxed);
+        }
+        Ok((id, len))
     }
 
     /// Stream a representation-independent file through the existing object publication path.
@@ -1093,6 +1152,20 @@ impl Store {
         Ok(())
     }
 
+    /// `set_state` for a new state only: fails when `state` exists, also when another process
+    /// records it at the same time (a hard link does not replace its target).
+    pub fn create_state(&self, state: &str, r: &StateRef) -> Result<()> {
+        ensure!(!state.is_empty() && state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "invalid state id {state}");
+        let tmp = self.temp();
+        fs::write(&tmp, format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree))?;
+        let linked = fs::hard_link(&tmp, self.root.join("states").join(state));
+        let _ = fs::remove_file(&tmp);
+        match linked {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => anyhow::bail!("state {state} already exists"),
+            r => Ok(r?),
+        }
+    }
+
     pub fn state_ref(&self, state: &str) -> Result<Option<StateRef>> {
         if state.is_empty() || !state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Ok(None);
@@ -1275,6 +1348,86 @@ impl Store {
         }
         flush(&mut full, &mut report)?;
         // Packs written side by side may have read the pack folder before each other's packs.
+        self.reload_packs()?;
+        Ok(report)
+    }
+
+    /// Write again, in blocks of `block_size`, the packs that have larger blocks (an older
+    /// default: 4 MiB). The objects keep their order (path order from `pack`). The new packs are
+    /// complete on disk before an old pack goes; a reader that has an old pack open still reads it,
+    /// and a reader that finds no old index reads the packs again. A store with no such pack
+    /// changes nothing.
+    pub fn reblock(&self) -> Result<PackReport> {
+        use rayon::prelude::*;
+        let set = self.reload_packs()?;
+        let mut old: Vec<(u32, Vec<pack::Entry>)> = Vec::new();
+        for (n, p) in set.packs.iter().enumerate() {
+            let index = p.index()?;
+            let mut count = vec![0u32; index.blocks.len()];
+            let mut entries = Vec::with_capacity(index.count);
+            for i in 0..index.count {
+                let e = index.entry(i)?;
+                count[e.block as usize] += 1;
+                entries.push(e);
+            }
+            // A block of one object may be larger than `block_size`; a block of several is not.
+            if index.blocks.iter().zip(&count).any(|(b, &c)| c > 1 && b.plain as usize > self.options.block_size) {
+                entries.sort_by_key(|e| (e.block, e.offset));
+                old.push((n as u32, entries));
+            }
+        }
+        let mut report = PackReport::default();
+        if old.is_empty() {
+            return Ok(report);
+        }
+        let codec = crate::zstdx::Codec { level: self.options.pack_level, long: self.options.pack_long, dict: None };
+        let mut builder = Builder::new(self.options.block_size);
+        let mut full: Vec<Builder> = Vec::new();
+        let flush = |full: &mut Vec<Builder>, report: &mut PackReport| -> Result<()> {
+            let done =
+                std::mem::take(full).into_par_iter().map(|b| self.write_pack(b, &codec)).collect::<Result<Vec<PackReport>>>()?;
+            for d in done {
+                report.packs += d.packs;
+                report.objects += d.objects;
+                report.pack_bytes += d.pack_bytes;
+            }
+            Ok(())
+        };
+        let mut seen: HashSet<Id> = HashSet::new();
+        for (n, entries) in &old {
+            for e in entries {
+                if !seen.insert(e.id) {
+                    continue;
+                }
+                let block = self.block(&set, *n, e.block)?;
+                builder.add(e.id, e.kind, e.form, &block[e.offset as usize..(e.offset + e.length) as usize]);
+                if builder.plain_len() >= self.options.pack_plain_max {
+                    full.push(std::mem::replace(&mut builder, Builder::new(self.options.block_size)));
+                    if full.len() >= rayon::current_num_threads() {
+                        flush(&mut full, &mut report)?;
+                    }
+                }
+            }
+        }
+        if !builder.entries.is_empty() {
+            full.push(builder);
+        }
+        flush(&mut full, &mut report)?;
+        ensure!(report.objects == seen.len() as u64, "a reblock wrote {} of {} objects", report.objects, seen.len());
+        let dir = self.root.join("packs");
+        for (n, _) in &old {
+            // A new pack has no large block, so its id is never the id of an old pack.
+            let id = set.packs[*n as usize].id;
+            for ext in ["idx", "pack"] {
+                match fs::remove_file(dir.join(format!("{id}.{ext}"))) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            report.reblocked += 1;
+        }
+        File::open(&dir)?.sync_all()?;
         self.reload_packs()?;
         Ok(report)
     }
@@ -1765,6 +1918,53 @@ mod tests {
         assert_eq!(store.read_blob(&Keying::Plain.id(Kind::Blob, &big)).unwrap(), big, "a's blobs still read");
         let again = prune();
         assert_eq!((again.states, again.objects, again.blobs), (0, 0, 0), "a second prune finds nothing");
+        // A blob that another index names (the git ids of a project) stays without a state.
+        write("c", &[("git", b"read by git only")], None);
+        let git = Keying::Plain.id(Kind::Blob, b"read by git only");
+        let plan = store
+            .plan_maintenance_keeping(&["a".to_string()].into(), &[git].into(), &[], MaintenanceLimit::UNLIMITED)
+            .unwrap();
+        store.prune_planned(&plan).unwrap();
+        assert_eq!(plan.prune.states, 1, "the record of c goes");
+        assert_eq!(store.read_blob(&git).unwrap(), b"read by git only", "the named blob stays");
+    }
+
+    #[test]
+    fn reblock_writes_large_blocks_again_and_readers_keep_reading() {
+        let dir = scratch("reblock");
+        let root = dir.join("store");
+        let mut old = Store::open(&root, Keying::Plain).unwrap();
+        old.options.block_size = 4 << 20;
+        old.options.train_dict = false;
+        let files: Vec<Vec<u8>> = (0..300u64).map(|i| noise(4000 + i as usize, i)).collect();
+        let ids: Vec<Id> = files.iter().map(|f| old.put_cold_bytes(f, None).unwrap().0).collect();
+        old.pack().unwrap();
+        let packs = |s: &Store| s.reload_packs().unwrap().packs.iter().map(|p| p.id).collect::<Vec<Id>>();
+        let before = packs(&old);
+        assert_eq!(before.len(), 1);
+        // One reader read the old index; another lists the old pack but has not read its index.
+        let warm = Store::open(&root, Keying::Plain).unwrap();
+        assert_eq!(warm.read_blob(&ids[0]).unwrap(), files[0]);
+        let cold = Store::open(&root, Keying::Plain).unwrap();
+        cold.reload_packs().unwrap();
+        let mut new = Store::open(&root, Keying::Plain).unwrap();
+        new.options.block_size = 64 << 10;
+        let r = new.reblock().unwrap();
+        assert_eq!((r.reblocked, r.objects), (1, 300));
+        let after = packs(&new);
+        assert!(!after.contains(&before[0]), "the old pack goes");
+        for p in &new.reload_packs().unwrap().packs {
+            let index = p.index().unwrap();
+            assert!(index.blocks.iter().all(|b| b.plain as usize <= 64 << 10), "every block is small");
+        }
+        for (id, f) in ids.iter().zip(&files) {
+            assert_eq!(&warm.read_blob(id).unwrap(), f, "a reader with the old index open");
+            assert_eq!(&cold.read_blob(id).unwrap(), f, "a reader without the old index");
+            assert_eq!(&new.read_blob(id).unwrap(), f);
+        }
+        let again = new.reblock().unwrap();
+        assert_eq!((again.reblocked, again.packs), (0, 0), "a second reblock changes nothing");
+        assert_eq!(packs(&new), after);
     }
 
     #[test]

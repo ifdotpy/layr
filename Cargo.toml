@@ -1,4 +1,6 @@
 [workspace]
+# vendor/fuser: fuser 0.18.0 with a poll-before-sleep patch (docs/layrfs-fuse.md).
+exclude = ["vendor"]
 members = [
   "crates/core/types",
   "crates/fs/stream-codec",
@@ -109,7 +111,12 @@ name = "layr"
 path = "src/main.rs"
 
 [features]
+# Fast lines on Linux (LayrFS over FUSE, docs/layrfs-lab.md) are in every build. The fuser crate
+# is a Linux dependency only, so macOS builds do not change.
+default = ["layrfs-fuse"]
 overlayfs = []
+# The FUSE view of a line on Linux, served by layr daemon.
+layrfs-fuse = ["dep:fuser"]
 
 [dependencies]
 layr-fs-unix = { path = "crates/fs/unix" }
@@ -128,6 +135,7 @@ layr-objects = { path = "crates/layr-objects" }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 base64 = "0.22"
+crc32fast = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
@@ -190,9 +198,15 @@ wtransport = { version = "0.7", default-features = false, features = [
 [profile.release]
 debug = 1
 
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.18", optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 core-foundation = "0.10"
 security-framework-sys = "2"
+
+[patch.crates-io]
+fuser = { path = "vendor/fuser" }

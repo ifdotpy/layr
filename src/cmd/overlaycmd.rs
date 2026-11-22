@@ -476,7 +476,8 @@ fn folder_in_line(
     with_size: bool,
     op: Option<&Project>,
 ) -> InLine {
-    let cp = repo.working(l).join(folder);
+    let w = repo.working(l);
+    let cp = repo.cache_dir(l, &w, folder).unwrap_or_else(|_| w.join(folder));
     let is_layer = crate::fs::host().namespace.managed(&cp);
     let state = match (kind, is_layer) {
         (FolderIn::Versioned, true) => format!("not a cache: has versioned files (run layr overlay repair {name})"),
@@ -617,19 +618,22 @@ fn repair(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _line_lock = repo.line_lock(&l)?;
     let _lock = _line_lock.lock(&repo.p)?;
     let l = repo.line(&l.id)?;
-    let (u, g) = repo.owner_ids(&l);
     crate::repo::recover_cache_replacements(&repo.working(&l))?;
     match repo.folder_kind(&l, &folder)? {
         FolderIn::Versioned => {
-            if crate::repo::uncache(&repo.working(&l), &folder, u, g)? {
+            if repo.uncache_line(&l, &folder)? {
                 outln!(ctx, "{folder}: {}", crate::cmd::admin::VERSIONED_AGAIN);
             }
         }
         FolderIn::Cache => {
             let w = repo.working(&l);
             let missing = crate::fsutil::safe_join(&w, &folder)?.symlink_metadata().is_err();
-            repo.relocate_caches(&l, std::slice::from_ref(&folder), &w, CacheAccess::Live)?;
-            if missing || crate::repo::convert_cache(&w, &folder, u, g)? {
+            // A fast line keeps its cache trees apart (`fast_cache`): no build location to move.
+            let fast = crate::fast_cache::root_for(repo, &l, &w).is_some();
+            if !fast {
+                repo.relocate_caches(&l, std::slice::from_ref(&folder), &w, CacheAccess::Live)?;
+            }
+            if (missing && !fast) || repo.convert_line_cache(&l, &folder)? {
                 outln!(ctx, "{folder}: a cache again");
             }
         }
@@ -707,8 +711,7 @@ fn remove(ctx: &Ctx, args: &[String]) -> Result<i32> {
                 eprintln!("warning: line {} keeps {folder} as a cache: its owner saves it as a plain folder", line.name);
                 continue;
             }
-            let (u, g) = repo.owner_ids(&line);
-            crate::repo::uncache(&w, &folder, u, g)?;
+            repo.uncache_line(&line, &folder)?;
         }
     }
     outln!(ctx, "Removed cache overlay {name}");
