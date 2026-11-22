@@ -774,6 +774,11 @@ impl Backend {
             Self::File(root, identity) => identity.run(|| {
                 #[cfg(test)]
                 record(root, "list", prefix);
+                // A policy that denies listing some prefixes (an S3 bucket policy can).
+                #[cfg(test)]
+                if fault(root, "list", prefix) {
+                    bail!("listing denied: {prefix}");
+                }
                 let mut out = Vec::new();
                 if root.exists() {
                     // A state prefix must not enumerate every sibling state directory.
@@ -899,6 +904,10 @@ fn walk(root: &Path, dir: &Path, prefix: &str, out: &mut Vec<Object>) -> Result<
 fn walk_entry(root: &Path, entry: fs::DirEntry, prefix: &str, out: &mut Vec<Object>) -> Result<()> {
     let path = entry.path();
     let name = path.strip_prefix(root)?.to_str().context("non-UTF-8 remote object")?.to_string();
+    // A sibling outside the prefix is not looked at: a listing of a shard (`states/01a1e`) must not stat every state.
+    if !(name.starts_with(prefix) || prefix.starts_with(&format!("{name}/"))) {
+        return Ok(());
+    }
     let temporary = entry.file_name().to_string_lossy().starts_with(".put-");
     let m = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -911,9 +920,7 @@ fn walk_entry(root: &Path, entry: fs::DirEntry, prefix: &str, out: &mut Vec<Obje
         bail!("symbolic link in remote store: {name}");
     }
     if m.is_dir() {
-        if prefix.starts_with(&format!("{name}/")) || name.starts_with(prefix) {
-            walk(root, &path, prefix, out)?;
-        }
+        walk(root, &path, prefix, out)?;
     } else if name.starts_with(prefix) && !temporary {
         let modified = m.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
         #[cfg(test)]
@@ -1062,6 +1069,11 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].key, "states/one/a.age");
         assert_eq!(backend.list("states/one/a").unwrap().len(), 1);
+        // A partial name lists its matches and does not look at the siblings (a link among them is not seen).
+        std::os::unix::fs::symlink("/missing", root.join("states/zz-link")).unwrap();
+        assert_eq!(backend.list("states/on").unwrap().len(), 1);
+        assert!(backend.list("states/zz").is_err());
+        std::fs::remove_file(root.join("states/zz-link")).unwrap();
         assert!(backend.list("states/missing/").unwrap().is_empty());
         assert!(backend.list("states/two/").is_err());
         std::os::unix::fs::symlink("one", root.join("states/link")).unwrap();

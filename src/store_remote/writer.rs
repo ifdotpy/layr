@@ -88,18 +88,30 @@ const LISTING_PAGE: usize = 1000;
 /// Above this many estimated objects a listing of `states/` can exceed the gateway's 100,000 objects.
 const LISTING_OBJECTS: usize = 50_000;
 
-/// The objects under `states/<id>/` that this push discovered. One listing of `states/` replaces many exact prefix
-/// probes when its pages cost less; a tiny push against a long history probes only the prefixes it needs. A base
-/// decision never uses this memory: it probes again (`fresh`).
+/// The characters of a state id that name its listing shard (`states/<shard>`). Ids are UUIDv7: five hex digits are
+/// about 3.1 days of states, so a long history has a few shards and the states of one push share them.
+const SHARD: usize = 5;
+
+/// The listing shard of `id`: its first `SHARD` characters (all of a shorter id).
+fn shard(id: &str) -> &str {
+    id.get(..SHARD).unwrap_or(id)
+}
+
+/// The objects under `states/<id>/` that this push discovered. Listings of the shards of `states/` replace many exact
+/// prefix probes when they cost fewer requests; a tiny push against a long history probes only the prefixes it needs.
+/// A base decision never uses this memory: it probes again (`fresh`).
 struct Attempts<'a> {
     backend: &'a super::backend::Backend,
-    /// Objects by state, from an exact probe or the bulk listing.
+    /// Objects by state, from an exact probe or a listing.
     seen: BTreeMap<String, Vec<super::backend::Object>>,
-    listed: bool,
+    /// The shards listed in full: `seen` holds every state of each ("" is all of `states/`).
+    listed: BTreeSet<String>,
     /// States that the local index knows: the estimate of the listing's size.
     known: usize,
-    /// The objects of the last bulk listing: a listing again costs at least their pages.
+    /// The most objects of one listing: a listing of `states/` again costs at least their pages.
     listed_objects: usize,
+    /// Shard listings replaced a listing of `states/`: a probe that fails then tries that listing.
+    sharded: bool,
     /// Each tree asks for the parts that it reuses before it publishes: in a layer, whose sweep deletes parts, and on
     /// a remote that lost a completed tip (a partial replica can lack any part of the journal's chains).
     check_parts: bool,
@@ -113,41 +125,51 @@ impl<'a> Attempts<'a> {
         Self {
             backend,
             seen: BTreeMap::new(),
-            listed: false,
+            listed: BTreeSet::new(),
             known,
             listed_objects: 0,
+            sharded: false,
             check_parts: false,
             complete_trees: false,
         }
     }
 
-    /// Learns the prefixes of `states` not seen yet (with `fresh`, all of them again): from one listing of `states/`
-    /// when its estimated pages (a tree and about one data part per state, or the size of the last listing) are fewer
-    /// than the probes, or from parallel exact probes.
+    /// Whether a listing of `listed` saw every object of `state`.
+    fn covered(listed: &BTreeSet<String>, state: &str) -> bool {
+        listed.contains("") || listed.contains(shard(state))
+    }
+
+    /// Whether this push already holds what the remote has of `state`, from a listing or an exact probe.
+    fn known_state(&self, state: &str) -> bool {
+        Self::covered(&self.listed, state) || self.seen.contains_key(state)
+    }
+
+    /// Learns the prefixes of `states` not seen yet (with `fresh`, all of them again). With more of them than the
+    /// estimated pages of `states/` (a tree and about one data part per state, or the size of the last listing), it
+    /// lists their shards, many at a time, when they are fewer requests than those pages, else `states/` once.
+    /// Exact probes, many at a time, learn the rest.
     fn discover(&mut self, states: impl IntoIterator<Item = String>, fresh: bool) -> Result<()> {
-        let unseen: Vec<String> =
-            states.into_iter().filter(|id| fresh || (!self.listed && !self.seen.contains_key(id))).collect();
+        let mut unseen: Vec<String> = states.into_iter().filter(|id| fresh || !self.known_state(id)).collect();
         let objects = (2 * (self.known + unseen.len())).max(self.listed_objects);
-        if unseen.len() > objects.div_ceil(LISTING_PAGE) && objects <= LISTING_OBJECTS {
-            // A remote that refuses or cannot list that much falls back to the exact probes.
-            if let Ok(listing) = self.backend.list("states/") {
-                // The listing is newer than every earlier probe: it replaces them.
-                self.listed = true;
-                self.listed_objects = listing.len();
-                self.seen.clear();
-                for object in listing {
-                    if let Some((state, _)) = object.key.strip_prefix("states/").and_then(|key| key.split_once('/')) {
-                        self.seen.entry(state.to_string()).or_default().push(object);
-                    }
-                }
-                return Ok(());
-            }
+        let pages = objects.div_ceil(LISTING_PAGE);
+        let mut root_listed = false;
+        if unseen.len() > pages && objects <= LISTING_OBJECTS {
+            let shards: BTreeSet<String> = unseen.iter().map(|id| shard(id).to_string()).collect();
+            // The pages of one listing of `states/` come one after another (23 took 5.3 s on a changed inventory); a
+            // shard's conditional listing changes only with its own states.
+            let sharded = shards.len() < pages;
+            self.sharded |= sharded;
+            root_listed = !sharded;
+            let shards = if sharded { shards.into_iter().collect() } else { vec![String::new()] };
+            // Only a listing of now counts for a fresh discovery: a shard that fails takes exact probes.
+            let listed = self.list_shards(&shards)?;
+            unseen.retain(|id| !Self::covered(&listed, id));
         }
         // One list per state, many at a time: a project with hundreds of lines and refs pays the latency of
         // the remote once per batch of workers, not once per state.
         let backend = self.backend;
         let seen = &mut self.seen;
-        super::download::run(
+        let probed = super::download::run(
             unseen.len(),
             super::download::JOBS,
             super::download::JOBS as u64,
@@ -157,13 +179,57 @@ impl<'a> Attempts<'a> {
                 seen.insert(unseen[i].clone(), objects);
                 Ok(())
             },
-        )
+        );
+        // A remote that lists `states/` but no narrower prefix (an S3 policy can) still answers the whole listing.
+        if probed.is_err() && self.sharded && !root_listed && self.list_shards(&[String::new()])?.contains("") {
+            return Ok(());
+        }
+        probed
+    }
+
+    /// Lists `states/<shard>` for each of `shards`, many at a time. Each listing is newer than what earlier probes and
+    /// listings saw of its shard: it replaces that. Returns the shards listed; one that the remote refuses or cannot
+    /// list is left out.
+    fn list_shards(&mut self, shards: &[String]) -> Result<BTreeSet<String>> {
+        let backend = self.backend;
+        let mut listed = BTreeSet::new();
+        super::download::run(
+            shards.len(),
+            super::download::JOBS,
+            super::download::JOBS as u64,
+            |_| 1,
+            |i| Ok(backend.list(&format!("states/{}", shards[i])).ok()),
+            |i, listing| {
+                let Some(listing) = listing else { return Ok(()) };
+                let shard = &shards[i];
+                let stale: Vec<String> = self
+                    .seen
+                    .range(shard.clone()..)
+                    .map(|(id, _)| id)
+                    .take_while(|id| id.starts_with(shard.as_str()))
+                    .cloned()
+                    .collect();
+                for id in stale {
+                    self.seen.remove(&id);
+                }
+                self.listed_objects = self.listed_objects.max(listing.len());
+                for object in listing {
+                    if let Some((state, _)) = object.key.strip_prefix("states/").and_then(|key| key.split_once('/')) {
+                        self.seen.entry(state.to_string()).or_default().push(object);
+                    }
+                }
+                self.listed.insert(shard.clone());
+                listed.insert(shard.clone());
+                Ok(())
+            },
+        )?;
+        Ok(listed)
     }
 
     /// The objects of `states/<state>/`. `fresh` sends a new exact probe now: a delta goes up on a base only
     /// after this request saw its tree, since another machine's sweep can delete it at any time.
     fn objects(&mut self, state: &str, fresh: bool) -> Result<&[super::backend::Object]> {
-        if fresh || !(self.listed || self.seen.contains_key(state)) {
+        if fresh || !self.known_state(state) {
             let objects = self.backend.list(&format!("states/{state}/"))?;
             self.seen.insert(state.to_string(), objects);
         }
@@ -744,7 +810,7 @@ pub(crate) fn push_with_local(store: &Store, local: &mut super::Replica<'_>, opt
             journal.stats.seed_pending_parts += 1;
             let modified = match format::parse_data_name(&part.object) {
                 Some((state, _, _)) => {
-                    journal.stats.seed_metadata_lists += usize::from(!attempts.listed && !attempts.seen.contains_key(&state));
+                    journal.stats.seed_metadata_lists += usize::from(!attempts.known_state(&state));
                     attempts.objects(&state, false)?.iter().find(|object| object.key == part.object).map(|object| object.modified)
                 }
                 None => None,
@@ -1039,23 +1105,25 @@ fn prepare_push(store: &Store, local: &super::Replica<'_>, opts: &Options) -> Re
     if let Some(api) = api {
         register_machine(store, api)?;
     }
-    for machine in local.record_machines()? {
-        if api.is_some() && machine != store.machine {
-            continue;
-        }
-        let mut last = 0;
-        let mut last_key = None;
-        for object in if blind_layer { Vec::new() } else { store.backend.list(&format!("records/{machine}/"))? } {
-            let (m, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
-            if m != machine {
-                bail!("segment is outside its machine prefix");
-            }
-            if end > last {
-                last = end;
-                last_key = Some(object.key);
-            }
-        }
+    let machines: BTreeSet<String> =
+        local.record_machines()?.into_iter().filter(|machine| api.is_none() || *machine == store.machine).collect();
+    // For several machines, one listing of `records/` (a request per machine cost a round trip each: 0.9-1.5 s for 8
+    // machines). It holds only until this push uploads: another writer can forward a machine's records meanwhile, so
+    // each machine after an upload, and each one where the remote cannot list all of `records/`, lists its own folder.
+    let all = if !blind_layer && machines.len() > 1 { store.backend.list("records/").ok() } else { None };
+    let mut bulk = all.map(|all| newest_segments(all, &machines)).transpose()?;
+    for machine in machines {
+        let newest = match &mut bulk {
+            Some(bulk) => bulk.remove(&machine),
+            None if blind_layer => None,
+            None => machine_newest(store, &machine)?,
+        };
+        let (last, last_key) = newest.map_or((0, None), |(last, key)| (last, Some(key)));
         if let Some(key) = last_key.as_deref().filter(|_| machine == store.machine) {
+            // Reading the segment takes as long as an upload: the listing of `records/` no longer holds after it.
+            if !seen(key) {
+                bulk = None;
+            }
             own_history(key, last)?;
             if !seen(key) {
                 std::fs::write(&own_file, format!("{scope} {key}"))?;
@@ -1069,6 +1137,7 @@ fn prepare_push(store: &Store, local: &super::Replica<'_>, opts: &Options) -> Re
         if lines.is_empty() {
             continue;
         }
+        bulk = None;
         let mut start = 0;
         while start < lines.len() {
             let mut end = start;
@@ -1095,6 +1164,34 @@ fn prepare_push(store: &Store, local: &super::Replica<'_>, opts: &Options) -> Re
     }
     drop(stage);
     Ok((descriptor, blind_layer, report))
+}
+
+/// The newest segment of `machine` on the remote, from a listing of its folder.
+fn machine_newest(store: &Store, machine: &str) -> Result<Option<(u64, String)>> {
+    let prefix = format!("records/{machine}/");
+    let objects = store.backend.list(&prefix)?;
+    if objects.iter().any(|object| !object.key.starts_with(&prefix)) {
+        bail!("segment is outside its machine prefix");
+    }
+    Ok(newest_segments(objects, &BTreeSet::from([machine.to_string()]))?.remove(machine))
+}
+
+/// The newest segment of each of `machines` in a listing of record segments: its last record number and its key
+/// (the first listed of equal ends). The objects of other machines are not read. O(n log m).
+fn newest_segments(objects: Vec<super::backend::Object>, machines: &BTreeSet<String>) -> Result<BTreeMap<String, (u64, String)>> {
+    let mut newest: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    for object in objects {
+        let Some((folder, _)) = object.key.strip_prefix("records/").and_then(|key| key.split_once('/')) else { continue };
+        if !machines.contains(folder) {
+            continue;
+        }
+        let (machine, _, end) = format::parse_segment_name(&object.key).context("invalid remote segment name")?;
+        let slot = newest.entry(machine).or_default();
+        if end > slot.0 {
+            *slot = (end, object.key);
+        }
+    }
+    Ok(newest)
 }
 
 fn content(root: &Path, path: &str, mode: &str) -> Result<Vec<u8>> {
@@ -3355,6 +3452,114 @@ pub(super) mod tests {
         assert_eq!(lists[0], "states/", "two unknown states cost more probes than one estimated page");
         assert_eq!(lists[1..], probes, "the listing's {} objects cost two pages", LISTING_PAGE + 1);
         Ok(std::fs::remove_dir_all(root)?)
+    }
+
+    /// Many tips of a long history list their shards of `states/`, not all of it: one request per shard instead of
+    /// its pages one after another. A fresh discovery lists again only the shards it asks about; a shard that cannot
+    /// be listed then takes exact probes, even when an earlier listing covered it.
+    #[test]
+    fn many_tips_of_a_long_history_list_only_their_shards() -> Result<()> {
+        let root = std::env::temp_dir().join(crate::ids::new_id());
+        let backend = super::super::backend::Backend::file(root.join("remote"));
+        let id = |shard: char, n: usize| format!("01a1{shard}000-0000-7000-8000-{n:012x}");
+        let tree = |id: &str| format::tree_name(id, "0123abcd");
+        let (a, b): (Vec<String>, Vec<String>) = ((0..40).map(|n| id('a', n)).collect(), (0..40).map(|n| id('b', n)).collect());
+        for state in a.iter().chain(&b) {
+            assert!(backend.put_new(&tree(state), b"tree".to_vec())?);
+        }
+        let other = id('a', 99);
+        assert!(backend.put_new(&tree(&other), b"tree".to_vec())?);
+        let sorted = |mut lists: Vec<String>| {
+            lists.sort();
+            lists
+        };
+        let probes = |ids: &[String]| sorted(ids.iter().map(|id| format!("states/{id}/")).collect());
+        log_requests(&root);
+        // 80 unseen states against 16,384 known ones: 33 estimated pages of `states/`, or two shards.
+        let mut attempts = Attempts::new(&backend, INDEX_STATES);
+        attempts.discover(a.iter().chain(&b).cloned(), false)?;
+        assert!(attempts.complete(&a[3])?.is_some() && attempts.complete(&b[7])?.is_some());
+        assert!(attempts.complete(&other)?.is_some(), "a shard holds the states that nobody asked for");
+        assert_eq!(attempts.complete(&id('a', 50))?, None, "a listed shard proves an absence");
+        attempts.discover(b.clone(), false)?;
+        assert_eq!(sorted(requests(&root, "list")), ["states/01a1a", "states/01a1b"]);
+        // A fresh discovery of one shard's states lists that shard again: a deletion shows, the other shard stays.
+        std::fs::remove_file(root.join("remote").join(tree(&a[0])))?;
+        log_requests(&root);
+        attempts.discover(a.clone(), true)?;
+        assert_eq!(attempts.complete(&a[0])?, None);
+        assert!(attempts.complete(&b[0])?.is_some());
+        assert_eq!(requests(&root, "list"), ["states/01a1a"]);
+        // A shard that cannot be listed now (here a link beside its states) is probed state by state.
+        std::os::unix::fs::symlink("/missing", root.join("remote/states/01a1bfff-link"))?;
+        std::fs::remove_file(root.join("remote").join(tree(&b[1])))?;
+        log_requests(&root);
+        attempts.discover(b.clone(), true)?;
+        assert_eq!(attempts.complete(&b[1])?, None, "the earlier listing of the shard does not hide the deletion");
+        let mut lists = requests(&root, "list");
+        assert_eq!(lists.remove(0), "states/01a1b");
+        assert_eq!(sorted(lists), probes(&b));
+        // A remote that lists `states/` and denies every narrower prefix still answers from the whole listing.
+        std::fs::remove_file(root.join("remote/states/01a1bfff-link"))?;
+        let faults = || super::super::backend::FILE_FAULTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        faults().insert(root.join("remote"), vec![("list", "states/0".to_string())]);
+        log_requests(&root);
+        let mut denied = Attempts::new(&backend, INDEX_STATES);
+        let found = denied.discover(a.iter().chain(&b).cloned(), false);
+        let lists = requests(&root, "list");
+        assert!(found.is_ok() && denied.complete(&a[3])?.is_some() && denied.complete(&b[1])?.is_none());
+        assert_eq!(sorted(lists[..2].to_vec()), ["states/01a1a", "states/01a1b"]);
+        assert_eq!(lists.last().map(String::as_str), Some("states/"), "after the shards and the probes failed");
+        // A fresh discovery after a deletion asks the whole listing again and sees it.
+        std::fs::remove_file(root.join("remote").join(tree(&a[3])))?;
+        denied.discover(a.clone(), true)?;
+        assert_eq!(denied.complete(&a[3])?, None);
+        // One shard allowed, the other denied: a later probe of the denied one still falls back to `states/`.
+        faults().insert(root.join("remote"), vec![("list", "states/01a1b".to_string())]);
+        let mut half = Attempts::new(&backend, INDEX_STATES);
+        half.discover(a.clone(), false)?;
+        log_requests(&root);
+        half.discover([b[2].clone()], false)?;
+        assert!(half.complete(&b[2])?.is_some());
+        assert_eq!(requests(&root, "list"), [format!("states/{}/", b[2]), "states/".to_string()]);
+        faults().insert(root.join("remote"), vec![("list", "states/".to_string())]);
+        let error = Attempts::new(&backend, INDEX_STATES).discover(a.clone(), false).err().context("nothing lists")?;
+        assert!(format!("{error:#}").contains("listing denied: states/01a1a"), "the shard's or probe's error: {error:#}");
+        faults().remove(&root.join("remote"));
+        Ok(std::fs::remove_dir_all(root)?)
+    }
+
+    #[test]
+    fn newest_segments_keep_the_highest_end_of_each_wanted_machine() -> Result<()> {
+        let object = |key: String| super::super::backend::Object { key, modified: 0, size: None };
+        let (one, two, three) = (
+            "01a1a000-0000-7000-8000-000000000001",
+            "01a1a000-0000-7000-8000-000000000002",
+            "01a1a000-0000-7000-8000-000000000003",
+        );
+        let wanted: BTreeSet<String> = [one, two].map(str::to_string).into();
+        let listing = vec![
+            object(format::segment_name(one, 1, 3)),
+            object(format::segment_name(one, 4, 9)),
+            object(format::segment_name(one, 5, 7)),
+            object(format::segment_name(two, 1, 2)),
+            // Equal ends: the first listed stays.
+            object(format::segment_name(two, 2, 2)),
+            // Another machine's objects are not read, not even one that does not parse.
+            object(format::segment_name(three, 1, 50)),
+            object(format!("records/{three}/junk")),
+        ];
+        let newest = newest_segments(listing.clone(), &wanted)?;
+        assert_eq!(
+            newest,
+            BTreeMap::from([
+                (one.to_string(), (9, format::segment_name(one, 4, 9))),
+                (two.to_string(), (2, format::segment_name(two, 1, 2))),
+            ])
+        );
+        let wanted_three: BTreeSet<String> = [three.to_string()].into();
+        assert!(newest_segments(listing, &wanted_three).is_err(), "a wanted machine's invalid name fails");
+        Ok(())
     }
 
     /// A sweep keeps a tree that a kept tree uses as its base, but not the chunks that only it names. A delta on that

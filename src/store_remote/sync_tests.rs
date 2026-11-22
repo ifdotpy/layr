@@ -284,6 +284,57 @@ fn fake_local_round_trip_preserves_signed_bytes_selection_and_publication() -> R
     cleanup.discard()
 }
 
+/// A push lists the segments of every machine at once: one listing of `records/`, not one per machine. One machine
+/// lists only its own folder, and a remote that cannot list all of `records/` is asked machine by machine.
+#[test]
+fn a_push_lists_the_record_segments_of_all_machines_once() -> Result<()> {
+    let root = std::env::temp_dir().join(crate::ids::new_id());
+    std::fs::create_dir(&root)?;
+    let cleanup = crate::repo::Temp::plain(root.clone());
+    let ctx = super::writer::tests::context(&root);
+    let store = super::writer::tests::remote(&root, &ctx);
+    super::writer::initialize_plain(&store, super::format::Mode::Private)?;
+    let mut sender = fixture(&root.join("source"), &store.machine, &store.key, 1)?;
+    let mut others = Vec::new();
+    let mut machines = Vec::new();
+    for n in 0..3 {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[n + 1; 32]);
+        machines.push(crate::ids::new_id());
+        others.extend(fixture(&root.join(format!("other-{n}")), &machines[n as usize], &key, 1)?.records);
+    }
+    let opts = Options { heads: true, ..Default::default() };
+    let remote = root.join("remote");
+    let listings = |sender: &mut FakeLocal| -> Result<(usize, Vec<String>)> {
+        super::backend::FILE_REQUESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(remote.clone(), Vec::new());
+        let pushed = super::writer::push_with_local(&store, sender, &opts);
+        let log = super::backend::FILE_REQUESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&remote);
+        let lists = log.unwrap_or_default().into_iter().filter(|(op, key)| *op == "list" && key.starts_with("records/"));
+        Ok((pushed?.records, lists.map(|(_, key)| key).collect()))
+    };
+    let own = format!("records/{}/", store.machine);
+    assert_eq!(listings(&mut sender)?, (3, vec![own.clone()]));
+    sender.records.extend(others);
+    let mut each: Vec<String> = machines.iter().map(|machine| format!("records/{machine}/")).chain([own.clone()]).collect();
+    each.sort();
+    // The listing of `records/` holds until the push uploads: another writer can forward the records of a later
+    // machine meanwhile, so each machine after the first upload lists its own folder.
+    let first = each.iter().position(|folder| *folder != own).context("another machine")?;
+    assert_eq!(listings(&mut sender)?, (9, [vec!["records/".to_string()], each[first + 1..].to_vec()].concat()));
+    // Before: `records/<machine>/` once per machine (four).
+    assert_eq!(listings(&mut sender)?, (0, vec!["records/".to_string()]), "a no-op push sends no segment again");
+    // Checking this machine's newest segment on the remote takes as long as an upload: the machines after it list
+    // their folders.
+    std::fs::remove_file(root.join("local/meta/own-records"))?;
+    let after = each.iter().position(|folder| *folder == own).context("own folder")?;
+    assert_eq!(listings(&mut sender)?, (0, [vec!["records/".to_string()], each[after + 1..].to_vec()].concat()));
+    std::os::unix::fs::symlink("/missing", remote.join("records/zz-link"))?;
+    assert_eq!(listings(&mut sender)?, (0, [vec!["records/".to_string()], each].concat()));
+    cleanup.discard()
+}
+
 #[test]
 fn record_import_releases_the_project_lock() -> Result<()> {
     let root = std::env::temp_dir().join(crate::ids::new_id());
