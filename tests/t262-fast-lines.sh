@@ -90,7 +90,13 @@ as() {
 cd "$T/tmp"
 part "fast lines match classic lines" as bash "$T/parts/fast-parity.sh"
 part "fast lines match classic lines (remotes, caches, checks, queue)" as bash "$T/parts/fast-parity-more.sh"
-part "copies of fast lines go" as bash "$T/parts/fast-sweep.sh"
+# The sweep part reads the root-owned store folders with sudo. A check runs with "no new privileges", where sudo
+# cannot run (2026-11-22): the part runs on a developer machine, not in a check.
+if grep -q '^NoNewPrivs:[[:space:]]*1' /proc/self/status 2>/dev/null; then
+    echo "SKIP copies of fast lines go (sudo cannot run with no new privileges, as in a check)"
+else
+    part "copies of fast lines go" as bash "$T/parts/fast-sweep.sh"
+fi
 part "the view contract over LayrFS" as bash "$T/parts/views-layrfs.sh"
 part "a new daemon takes the fast lines" as bash "$T/parts/fast-upgrade.sh"
 part "fast lines come back after a crash and a restart" as bash "$T/parts/fast-crash.sh"

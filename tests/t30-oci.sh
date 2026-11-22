@@ -116,8 +116,18 @@ import os, socket, sys, time
 parent, port = sys.argv[1], int(sys.argv[2])
 sock = socket.create_connection(('127.0.0.1', port))
 found = False
+def descendants(pid):
+    # The daemon may serve from a child daemon (a supervisor and its worker): look at every descendant.
+    try:
+        children = open(f'/proc/{pid}/task/{pid}/children').read().split()
+    except FileNotFoundError:
+        return []
+    found = []
+    for child in children:
+        found += [child] + descendants(child)
+    return found
 for _ in range(100):
-    pids = open(f'/proc/{parent}/task/{parent}/children').read().split()
+    pids = descendants(parent)
     for pid in pids:
         try:
             command = open(f'/proc/{pid}/cmdline','rb').read()
