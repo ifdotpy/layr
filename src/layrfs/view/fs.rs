@@ -3596,7 +3596,9 @@ mod tests {
         let (tmp, objects) = fixture()?;
         let line = tmp.join("line");
         std::fs::create_dir_all(&line)?;
-        let far = 1u64 << 40;
+        // 1 GiB: far past the end of the file, and below the file size limit of a check (its memory
+        // limit, 8 GiB): at 1 TiB the kernel stopped the whole test process (SIGXFSZ, 2026-11-22).
+        let far = 1u64 << 30;
         std::fs::write(line.join("journal"), format!("B s0\nW {} {far} 5 {}\n", hex(b"d/a"), hex(b"Z")))?;
         let mut inner = open(&objects, &line)?;
         let d = inner.child(ROOT, b"d").unwrap().unwrap();
@@ -3666,7 +3668,9 @@ mod tests {
         let (tmp, objects) = fixture()?;
         let line = tmp.join("line");
         std::fs::create_dir_all(&line)?;
-        let far = 1u64 << 40;
+        // 1 GiB: far past the end of the file, and below the file size limit of a check (its memory
+        // limit, 8 GiB): at 1 TiB the kernel stopped the whole test process (SIGXFSZ, 2026-11-22).
+        let far = 1u64 << 30;
         std::fs::write(line.join("journal"), format!("B s0\nW {} {far} 5 {}\n", hex(b"d/a"), hex(b"Z")))?;
         let mut inner = open(&objects, &line)?;
         let d = inner.child(ROOT, b"d").unwrap().unwrap();
