@@ -48,19 +48,23 @@ cp "$LAYR" "$T/layr"
 export LAYR_SOCKET=$T/layr.sock
 "$T/layr" daemon --socket "$LAYR_SOCKET" --tick 3600 > "$T/daemon.log" 2>&1 &
 DPID=$!
-# The request processes of the daemon: its children, or with LayrFS (Linux) the children of its service loop,
-# a child daemon under the FUSE host. A kill of the service loop itself left the watcher running (2026-11-22).
+# Stop the background watcher and the request process that the daemon forked for it. A request process is a
+# fork of the daemon (the same command line, as root), and it does not stop when its client goes. With LayrFS
+# (Linux) the daemon is a FUSE host with a service loop under it, and the started process may exit, so DPID
+# names no live daemon: `pkill -P "$DPID"` then stopped the service loop or nothing, and the test waited 900 s
+# (2026-11-22). The daemon processes that existed before the watcher started (DAEMONS) stay.
+daemons() { pgrep -f "daemon --socket $LAYR_SOCKET" 2>/dev/null | tr '\n' ' '; }
+kill_tree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done; kill "$1" 2>/dev/null || true; }
 stop_watchers() {
-    local child
-    for child in $(pgrep -P "$DPID" 2>/dev/null); do
-        if ps -o args= -p "$child" 2>/dev/null | grep -q ' daemon --socket '; then
-            pkill -P "$child" 2>/dev/null || true
-        else
-            kill "$child" 2>/dev/null || true
-        fi
+    local c
+    if [ -n "${WPID:-}" ]; then
+        for c in $(pgrep -P "$WPID" 2>/dev/null); do kill_tree "$c"; done
+    fi
+    for c in $(daemons); do
+        case " ${DAEMONS:-} " in *" $c "*) ;; *) [ -n "${DAEMONS:-}" ] && kill_tree "$c" ;; esac
     done
 }
-trap 'stop_watchers; kill ${DPID:-} ${WPID:-} 2>/dev/null || true; cleanup' EXIT
+trap 'stop_watchers; kill ${DPID:-} ${WPID:-} 2>/dev/null || true; pkill -f "daemon --socket $LAYR_SOCKET" 2>/dev/null || true; cleanup' EXIT
 for i in $(seq 1 100); do [ -S "$LAYR_SOCKET" ] && break; sleep .1; done
 as_reader() { (cd / && runuser -u layr-check-reader -- env LAYR_SOCKET="$LAYR_SOCKET" CHECK_SECRET=never-log-this-secret "$T/layr" --project p "$@"); }
 watch_checks() { as_reader checks watch "$@"; }
@@ -93,6 +97,7 @@ ok 'rerun is idle' python3 -c 'import json,sys; r=json.loads(sys.argv[1]); asser
 no 'a reader cannot change command policy' as_reader config check.smoke true
 no 'a reader cannot change watcher policy' as_reader config checks.changes '[]'
 # A new pushed change version arrives while the watcher remains active.
+DAEMONS=$(daemons)
 watch_checks --json --interval 1 > "$T/watch.jsonl" 2> "$T/watch.err" &
 WPID=$!
 export LAYR_ROOT=$AR
