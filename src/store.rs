@@ -2195,6 +2195,82 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         result
     }
+
+    /// A state id names one state: an import refuses a record whose state an earlier record of the same batch (of
+    /// any machine) or a stored record already names, and reports the later record.
+    #[test]
+    fn an_import_refuses_a_reused_state_id() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-reused-state-{}", ids::new_id()));
+        let result = (|| -> Result<()> {
+            let store = Store::open(&base.join("store"))?;
+            let actor = Actor { uid: rustix::process::geteuid().as_raw(), name: "test".into(), session: None };
+            let dir = store.project_dir("p")?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            fs::create_dir(dir.join("states"))?;
+            let id = ids::new_id();
+            let p = Project {
+                lease: Default::default(),
+                store: &store,
+                name: "p".into(),
+                dir: dir.clone(),
+                id: id.clone(),
+                db: Db::open(&db_file(&dir))?,
+            };
+            let mut project = crate::model::DraftRecord::new("project");
+            project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+            p.lock_maintenance()?.append(project, &actor)?;
+            let machines =
+                [(SigningKey::from_bytes(&[21u8; 32]), ids::new_id()), (SigningKey::from_bytes(&[22u8; 32]), ids::new_id())];
+            let signed = |m: usize, seq: u64, states: &[&str]| -> Result<String> {
+                let (key, machine) = &machines[m];
+                let mut rec = Record::untrusted_preview(if seq == 1 { "machine" } else { "config" });
+                (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), machine.clone(), seq, ids::now_ms());
+                (rec.project, rec.actor) = (p.id.clone(), actor.clone());
+                rec.data = if seq == 1 {
+                    serde_json::json!({"name": "m", "public_key": hex::encode(key.verifying_key().to_bytes())})
+                } else {
+                    serde_json::json!({"config": {}})
+                };
+                let states: Vec<_> = states
+                    .iter()
+                    .map(|id| {
+                        serde_json::json!({"id": id, "kind": "commit", "subvol": "", "time": 1,
+                        "author": crate::model::Author::default()})
+                    })
+                    .collect();
+                rec.states = serde_json::from_value(serde_json::Value::Array(states))?;
+                oplog::sign_line(&rec, key)
+            };
+            let (s, t) = (ids::new_id(), ids::new_id());
+            let refused = |lines: &[String], seq: u64| -> Result<()> {
+                let Err(error) = p.lock_maintenance()?.import_lines(lines, Trust::All) else {
+                    anyhow::bail!("a reused state id is refused");
+                };
+                let expected = format!("record {seq} of machine ");
+                let message = format!("{error:#}");
+                anyhow::ensure!(
+                    message.starts_with(&expected) && message.ends_with(&format!("reuses state id {s}")),
+                    "{message}"
+                );
+                Ok(())
+            };
+            // The same machine, a later record.
+            refused(&[signed(0, 1, &[])?, signed(0, 2, &[&s])?, signed(0, 3, &[&t, &s])?], 3)?;
+            // Another machine of the same batch.
+            refused(&[signed(0, 1, &[])?, signed(0, 2, &[&s])?, signed(1, 1, &[])?, signed(1, 2, &[&s])?], 2)?;
+            assert!(p.db.state(&s)?.is_none(), "a refused batch stores nothing");
+            assert_eq!(
+                p.lock_maintenance()?
+                    .import_lines(&[signed(0, 1, &[])?, signed(0, 2, &[&s])?, signed(0, 3, &[&t])?], Trust::All)?,
+                3
+            );
+            // A stored record.
+            refused(&[signed(1, 1, &[])?, signed(1, 2, &[&s])?], 2)?;
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&base);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -2575,11 +2651,15 @@ impl LockedProject<'_> {
         for s in parsed {
             by.entry(s.record.machine.clone()).or_default().push(s);
         }
-        let present = self.state_present();
-        let mut fresh: Vec<oplog::Signed> = Vec::new();
-        let mut keys: BTreeMap<String, String> = BTreeMap::new();
-        for (machine, recs) in by.iter_mut() {
+        for recs in by.values_mut() {
             recs.sort_by_key(|s| s.record.seq);
+        }
+        let present = self.state_present();
+        let mut fresh: Vec<&oplog::Signed> = Vec::new();
+        // The state ids of the earlier fresh records: a record may not reuse one (O(1) per id).
+        let mut fresh_states: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut keys: BTreeMap<String, String> = BTreeMap::new();
+        for (machine, recs) in &by {
             let mut last = self.db.last_seq(machine)?;
             let first_seq = recs.first().ok_or_else(|| anyhow!("no records"))?.record.seq;
             let last_seq = recs.last().ok_or_else(|| anyhow!("no records"))?.record.seq.min(last);
@@ -2617,12 +2697,13 @@ impl LockedProject<'_> {
                 }
                 oplog::verify_line(&s.line, &key).with_context(|| format!("record {} of machine {machine}", s.record.seq))?;
                 for st in &s.record.states {
-                    if self.db.state(&st.id)?.is_some() || fresh.iter().any(|f| f.record.states.iter().any(|x| x.id == st.id)) {
+                    if self.db.state(&st.id)?.is_some() || fresh_states.contains(st.id.as_str()) {
                         bail!("record {} of machine {machine} reuses state id {}", s.record.seq, st.id);
                     }
                 }
+                fresh_states.extend(s.record.states.iter().map(|st| st.id.as_str()));
                 last = s.record.seq;
-                fresh.push(oplog::Signed { record: s.record.clone(), line: s.line.clone() });
+                fresh.push(s);
             }
         }
         // Limited machines (docs/ci-trust.md): their records outside their terms are stored but have no effect, and
@@ -2637,20 +2718,12 @@ impl LockedProject<'_> {
             }
         }
         if !matches!(trust, Trust::All | Trust::Server) {
-            let mut trusted: BTreeSet<String> = BTreeSet::new();
-            for m in keys.keys() {
-                if let Some(k) = self.db.trusted(m)? {
-                    if Some(&k) == keys.get(m) {
-                        trusted.insert(m.clone());
-                    }
-                }
-            }
+            let mut trusted = locally_trusted.clone();
             if let Trust::Peer(m, k) = trust {
                 if keys.get(m).map(|x| x == k).unwrap_or(false) {
                     trusted.insert(m.to_string());
                 }
             }
-            trusted.insert(self.store.machine.id.clone());
             loop {
                 let before = trusted.len();
                 for s in &fresh {
