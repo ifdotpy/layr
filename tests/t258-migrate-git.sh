@@ -76,7 +76,8 @@ check_all() { # check_all <project> <line folder>: every imported state checks o
 history "$B/git"
 # `init --from-git` makes the checkout the line in place: a clone for the second project, one to compare with.
 git clone -q "$B/git" "$B/git2" && git clone -q --bare "$B/git" "$B/ref"
-ok "a project is made from the Git history" "$LAYR" init gp --from-git "$B/git"
+# --snapshots: without it init migrates the project itself, and `layr migrate` below has nothing to do.
+ok "a project is made from the Git history" "$LAYR" init gp --from-git "$B/git" --snapshots
 cd "$B/git" || exit 1
 imports=$(DB gp "SELECT count(*) FROM states WHERE kind = 'import'")
 ok "the history imports as states" test "$imports" -ge 7
@@ -90,7 +91,7 @@ eq "a file reads back" "y" "$(l show main:src/y.txt)"
 
 # The same history with the full comparison for every state.
 cd "$B" || exit 1
-ok "a second project is made from the same history" "$LAYR" init gq --from-git "$B/git2"
+ok "a second project is made from the same history" "$LAYR" init gq --from-git "$B/git2" --snapshots
 cd "$B/git2" || exit 1
 out=$(LAYR_MIGRATE_VERIFY_GIT=0 l migrate 2>&1); rc=$?
 eq "the migration with checkouts passes" 0 "$rc"
