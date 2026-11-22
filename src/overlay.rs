@@ -287,8 +287,13 @@ pub struct Info {
     pub root: String,
 }
 
-/// A hidden overlay with its project, whose records hold its metadata (`Repo::hidden_overlays`).
-pub(crate) type HiddenOverlay<'a> = (String, Info, Project<'a>);
+/// An overlay with its metadata and its open project: the hidden overlays (`Repo::hidden_overlays`),
+/// whose project records hold their metadata, and the public ones that a caller opened (`Repo::open_layers`).
+pub(crate) type OpenOverlay<'a> = (String, Info, Repo<'a>);
+
+/// The most public overlays that `Repo::open_layers` keeps open (one database connection each). The
+/// others are opened again where they are read, as before.
+const OPEN_PUBLIC_OVERLAYS: usize = 32;
 
 /// Metadata and the local project opened for one overlay listing. Public overlays may have
 /// metadata without a local project; hidden overlays need their project to supply the metadata.
@@ -1637,16 +1642,30 @@ impl<'a> Repo<'a> {
     /// The setting `overlay.<name>.<suffix>`: in the project's records, or for a hidden overlay
     /// in the overlay's own records.
     pub fn overlay_setting(&self, name: &str, suffix: &str) -> Result<Option<serde_json::Value>> {
-        let project = self.hidden_settings_project(name)?;
-        project.as_ref().unwrap_or(&self.p).db.overlay_config(&format!("overlay.{name}.{suffix}"))
+        self.overlay_setting_with(name, suffix, None)
+    }
+
+    /// `overlay_setting`, with the project of the overlay when the caller has it open: the metadata
+    /// (a removal, the hidden flag) is read again, the project is not opened again.
+    fn overlay_setting_with(&self, name: &str, suffix: &str, open: Option<&Project<'a>>) -> Result<Option<serde_json::Value>> {
+        let key = format!("overlay.{name}.{suffix}");
+        let Some(op) = open else {
+            let project = self.hidden_settings_project(name)?;
+            return project.as_ref().unwrap_or(&self.p).db.overlay_config(&key);
+        };
+        let info = self.open_overlay_info_with(name, |_| Ok(Some(op)))?.and_then(|(info, _)| info);
+        let info = info.ok_or_else(|| self.no_overlay(name))?;
+        (if info.hidden { &op.db } else { &self.p.db }).overlay_config(&key)
+    }
+
+    fn no_overlay(&self, name: &str) -> anyhow::Error {
+        crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name))
     }
 
     /// Keep the project that supplied hidden metadata while reading its settings.
     fn hidden_settings_project(&self, name: &str) -> Result<Option<Project<'a>>> {
         let (info, project) = self.open_overlay_info(name)?;
-        let info = info.ok_or_else(|| {
-            crate::errors::error(crate::errors::Kind::Failed, format!("error: no overlay '{name}' in project {}", self.p.name))
-        })?;
+        let info = info.ok_or_else(|| self.no_overlay(name))?;
         if info.hidden {
             return project.map(Ok).unwrap_or_else(|| self.overlay_project(name)).map(Some);
         }
@@ -1861,26 +1880,55 @@ impl<'a> Repo<'a> {
     }
 
     pub fn overlay_repo(&self, name: &str) -> Result<Repo<'a>> {
-        Ok(Repo { restore_from_remote: self.restore_from_remote, p: self.overlay_project(name)?, ctx: self.ctx })
+        Ok(self.repo_of(self.overlay_project(name)?))
+    }
+
+    /// The repository of the overlay project `p` of this project.
+    fn repo_of(&self, p: Project<'a>) -> Repo<'a> {
+        Repo { restore_from_remote: self.restore_from_remote, p, ctx: self.ctx }
     }
 
     /// The user reads the overlay: the reader role in its policy (its owner is its admin).
     pub fn reads_overlay(&self, name: &str, uid: u32, gid: u32) -> Result<bool> {
+        self.reads_open_overlay(&[], name, uid, gid)
+    }
+
+    /// `reads_overlay`, reading the policy and settings of an overlay in `open` (`open_layers`)
+    /// through its open project. The check itself runs on every call: a grant can end, or a deny
+    /// come, between two calls of one command.
+    pub(crate) fn reads_open_overlay(&self, open: &[OpenOverlay<'a>], name: &str, uid: u32, gid: u32) -> Result<bool> {
+        self.reads_view(open, name, uid, gid, &mut Vec::new())
+    }
+
+    /// `reads_open_overlay` with the overlays of the view chain checked so far: a cycle is an error.
+    fn reads_view(&self, open: &[OpenOverlay<'a>], name: &str, uid: u32, gid: u32, seen: &mut Vec<String>) -> Result<bool> {
         if uid == 0 {
             return Ok(true);
         }
-        let op = self.overlay_project(name)?;
+        if seen.iter().any(|n| n == name) {
+            bail!("the view of overlay '{name}' is a cycle");
+        }
+        seen.push(name.to_string());
+        let opened;
+        let (op, is_open) = match open.iter().find(|(n, _, _)| n == name) {
+            Some((_, _, repo)) => (&repo.p, true),
+            None => {
+                opened = self.overlay_project(name)?;
+                (&opened, false)
+            }
+        };
         let who = match self.ctx.filter(|ctx| ctx.caller.uid == uid && ctx.caller.gid == gid) {
             Some(ctx) => Who::caller(&ctx.caller),
             None => Who::of(uid, gid),
         };
-        if Policy::load(&op).check(&who, "read").is_err() {
+        if Policy::load(op).check(&who, "read").is_err() {
             return Ok(false);
         }
         // The cache of the view of overlay X (docs/overlays.md section 1): only a reader of X reads it, also when
         // the cache's own readers are older than a change of X's readers.
-        match self.overlay_setting(name, VIEW)?.and_then(|v| v.as_str().map(str::to_owned)) {
-            Some(x) if x != name => self.reads_overlay(&x, uid, gid),
+        let view = self.overlay_setting_with(name, VIEW, is_open.then_some(op))?;
+        match view.and_then(|v| v.as_str().map(str::to_owned)) {
+            Some(x) if x != name => self.reads_view(open, &x, uid, gid, seen),
             _ => Ok(true),
         }
     }
@@ -1911,13 +1959,31 @@ impl<'a> Repo<'a> {
     }
 
     /// `layers` with the hidden overlays that the caller read once for many lines (`hidden_overlays`
-    /// reads every overlay setting of the project).
-    pub(crate) fn layers_in(&self, line: &Line, hidden: &[HiddenOverlay<'a>]) -> Result<Vec<Layer>> {
-        self.layers_with(line, hidden.iter().map(|(name, info, project)| (name.as_str(), info, project)))
+    /// reads every overlay setting of the project), and any other overlay it opened (`open_layers`).
+    pub(crate) fn layers_in(&self, line: &Line, open: &[OpenOverlay<'a>]) -> Result<Vec<Layer>> {
+        self.layers_with(line, open.iter().map(|(name, info, repo)| (name.as_str(), info, &repo.p)))
+    }
+
+    /// Add to `open` the overlays of `layers` that it lacks, each with its project and metadata, so
+    /// that `private_paths_in` and `reads_open_overlay` open none of them again; at most
+    /// `OPEN_PUBLIC_OVERLAYS` public ones. An overlay whose metadata or project cannot be read is left
+    /// out: the readers then open it as before.
+    pub(crate) fn open_layers(&self, open: &mut Vec<OpenOverlay<'a>>, layers: &[Layer]) {
+        for l in layers {
+            if open.iter().filter(|(_, info, _)| !info.hidden).count() >= OPEN_PUBLIC_OVERLAYS {
+                return;
+            }
+            if open.iter().any(|(name, _, _)| *name == l.overlay) {
+                continue;
+            }
+            let Ok((Some(info), project)) = self.open_overlay_info(&l.overlay) else { continue };
+            let Ok(op) = project.map(Ok).unwrap_or_else(|| self.overlay_project(&l.overlay)) else { continue };
+            open.push((l.overlay.clone(), info, self.repo_of(op)));
+        }
     }
 
     /// The hidden overlays of the project with their projects. Empty in an overlay project.
-    pub(crate) fn hidden_overlays(&self) -> Result<Vec<HiddenOverlay<'a>>> {
+    pub(crate) fn hidden_overlays(&self) -> Result<Vec<OpenOverlay<'a>>> {
         if self.p.is_overlay() {
             return Ok(Vec::new());
         }
@@ -1927,16 +1993,18 @@ impl<'a> Repo<'a> {
             let Ok((Some(info), project)) = self.open_overlay_info(&name) else { continue };
             if info.hidden {
                 let op = project.map(Ok).unwrap_or_else(|| self.overlay_project(&name))?;
-                out.push((name, info, op));
+                out.push((name, info, self.repo_of(op)));
             }
         }
         Ok(out)
     }
 
+    /// The layers of `line`. `open`: the hidden overlays of the project with their projects, and any
+    /// public overlay that the caller has open.
     fn layers_with<'b>(
         &self,
         line: &Line,
-        hidden_overlays: impl IntoIterator<Item = (&'b str, &'b Info, &'b Project<'a>)>,
+        open: impl IntoIterator<Item = (&'b str, &'b Info, &'b Project<'a>)>,
     ) -> Result<Vec<Layer>>
     where
         'a: 'b,
@@ -1950,13 +2018,18 @@ impl<'a> Repo<'a> {
             Some(names) => names,
             None => self.old_stack(line)?.into_iter().map(|l| l.overlay).collect(),
         };
+        // The overlays open here, hidden or not: a public one is not opened again.
+        let open: Vec<(&'b str, &'b Info, &'b Project<'a>)> = open.into_iter().collect();
+        // O(overlays) per name: a project holds few overlays.
+        let open_of = |name: &str| open.iter().find(|(n, _, _)| *n == name).map(|(_, _, op)| *op);
         let mut layers = Vec::new();
         for name in names {
-            if let Some(l) = self.overlay_layer(Some(line), &line.head, &name)? {
+            if let Some(l) = self.overlay_layer_with(Some(line), &line.head, &name, open_of(&name))? {
                 layers.push(l);
             }
         }
-        let hidden_overlays: Vec<(&'b str, &'b Info, &'b Project<'a>)> = hidden_overlays.into_iter().collect();
+        let hidden_overlays: Vec<(&'b str, &'b Info, &'b Project<'a>)> =
+            open.iter().filter(|(_, info, _)| info.hidden).copied().collect();
         // The layer of a hidden overlay that the owner reads: the head of the line on it, else the part of the head.
         let hidden_layer = |name: &str, info: &Info, op: &Project| -> Result<Option<Layer>> {
             if !Self::project_reads(op, line.owner) {
@@ -2010,7 +2083,7 @@ impl<'a> Repo<'a> {
             let layer = match hidden_overlays.iter().find(|(n, _, _)| *n == name) {
                 Some((n, info, op)) => hidden_layer(n, info, op)?,
                 None if self.overlay_info(&name)?.is_some_and(|i| !i.hidden) => {
-                    self.overlay_layer(Some(line), &line.head, &name)?
+                    self.overlay_layer_with(Some(line), &line.head, &name, open_of(&name))?
                 }
                 None => None,
             };
@@ -2111,10 +2184,27 @@ impl<'a> Repo<'a> {
     /// state names. Else the empty first state of the overlay. None for an overlay that is not on
     /// this machine.
     pub fn overlay_layer(&self, line: Option<&Line>, state: &str, name: &str) -> Result<Option<Layer>> {
-        let Some(info) = self.overlay_info(name)? else { return Ok(None) };
+        self.overlay_layer_with(line, state, name, None)
+    }
+
+    /// `overlay_layer` with the project of the overlay when the caller has it open.
+    fn overlay_layer_with(
+        &self,
+        line: Option<&Line>,
+        state: &str,
+        name: &str,
+        open: Option<&Project<'a>>,
+    ) -> Result<Option<Layer>> {
+        // The metadata is read again (a removed overlay has no layer); an open project is not opened again.
+        let info = match open {
+            Some(op) => self.open_overlay_info_with(name, |_| Ok(Some(op)))?.and_then(|(info, _)| info),
+            None => self.overlay_info(name)?,
+        };
+        let Some(info) = info else { return Ok(None) };
         let mut layer = Layer { overlay: name.to_string(), state: info.root.clone() };
         if let Some(line) = line.filter(|l| l.head == state) {
-            if let Ok(op) = self.overlay_project(name) {
+            let opened = if open.is_none() { self.overlay_project(name).ok() } else { None };
+            if let Some(op) = open.or(opened.as_ref()) {
                 if let Some(ol) = find_overlay_line(&op.db, &info, line)? {
                     layer.state = ol.head;
                     return Ok(Some(layer));
@@ -2614,13 +2704,9 @@ impl<'a> Repo<'a> {
         self.private_paths_in(line, &self.layers_in(line, &hidden)?, &hidden)
     }
 
-    /// `private_paths` of a line whose layers the caller read with the same hidden overlays (`layers_in`).
-    pub(crate) fn private_paths_in(
-        &self,
-        line: &Line,
-        layers: &[Layer],
-        hidden: &[HiddenOverlay<'a>],
-    ) -> Result<BTreeSet<String>> {
+    /// `private_paths` of a line whose layers the caller read with the same overlays (`layers_in`).
+    /// The overlays in `open` (`hidden_overlays`, `open_layers`) are not opened again.
+    pub(crate) fn private_paths_in(&self, line: &Line, layers: &[Layer], open: &[OpenOverlay<'a>]) -> Result<BTreeSet<String>> {
         let mut out = BTreeSet::new();
         if self.p.is_overlay() {
             return Ok(out);
@@ -2628,8 +2714,8 @@ impl<'a> Repo<'a> {
         for l in layers {
             let project;
             let public_info;
-            let (op, info) = match hidden.iter().find(|(name, _, _)| name == &l.overlay) {
-                Some((_, info, op)) => (op, Some(info)),
+            let (op, info) = match open.iter().find(|(name, _, _)| name == &l.overlay) {
+                Some((_, info, repo)) => (&repo.p, Some(info)),
                 None => {
                     project = match self.overlay_project(&l.overlay) {
                         Ok(p) => p,

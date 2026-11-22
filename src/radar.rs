@@ -16,7 +16,7 @@ use crate::ctx::Ctx;
 use crate::fsutil::{self, Src};
 use crate::ignore_rules::Rules;
 use crate::model::Line;
-use crate::overlay::Layer;
+use crate::overlay::{Layer, OpenOverlay};
 use crate::repo::{skip_path, Repo, Snap};
 use anyhow::{anyhow, Result};
 use layr_hashers::{Digest, GitCompatible};
@@ -352,11 +352,12 @@ fn run_compares(jobs: &[StateCompare]) -> Result<Vec<Vec<Found>>> {
     })?
 }
 
-/// The state compares and live compares of one `overlaps` call. Each one runs once.
+/// The state compares and live compares of one `overlaps` call. Each one runs once, and each
+/// state tree is read once for all the lines (`Repo::tree`).
 #[derive(Default)]
 struct Work {
-    /// Our head as a tree, read once for the whole call. `None` when it is unreadable.
-    head_src: Option<Snap>,
+    /// The trees read, by project and state.
+    trees: BTreeMap<(String, String), Snap>,
     /// The saved compares: base -> their head, our base -> head, and overlay layers.
     jobs: Vec<StateCompare>,
     /// Our saved compare per merge base: the index in `jobs`.
@@ -427,9 +428,8 @@ impl OurBase {
 struct OtherPlan {
     name: String,
     owner: u32,
-    /// The merge base with this line, as a tree. `our_base` plans our compare against it.
+    /// The merge base with this line (its tree is the base of `job`). `our_base` plans our compare against it.
     base: String,
-    base_src: Snap,
     our_base: OurBase,
     their_private: BTreeSet<String>,
     hidden: BTreeSet<String>,
@@ -447,7 +447,7 @@ struct LayerPlan {
     job: usize,
 }
 
-impl Repo<'_> {
+impl<'a> Repo<'a> {
     /// The saved state compares of this project (the states live in this project's store).
     fn compare_dir(&self) -> PathBuf {
         self.p.meta_dir().join(COMPARE_DIR)
@@ -485,19 +485,47 @@ impl Repo<'_> {
 
     /// The paths of `line` that the caller must not see: its private paths when one of its `layers` is an
     /// overlay that the caller cannot read, and its pending moves to such overlays.
-    fn radar_hidden(&self, ctx: &Ctx, line: &Line, layers: &[Layer], private: &BTreeSet<String>) -> BTreeSet<String> {
+    fn radar_hidden(
+        &self,
+        ctx: &Ctx,
+        line: &Line,
+        layers: &[Layer],
+        private: &BTreeSet<String>,
+        open: &[OpenOverlay<'a>],
+    ) -> BTreeSet<String> {
         let mut hidden = BTreeSet::new();
-        if layers.iter().any(|layer| !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)) {
+        if layers.iter().any(|layer| !self.caller_reads(ctx, &layer.overlay, open)) {
             // Include earlier and newer private paths, so deletions cannot expose names.
             hidden.extend(private.iter().cloned());
         }
         for (path, overlay) in self.pending_moves(line) {
             // A move to `main` is a move to the public layer: its reader is every reader of the project.
-            if overlay != crate::overlay::MAIN && !self.reads_overlay(&overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+            if overlay != crate::overlay::MAIN && !self.caller_reads(ctx, &overlay, open) {
                 hidden.insert(path);
             }
         }
         hidden
+    }
+
+    /// Whether the caller reads the overlay `name` (`reads_overlay`; an error reads nothing). Asked
+    /// again at every use, through the projects in `open`.
+    fn caller_reads(&self, ctx: &Ctx, name: &str, open: &[OpenOverlay<'a>]) -> bool {
+        self.reads_open_overlay(open, name, ctx.caller.uid, ctx.caller.gid).unwrap_or(false)
+    }
+
+    /// `state_src` of a state of this project, read once per call. An error is not kept: the next
+    /// call reads again.
+    fn tree(&self, id: &str, work: &mut Work) -> Result<Snap> {
+        let key = (self.p.name.clone(), id.to_string());
+        if let Some(tree) = work.trees.get(&key) {
+            return Ok(tree.clone());
+        }
+        let tree = {
+            let _t = crate::trace::span("overlap state read");
+            self.state_src(id)?
+        };
+        work.trees.insert(key, tree.clone());
+        Ok(tree)
     }
 
     /// The tree of our working folder to compare. APFS compares the live folder, as status does:
@@ -515,12 +543,8 @@ impl Repo<'_> {
     /// Our head -> live folder compare: one per call, shared by all merge bases.
     fn our_head_live(&self, line: &Line, live: &Path, rules: &Rules, work: &mut Work) -> Result<()> {
         if work.head_live.is_none() {
-            work.head_live = Some(match self.state_src(&line.head) {
-                Ok(head) => {
-                    let found = self.live_compare(line, &head, live, rules)?;
-                    work.head_src = Some(head);
-                    Some(found)
-                }
+            work.head_live = Some(match self.tree(&line.head, work) {
+                Ok(head) => Some(self.live_compare(line, &head, live, rules)?),
                 Err(_) => None,
             });
         }
@@ -531,7 +555,10 @@ impl Repo<'_> {
     /// when the head and the scan of the folder (every path, its metadata and data identity) are
     /// the same. The compare reads only those, so the result is the same. Other platforms compare.
     fn live_compare(&self, line: &Line, head: &Snap, live: &Path, rules: &Rules) -> Result<LiveChanges> {
-        let digest = scan_digest(live, rules)?;
+        let digest = {
+            let _t = crate::trace::span("overlap scan digest");
+            scan_digest(live, rules)?
+        };
         let file = self.p.meta_dir().join(LIVE_DIR).join(format!("{}.json", line.id));
         if let Some(digest) = &digest {
             let saved = std::fs::read(&file).ok().and_then(|raw| serde_json::from_slice::<SavedLive>(&raw).ok());
@@ -559,11 +586,12 @@ impl Repo<'_> {
             if let Some(job) = work.ours_jobs.get(base) {
                 return Ok(Some(*job));
             }
-            let (true, Some(head)) = (matches!(work.head_live, Some(Some(_))), work.head_src.clone()) else {
+            if !matches!(work.head_live, Some(Some(_))) {
                 return Ok(None);
-            };
+            }
             let job = work.jobs.len();
-            let state = StateCompare::new(&self.compare_dir(), base, &line.head, self.state_src(base)?, head);
+            let state =
+                StateCompare::new(&self.compare_dir(), base, &line.head, self.tree(base, work)?, self.tree(&line.head, work)?);
             work.jobs.push(state);
             work.ours_jobs.insert(base.to_string(), job);
             Ok(Some(job))
@@ -588,50 +616,67 @@ impl Repo<'_> {
         let mut ours: Option<(Option<crate::repo::Temp>, PathBuf)> = None;
         let ignored = Rules::new(&self.working(line));
         // The hidden overlays are read once for all lines: reading them reads every overlay setting.
-        let hidden_overlays = self.hidden_overlays()?;
-        let our_layers = self.layers_in(line, &hidden_overlays)?;
-        let our_private = self.private_paths_in(line, &our_layers, &hidden_overlays)?;
-        let our_hidden = self.radar_hidden(ctx, line, &our_layers, &our_private);
+        // The other overlays of the layers join them when first seen (`open_layers`).
+        let mut open = self.hidden_overlays()?;
+        let our_layers = self.layers_in(line, &open)?;
+        self.open_layers(&mut open, &our_layers);
+        let our_private = self.private_paths_in(line, &our_layers, &open)?;
         let mut work = Work::default();
+        let our_hidden = self.radar_hidden(ctx, line, &our_layers, &our_private, &open);
         let mut plans: Vec<OtherPlan> = Vec::new();
         // The merge bases of all lines come from one read of the history.
         let history = if lines.is_empty() { None } else { Some(self.history()?) };
         // Step 1, on this thread: the live parts and the state lookups (`Repo` is not `Sync`).
         let step1 = crate::trace::span("overlap step 1");
         let source = self.source_id(&line.head)?;
+        // The time of each kind of lookup, summed over the lines.
+        let (mut t_bases, mut t_trees, mut t_states) = (
+            crate::trace::sum("overlap merge bases"),
+            crate::trace::sum("overlap state trees"),
+            crate::trace::sum("overlap their states"),
+        );
+        let (mut t_layers, mut t_plans) = (crate::trace::sum("overlap their layers"), crate::trace::sum("overlap overlay plans"));
         for other in lines {
-            let other_source = self.source_id(&other.head)?;
-            let found = match history.as_ref().and_then(|h| h.merge_base(&source, &other_source)) {
-                Some(found) => found,
-                None => self.merge_base(&source, &other_source)?,
-            };
+            let found = t_bases.time(|| -> Result<_> {
+                let other_source = self.source_id(&other.head)?;
+                match history.as_ref().and_then(|h| h.merge_base(&source, &other_source)) {
+                    Some(found) => Ok(found),
+                    None => self.merge_base(&source, &other_source),
+                }
+            })?;
             let Some(base) = found else { continue };
-            let root = match self.state_src(&base) {
+            let root = match t_trees.time(|| self.tree(&base, &mut work)) {
                 Ok(root) => root,
                 Err(_) => continue,
             };
             // A line whose head cannot be read (#452) is left out, as an unreadable base is.
-            let head = self.state(&other.head)?;
-            let state = self.last_auto(&other)?.filter(|s| s.time >= head.time).unwrap_or(head);
-            let Ok(theirs) = self.state_src(&state.id) else { continue };
+            let state = t_states.time(|| -> Result<_> {
+                let head = self.state(&other.head)?;
+                Ok(self.last_auto_since(&other, head.time)?.unwrap_or(head))
+            })?;
+            let Ok(theirs) = t_trees.time(|| self.tree(&state.id, &mut work)) else { continue };
             if ours.is_none() {
+                let _t = crate::trace::span("overlap capture");
                 ours = Some(self.radar_tree(line)?);
             }
             let ours_root = &ours.as_ref().expect("scanned above").1;
             self.our_head_live(line, ours_root, &ignored, &mut work)?;
             let our_base = self.our_base_job(line, &base, &mut work)?;
             // show <state>:<path> and try use project read access for both head and auto states.
-            let their_layers = self.layers_in(&other, &hidden_overlays)?;
-            let their_private = self.private_paths_in(&other, &their_layers, &hidden_overlays)?;
-            let hidden = self.radar_hidden(ctx, &other, &their_layers, &their_private);
+            let (their_layers, their_private, hidden) = t_layers.time(|| -> Result<_> {
+                let their_layers = self.layers_in(&other, &open)?;
+                self.open_layers(&mut open, &their_layers);
+                let their_private = self.private_paths_in(&other, &their_layers, &open)?;
+                let hidden = self.radar_hidden(ctx, &other, &their_layers, &their_private, &open);
+                Ok((their_layers, their_private, hidden))
+            })?;
             let job = work.jobs.len();
-            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root.clone(), theirs));
-            let layers = self.overlay_plans(ctx, &our_layers, &their_layers, ours_root, &mut work)?;
+            work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root, theirs));
+            let layers = t_plans.time(|| self.overlay_plans(ctx, &open, &our_layers, &their_layers, ours_root, &mut work))?;
             plans.push(OtherPlan {
                 name: other.name.clone(),
                 owner: other.owner,
                 base,
-                base_src: root,
                 our_base,
                 their_private,
                 hidden,
@@ -640,6 +685,7 @@ impl Repo<'_> {
                 layers,
             });
         }
+        drop((t_bases, t_trees, t_states, t_layers, t_plans));
         drop(step1);
         // Step 2: the saved state compares, in parallel.
         let found = {
@@ -659,7 +705,14 @@ impl Repo<'_> {
                     Entry::Vacant(new) => {
                         let _t = crate::trace::span("overlap ours changes");
                         let head_live = work.head_live.as_ref().and_then(Option::as_ref);
-                        new.insert(p.our_base.changes(&p.base_src, ours_root, &ignored, &our_private, &found, head_live)?)
+                        new.insert(p.our_base.changes(
+                            &work.jobs[p.job].base,
+                            ours_root,
+                            &ignored,
+                            &our_private,
+                            &found,
+                            head_live,
+                        )?)
                     }
                 };
                 let mut theirs = visible(&found[p.job], &p.their_private, &ignored);
@@ -673,10 +726,9 @@ impl Repo<'_> {
                     let ours_layer = match layer_keys.entry((layer.overlay.clone(), layer.base.clone())) {
                         Entry::Occupied(known) => known.into_mut(),
                         Entry::Vacant(new) => {
-                            let base_src = self.overlay_repo(&layer.overlay)?.state_src(&layer.base)?;
                             let layer_live = work.layer_live.get(&layer.overlay).and_then(Option::as_ref);
                             new.insert(layer.our_base.changes(
-                                &base_src,
+                                &work.jobs[layer.job].base,
                                 ours_root,
                                 &overlay_rules,
                                 &our_hidden,
@@ -701,9 +753,11 @@ impl Repo<'_> {
 
     /// The overlay layers that both lines hold: the state compares as jobs, and our overlay head
     /// compared with the live folder once per overlay.
+    /// `open`: the overlays open for the call, whose projects are not opened again.
     fn overlay_plans(
         &self,
         ctx: &Ctx,
+        open: &[OpenOverlay<'a>],
         our_layers: &[Layer],
         their_layers: &[Layer],
         ours: &Path,
@@ -711,14 +765,21 @@ impl Repo<'_> {
     ) -> Result<Vec<LayerPlan>> {
         let mut plans = Vec::new();
         for layer in our_layers {
-            if !self.reads_overlay(&layer.overlay, ctx.caller.uid, ctx.caller.gid).unwrap_or(false) {
+            if !self.caller_reads(ctx, &layer.overlay, open) {
                 continue;
             }
             let theirs = match their_layers.iter().find(|other| other.overlay == layer.overlay) {
                 Some(l) => l,
                 None => continue,
             };
-            let repo = self.overlay_repo(&layer.overlay)?;
+            let opened;
+            let repo = match open.iter().find(|(name, _, _)| *name == layer.overlay) {
+                Some((_, _, repo)) => repo,
+                None => {
+                    opened = self.overlay_repo(&layer.overlay)?;
+                    &opened
+                }
+            };
             // Use the same policy as show/try for this overlay's immutable states.
             if repo.can_read(ctx).is_err() {
                 continue;
@@ -727,16 +788,16 @@ impl Repo<'_> {
                 Some(base) => base,
                 None => continue,
             };
-            let base_root = match repo.state_src(&base) {
+            let base_root = match repo.tree(&base, work) {
                 Ok(root) => root,
                 Err(_) => continue,
             };
-            let their_root = match repo.state_src(&theirs.state) {
+            let their_root = match repo.tree(&theirs.state, work) {
                 Ok(root) => root,
                 Err(_) => continue,
             };
             if !work.layer_live.contains_key(&layer.overlay) {
-                let live = match repo.state_src(&layer.state) {
+                let live = match repo.tree(&layer.state, work) {
                     Ok(head) => {
                         let _t = crate::trace::span("overlap live compare");
                         Some(compare_live(&head, ours, &Rules::new(ours))?)
@@ -755,8 +816,8 @@ impl Repo<'_> {
                             &repo.compare_dir(),
                             &base,
                             &layer.state,
-                            repo.state_src(&base)?,
-                            repo.state_src(&layer.state)?,
+                            base_root.clone(),
+                            repo.tree(&layer.state, work)?,
                         );
                         work.jobs.push(state);
                         work.layer_jobs.insert(key, job);

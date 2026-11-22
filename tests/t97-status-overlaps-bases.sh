@@ -1,8 +1,9 @@
 #!/bin/bash
 # ci: macos overlayfs
-# `layr status` compares our live folder once per call, not once per merge base. Each base gets
-# the saved compare of the base and our head, combined with one live compare of our head. The
-# overlaps equal the direct compare: the rows below are the 0.13.1 output. LAYR_OLD=<0.13.1 binary>
+# `layr status` compares our live folder once per call, not once per merge base, and reads each
+# state tree once for all the lines. Each base gets the saved compare of the base and our head,
+# combined with one live compare of our head. The overlaps equal the direct compare: the rows below
+# are the 0.13.1 output. LAYR_OLD=<0.13.1 binary>
 # also compares the full overlap JSON (owner and changed_at) with that binary.
 . "$(dirname "$0")/lib.sh"
 
@@ -63,6 +64,10 @@ warm_miss=$(grep -c "overlap compare miss" $T/trace2)
 ok "the cold status compares the live folder once ($cold_live)" test "$cold_live" -eq 1
 ok "the warm status compares the live folder at most once ($warm_live)" test "$warm_live" -le 1
 ok "the warm status computes no state compare ($warm_miss)" test "$warm_miss" -eq 0
+# Each state tree is read once for all the lines (`Repo::tree`): S0, S1, S2 and the heads of A to F,
+# though the seven other lines look up 14 trees (their merge base and their state).
+eq "the warm status reads each of the 9 state trees once" 9 "$(grep -c 'overlap state read$' $T/trace2)"
+has "the warm status looks up 14 trees" "overlap state trees (14 calls)" "$(cat $T/trace2)"
 eq "status lists the overlaps of the six bases" "$EXPECT" "$(pairs)"
 eq "a file edited back to its base content is no overlap" 0 "$(pairs | grep -c '^x.txt C$')"
 if [ -n "${LAYR_OLD:-}" ]; then

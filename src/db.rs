@@ -1110,10 +1110,25 @@ impl Db {
 
     /// States of a kind for a line, newest first.
     pub fn line_states(&self, line: &str, kind: StateKind) -> Result<Vec<StateRec>> {
-        let mut st = self.conn.prepare_cached(
+        self.state_recs(
             "SELECT rec FROM states WHERE line=?1 AND kind=?2 AND deleted=0 AND dropped=0 ORDER BY time DESC, id DESC",
-        )?;
-        let v = st.query_map(params![line, kind_str(kind)], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            params![line, kind_str(kind)],
+        )
+    }
+
+    /// `line_states` made at `time` (milliseconds) or later, newest first. A separate statement, so
+    /// the range uses the index `states_line(line, kind, time)`.
+    pub fn line_states_since(&self, line: &str, kind: StateKind, time: i64) -> Result<Vec<StateRec>> {
+        self.state_recs(
+            "SELECT rec FROM states WHERE line=?1 AND kind=?2 AND time>=?3 AND deleted=0 AND dropped=0 ORDER BY time DESC, id DESC",
+            params![line, kind_str(kind), time],
+        )
+    }
+
+    /// The state records that `sql` selects (one `rec` column), in its order.
+    fn state_recs(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<StateRec>> {
+        let mut st = self.conn.prepare_cached(sql)?;
+        let v = st.query_map(params, |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
         v.into_iter().map(|r| Ok(serde_json::from_str(&r)?)).collect()
     }
 
@@ -2694,6 +2709,42 @@ mod view_tests {
             [],
         )?;
         assert_eq!(db.check_exit(&subject, &argv, None)?, Some(7));
+        drop(db);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod line_state_tests {
+    use super::*;
+
+    /// `line_states_since` reads the states of one line and kind made at the time or later, newest
+    /// first, and `line_states` all of them: the rows before the time are not read.
+    #[test]
+    fn states_since_a_time_are_the_newest_of_all_states() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("layr-line-states-{}", crate::ids::new_id()));
+        std::fs::create_dir(&path)?;
+        let db = Db::open(&path.join("test.sqlite"))?;
+        for (id, kind, line, time) in [
+            ("a1", "auto", "l", Some(10)),
+            ("a2", "auto", "l", Some(20)),
+            ("a3", "auto", "l", Some(30)),
+            ("an", "auto", "l", None),
+            ("c", "commit", "l", Some(25)),
+            ("o", "auto", "other", Some(40)),
+        ] {
+            let rec = serde_json::json!({"id": id, "kind": kind, "line": line, "subvol": "", "author": {"name": "t", "email": "t"}, "time": time.unwrap_or(0)});
+            db.conn.execute(
+                "INSERT INTO states(id, display, kind, line, time, rec) VALUES(?1,?1,?2,?3,?4,?5)",
+                params![id, kind, line, time, rec.to_string()],
+            )?;
+        }
+        let ids = |v: Vec<StateRec>| v.into_iter().map(|s| s.id).collect::<Vec<_>>();
+        // A row without an indexed time is read when no time is given, never with one.
+        assert_eq!(ids(db.line_states("l", StateKind::Auto)?), ["a3", "a2", "a1", "an"]);
+        assert_eq!(ids(db.line_states_since("l", StateKind::Auto, 20)?), ["a3", "a2"]);
+        assert_eq!(ids(db.line_states_since("l", StateKind::Auto, 31)?), Vec::<String>::new());
         drop(db);
         std::fs::remove_dir_all(path)?;
         Ok(())

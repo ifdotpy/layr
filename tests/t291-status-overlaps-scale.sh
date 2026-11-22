@@ -1,8 +1,9 @@
 #!/bin/bash
 # ci: macos overlayfs
 # `layr status` reads the overlays of the project once for all the other lines that it compares
-# with, not once per line: the overlay settings and the hidden overlay projects are per command.
-# With 4 or 16 other lines the status opens the project of the hidden overlay equally often.
+# with, not once per line: the overlay settings, the hidden overlay projects and the public overlay
+# that the lines show (its project, its readers and the trees of its states) are per command. With 4
+# or 16 other lines the status opens the project of each overlay equally often.
 . "$(dirname "$0")/lib.sh"
 
 mkdir -p $T/src
@@ -13,7 +14,9 @@ cd $P/main || exit 1
 l protect main --remove >/dev/null 2>&1 || true
 l overlay create secret --hidden -q
 for n in 1 2 3; do l overlay create pub$n -q; done
-l overlay use main -q
+l overlay use pub1 -q
+printf 'p\n' > p.txt && l add p.txt >/dev/null && l save -qm p >/dev/null
+l overlay move pub1 p.txt >/dev/null && l save -qm 'p to pub1' >/dev/null
 
 l line new -q k1 >/dev/null
 cd $P/k1 && echo one >> a.txt && l save -qam one >/dev/null
@@ -22,18 +25,21 @@ cd $P/main && l line new -q mine >/dev/null
 cd $P/mine || exit 1
 echo mine >> a.txt
 
-opens() { # the opens of the hidden overlay's project in one status of this line
-    LAYR_TRACE=1 l status 2>&1 >/dev/null | grep -c 'open project q%secret$'
+opens() { # the opens of the project of overlay $1 in one status of this line
+    LAYR_TRACE=1 l status 2>&1 >/dev/null | grep -c "open project q%$1\$"
 }
 # The first status after new lines does one-time work there: count the next one.
 l status >/dev/null
-few=$(opens)
+few=$(opens secret)
+few_public=$(opens pub1)
 ok "status opens the hidden overlay project at least once" test "$few" -gt 0
+ok "status opens the public overlay project at least once" test "$few_public" -gt 0
 eq "status lists the overlap with k1" "a.txt k1" "$(l status --json | python3 -c 'import json,sys
 for x in json.load(sys.stdin)["overlaps"]: print(x["path"], x["line"])')"
 cd $P/main && l line new -q j --count 12 >/dev/null
 cd $P/mine || exit 1
 l status >/dev/null
-eq "status with 16 other lines opens the hidden overlay as often as with 4 ($few)" "$few" "$(opens)"
+eq "status with 16 other lines opens the hidden overlay as often as with 4 ($few)" "$few" "$(opens secret)"
+eq "status with 16 other lines opens the public overlay as often as with 4 ($few_public)" "$few_public" "$(opens pub1)"
 
 finish
