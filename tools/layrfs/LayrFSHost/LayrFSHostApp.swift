@@ -2,8 +2,8 @@
 //
 // Without arguments it opens a window; when the extension is off, it also opens the settings
 // pane where a person turns it on. For layr (no window):
-//   LayrFSHost --status         prints "enabled", "disabled" or "missing" and exits
-//   LayrFSHost --open-settings  opens the settings pane and exits
+//   Layr --status         prints "enabled", "disabled" or "missing" and exits
+//   Layr --open-settings  opens the settings pane and exits
 
 import FSKit
 import SwiftUI

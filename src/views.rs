@@ -66,7 +66,7 @@ pub fn fast_available(repo: &Repo, start: &str) -> std::result::Result<(), Strin
     // The LayrFS file system extension (FSKit) serves the folder of a fast line.
     let Some(app) = fskit_host_app() else {
         return Err(format!(
-            "the LayrFS file system extension ({FSKIT_MODULE}) is not installed: install LayrFSHost.app, open it once, \
+            "the LayrFS file system extension ({FSKIT_MODULE}) is not installed: install Layr.app, open it once, \
              and turn LayrFS on in System Settings > General > Login Items & Extensions > File System Extensions"
         ));
     };
@@ -100,11 +100,13 @@ fn fskit_host_app() -> Option<PathBuf> {
     appex.ancestors().nth(3).map(Path::to_path_buf)
 }
 
-/// `LayrFSHost --status` of the host app: "enabled", "disabled" or "missing". None when it
+/// `Layr --status` of the host app: "enabled", "disabled" or "missing". None when it
 /// fails or gives no answer in five seconds (an older app without the option opens a window).
 fn host_app_status(app: &Path) -> Option<String> {
     use std::time::{Duration, Instant};
-    let mut child = std::process::Command::new(app.join("Contents/MacOS/LayrFSHost"))
+    // Layr.app; apps up to 0.53 were LayrFSHost.app.
+    let bin = ["Contents/MacOS/Layr", "Contents/MacOS/LayrFSHost"].iter().map(|b| app.join(b)).find(|b| b.is_file())?;
+    let mut child = std::process::Command::new(bin)
         .arg("--status")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

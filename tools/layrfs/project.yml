@@ -26,9 +26,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.layr.fshost
-        PRODUCT_NAME: LayrFSHost
+        PRODUCT_NAME: Layr
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: LayrFS Host
+        INFOPLIST_KEY_CFBundleDisplayName: Layr
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         ENABLE_APP_SANDBOX: NO
     dependencies:
