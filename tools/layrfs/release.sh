@@ -73,7 +73,10 @@ else
 fi
 
 codesign --verify --deep --strict $APP
-codesign -dvv $APP 2>&1 | grep -q "Authority=Developer ID Application" ||
+# The output first, then the test: with pipefail, grep -q ends the pipe early and codesign fails on the closed
+# pipe, so a signed app counted as unsigned (2026-11-22).
+signature=$(codesign -dvv $APP 2>&1)
+[[ "$signature" == *"Authority=Developer ID Application"* ]] ||
     { echo "the app is not signed with Developer ID" >&2; exit 1; }
 codesign -d --entitlements - $APP/Contents/Extensions/LayrFS.appex 2>/dev/null | grep -q com.apple.developer.fskit.fsmodule ||
     { echo "the extension lacks the FSKit entitlement" >&2; exit 1; }
