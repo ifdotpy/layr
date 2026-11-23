@@ -112,6 +112,11 @@ to the check job script of Layr Cloud (`infra/aws/ci_job.py` of project
 `layr-cloud`). The watcher then adds the Rust toolchain that a state pins and the
 crates of its `Cargo.lock` to the check seed before the check, as the AWS check job
 does. Without the seed, each state that pins a newer Rust fails `unit` in seconds.
+`LAYR_CHECK_PREPARE` can name the seed command of the project, for example
+`bash tools/checks/prepare-linux.sh` of `layr-cloud`. Set `LAYR_MERGE_MACHINE` to the
+merge machine of the project too. The watcher then runs the command as root with network
+in that machine's head of main, once for each new head, as the AWS check job does.
+Without it, a change that moves a git pin fails each check offline in seconds.
 
 ```sh
 systemctl status layr-runner-daemon layr-checks@PROJECT layr-sync@PROJECT.timer

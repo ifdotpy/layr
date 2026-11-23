@@ -98,5 +98,46 @@ class Signal(unittest.TestCase):
         self.assertEqual(runner.calls[0][0], ('push', 'origin', '--no-cache-sweep'))
 
 
+class Prepare(unittest.TestCase):
+    """The seed command runs once for each head of main that the merge machine moves."""
+
+    def runner(self, command='bash tools/checks/prepare-linux.sh', machine='m1'):
+        runner = watch.Runner.__new__(watch.Runner)
+        runner.project, runner.calls = 'p', []
+        runner.prepare_command, runner.merge_machine = watch.shlex.split(command), machine
+        runner.head = 'h1'
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        watch.WAIT_DIR = folder.name
+
+        class Done:
+            def __init__(self, stdout=''):
+                self.returncode, self.stderr, self.stdout = 0, '', stdout
+
+        def layr(*args, timeout=1800):
+            runner.calls.append(args)
+            return Done(runner.head + '\n' if 'rev-parse' in args else '')
+        runner.layr = layr
+        return runner
+
+    def tries(self, runner):
+        return [args for args in runner.calls if 'try' in args]
+
+    def test_a_new_head_runs_the_command_once_in_that_head(self):
+        runner = self.runner()
+        runner.prepare()
+        runner.prepare()
+        self.assertIn(('--line', 'main', 'rev-parse', 'main@m1'), runner.calls)
+        self.assertEqual(self.tries(runner), [('--line', 'main', 'try', 'h1', '--', 'bash', 'tools/checks/prepare-linux.sh')])
+        runner.head = 'h2'
+        runner.prepare()
+        self.assertEqual(len(self.tries(runner)), 2)
+
+    def test_no_command_runs_nothing(self):
+        runner = self.runner(command='')
+        runner.prepare()
+        self.assertEqual(runner.calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()
