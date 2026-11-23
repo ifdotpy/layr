@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.53.0](https://github.com/ifdotpy/layr/compare/v0.52.0...v0.53.0) (2026-11-23)
+
+
+### Features
+
+* **remote:** Add layr wait, and run the scoped checks on a signal
+
+
+### Bug Fixes
+
+* **layrfs:** Read the signature of the app before testing it
+* **layrfs:** A tool server in another mount namespace leaves the tool to the real one
+
+
+### Performance Improvements
+
+* **checks:** Run one macOS test per core, the longest first
+
+
 ## [0.52.0](https://github.com/ifdotpy/layr/compare/v0.51.7...v0.52.0) (2026-11-22)
 
 
