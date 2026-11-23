@@ -73,12 +73,13 @@ finally:
     if moved:
         hidden.rename(work)
 
-# A settled initial scan is deliberate: files in the cache's clock tick must be rehashed.
-time.sleep(1.1)
+# A settled initial scan is deliberate: files in the cache's clock tick must be rehashed. A stamp
+# in second s is trusted from s + 2.
+time.sleep(2)
 assert same("first comparison").stdout == ""
 # Background work after the migration (owner normalization) can touch entries within the first scan's
 # clock tick: those stay racy once. A comparison a tick later saves a settled cache.
-time.sleep(1.1)
+time.sleep(2)
 assert same("settled comparison").stdout == ""
 assert same("second clean status hashes zero files", hashes=0).stdout == ""
 os.utime(work / "f0", ns=(0, time.time_ns()))

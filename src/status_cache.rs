@@ -65,8 +65,10 @@ impl FileFingerprint {
         let Self::Verified { stat, .. } = self else { return false };
         // Use a full second, even on nanosecond filesystems: this also covers timestamps
         // rounded by copies and filesystems with coarse clocks. Future dates stay racy.
-        // The timestamp is taken BEFORE scanning/reading, never after the comparison.
-        let older = |t: &Timestamp| t.seconds < 0 || u64::try_from(t.seconds).is_ok_and(|s| s < written);
+        // The timestamp is taken BEFORE scanning/reading, never after the comparison. A stamp in
+        // second s can be s.999 and `written` is whole seconds: only s + 2 <= written leaves a
+        // full second between them.
+        let older = |t: &Timestamp| t.seconds < 0 || u64::try_from(t.seconds).is_ok_and(|s| s.saturating_add(1) < written);
         older(&stat.mtime) && older(&stat.ctime)
     }
 }
@@ -142,11 +144,19 @@ mod tests {
         let scan = BTreeMap::from([("file".to_string(), entry())]);
         let cache = StatusCache::new("base".into(), 100, scan.clone(), Status::default());
         assert_eq!(cache.changed(&scan), BTreeSet::from(["file".into()]));
+        // 100.456 and a clock of 101 can be a millisecond apart.
         let cache = StatusCache::new("base".into(), 101, scan.clone(), Status::default());
+        assert_eq!(cache.changed(&scan), BTreeSet::from(["file".into()]));
+        let cache = StatusCache::new("base".into(), 102, scan.clone(), Status::default());
         assert!(cache.changed(&scan).is_empty());
+        // A stamp before 1970 (a copied archive) is old, whatever the clock.
+        let FileFingerprint::Verified { mut stat, evidence } = entry() else { unreachable!() };
+        stat.mtime.seconds = -5;
+        stat.ctime.seconds = -5;
+        assert!(FileFingerprint::Verified { stat, evidence }.trusted(1));
         let mapped = BTreeMap::from([("file".to_string(), FileFingerprint::Unverifiable)]);
         assert_eq!(cache.changed(&mapped), BTreeSet::from(["file".into()]));
-        let cache = StatusCache::new("base".into(), 101, mapped.clone(), Status::default());
+        let cache = StatusCache::new("base".into(), 102, mapped.clone(), Status::default());
         assert_eq!(cache.changed(&mapped), BTreeSet::from(["file".into()]));
         assert_eq!(cache.changed(&scan), BTreeSet::from(["file".into()]));
     }

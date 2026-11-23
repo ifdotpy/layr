@@ -34,7 +34,7 @@ pub(crate) fn scan(
             Err(e) => return Err(e.into()),
         };
         if !rel.is_empty()
-            && (crate::repo::skip_path(&rel)
+            && (crate::repo::skip_entry(&rel, m.is_dir())
                 || m.dev() != root_meta.dev()
                 || m.is_dir() && crate::fs::host().namespace.managed(&path))
         {
@@ -81,6 +81,23 @@ mod tests {
         std::fs::rename(&path, dir.join("old"))?;
         std::fs::write(&path, b"replaced")?;
         assert!(!native_fingerprint(&path, &observed).verifiable());
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// The scan holds every path that a comparison of the folder reads: a folder named as a cache
+    /// journal and what it holds too, but not `.git` or a cache journal.
+    #[test]
+    fn the_scan_holds_what_a_folder_named_as_a_cache_journal_holds() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("layr-status-scan-{}", crate::ids::new_id()));
+        let journal = format!(".layr-cache-replace-{}.json.tmp", "0".repeat(64));
+        assert!(crate::repo::skip_path(&journal));
+        std::fs::create_dir_all(dir.join(&journal))?;
+        std::fs::create_dir_all(dir.join(".git/info"))?;
+        std::fs::write(dir.join(&journal).join("file"), b"1")?;
+        std::fs::write(dir.join(format!(".layr-cache-replace-{}.json", "1".repeat(64))), b"{}")?;
+        let scan = scan(&dir, None, &mut |_, _| FileFingerprint::Unverifiable)?;
+        assert_eq!(scan.keys().collect::<Vec<_>>(), ["", &journal, &format!("{journal}/file")]);
         std::fs::remove_dir_all(&dir)?;
         Ok(())
     }

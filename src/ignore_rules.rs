@@ -33,6 +33,9 @@ struct CapturedPolicy {
     files: BTreeMap<String, Option<Vec<u8>>>,
 }
 
+/// The path of a local exclude file and its bytes, or the error that reading them gave.
+type LocalExclude = (PathBuf, Result<Vec<u8>, std::io::ErrorKind>);
+
 pub struct Rules {
     root: PathBuf,
     captured: Option<CapturedPolicy>,
@@ -40,8 +43,11 @@ pub struct Rules {
     /// For `.layrattributes`: the attribute whose patterns this matcher holds.
     attribute: Option<&'static str>,
     cache: RefCell<HashMap<String, Option<Arc<Gitignore>>>>,
-    /// `local_exclude`, looked up once.
-    local: std::cell::OnceCell<Option<PathBuf>>,
+    /// `local_exclude` and its bytes, read once: the matcher and `local_policy` use the same bytes.
+    local: std::cell::OnceCell<Option<LocalExclude>>,
+    /// When recording (`recording`): the rule files read, with their bytes (`None`: no file
+    /// there). The matcher and `same_rule_files` read each of them once.
+    read: Option<RefCell<BTreeMap<String, Option<Vec<u8>>>>>,
     /// The folders (relative to root, "" is the root) whose rule files are read. None: every folder.
     dirs: Option<std::collections::HashSet<String>>,
     /// Read rules from the logical source without exporting object or layer entries.
@@ -57,6 +63,7 @@ impl Rules {
             attribute: None,
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
+            read: None,
             dirs: None,
             source: None,
         }
@@ -73,6 +80,7 @@ impl Rules {
             attribute,
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
+            read: None,
             dirs: Some(dirs),
             source: None,
         }
@@ -96,6 +104,27 @@ impl Rules {
             None => std::fs::read(self.root.join(relative)).unwrap_or_default(),
         }
     }
+    /// The rule file at `relative` as the matcher reads it (`None`: no file there). On a volume
+    /// that ignores case `.GITIGNORE` is not `.gitignore`, and a path through a link names none.
+    fn rule_file(&self, relative: &str) -> Option<Vec<u8>> {
+        self.is_file(relative).then(|| self.read_rule(relative))
+    }
+    /// `rule_file`, read once when recording.
+    fn recorded_rule_file(&self, relative: &str) -> Option<Vec<u8>> {
+        let Some(read) = &self.read else { return self.rule_file(relative) };
+        if let Some(bytes) = read.borrow().get(relative) {
+            return bytes.clone();
+        }
+        let bytes = self.rule_file(relative);
+        read.borrow_mut().insert(relative.to_string(), bytes.clone());
+        bytes
+    }
+
+    /// These rules, recording the rule files they read (`rule_files`).
+    pub(crate) fn recording(mut self) -> Self {
+        self.read = Some(RefCell::default());
+        self
+    }
 
     /// The paths that `.layrattributes` files give the attribute `name`: `ignored` is true for them.
     pub fn attribute(root: &Path, name: &'static str) -> Rules {
@@ -106,14 +135,15 @@ impl Rules {
             attribute: Some(name),
             cache: RefCell::new(HashMap::new()),
             local: std::cell::OnceCell::new(),
+            read: None,
             dirs: None,
             source: None,
         }
     }
 
-    /// The local exclude file of the working folder, when it has one (`LOCAL_EXCLUDE`). It is read
-    /// from the folder itself: a state, and the layers of one, have no `.git`.
-    fn local_exclude(&self) -> Option<&PathBuf> {
+    /// The local exclude file of the working folder, when it has one (`LOCAL_EXCLUDE`), and its
+    /// bytes. It is read from the folder itself: a state, and the layers of one, have no `.git`.
+    fn local_exclude(&self) -> Option<&LocalExclude> {
         self.local
             .get_or_init(|| {
                 // An empty file (each line's `.git` has one) adds no rule and no matcher.
@@ -126,14 +156,21 @@ impl Rules {
                 } else {
                     LINE_EXCLUDE.lock().ok().and_then(|l| l.clone()).unwrap_or(own)
                 };
-                (self.attribute.is_none() && rules(&path)).then_some(path)
+                (self.attribute.is_none() && rules(&path)).then(|| {
+                    let bytes = std::fs::read(&path).map_err(|e| e.kind());
+                    (path, bytes)
+                })
             })
             .as_ref()
     }
 
-    /// Bytes of the effective local ignore policy, including an external line exclude.
+    /// Bytes of the effective local ignore policy, including an external line exclude: the bytes
+    /// that the rules match with.
     pub(crate) fn local_policy(&self) -> std::io::Result<Vec<u8>> {
-        self.local_exclude().map(std::fs::read).unwrap_or_else(|| Ok(Vec::new()))
+        match self.local_exclude() {
+            Some((_, bytes)) => bytes.clone().map_err(std::io::Error::from),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Freeze the ignore inputs of these paths. Classification never reopens them.
@@ -169,6 +206,18 @@ impl Rules {
         Ok(true)
     }
 
+    /// The rule files that the matcher read so far, with their bytes (`None`: no file there). A
+    /// result classified by these rules is the same while `same_rule_files` holds for them.
+    pub(crate) fn rule_files(&self) -> BTreeMap<String, Option<Vec<u8>>> {
+        self.read.as_ref().map(|read| read.borrow().clone()).unwrap_or_default()
+    }
+
+    /// Whether the matcher reads `files` (`rule_files`). When recording, the matcher then
+    /// classifies with the bytes checked here, not a later version. O(files).
+    pub(crate) fn same_rule_files(&self, files: &BTreeMap<String, Option<Vec<u8>>>) -> bool {
+        files.iter().all(|(rel, bytes)| self.recorded_rule_file(rel) == *bytes)
+    }
+
     fn matcher(&self, dir: &str) -> Option<Arc<Gitignore>> {
         if self.dirs.as_ref().is_some_and(|d| !d.contains(dir)) && !(dir.is_empty() && self.local_exclude().is_some()) {
             return None;
@@ -192,20 +241,19 @@ impl Rules {
         } else {
             // The local excludes of a working folder (`.git/info/exclude`), as git reads them: below the
             // root's rule files, which come after them and win. A state has no `.git`.
-            if let Some(path) = dir.is_empty().then(|| self.local_exclude()).flatten() {
-                b.add(path);
+            if let Some((path, bytes)) = dir.is_empty().then(|| self.local_exclude()).flatten() {
+                add_ignore_bytes(&mut b, path.clone(), bytes.as_deref().unwrap_or_default());
                 any = true;
             }
             for name in self.files {
                 let rel = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
-                if self.is_file(&rel) {
+                if let Some(bytes) = self.recorded_rule_file(&rel) {
                     match self.attribute {
                         None => {
-                            add_ignore_bytes(&mut b, self.root.join(&rel), &self.read_rule(&rel));
+                            add_ignore_bytes(&mut b, self.root.join(&rel), &bytes);
                         }
                         Some(attribute) => {
                             let unset = format!("-{attribute}");
-                            let bytes = self.read_rule(&rel);
                             let text = std::str::from_utf8(&bytes).unwrap_or_default();
                             for line in text.lines() {
                                 let mut words = line.split_whitespace();
@@ -342,6 +390,65 @@ mod tests {
             }
             std::fs::remove_file(rule)?;
         }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The rules match with the local exclude bytes that `local_policy` returns, even when the file
+    /// changes in between: a key made from the policy then names the rules that were used.
+    #[test]
+    fn rules_match_with_the_local_policy_they_return() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-local-policy-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join(".git/info"))?;
+        std::fs::write(root.join(LOCAL_EXCLUDE), "first\n")?;
+        let rules = Rules::new(&root);
+        assert_eq!(rules.local_policy()?, b"first\n");
+        std::fs::write(root.join(LOCAL_EXCLUDE), "second\n")?;
+        assert!(rules.ignored("first", false) && !rules.ignored("second", false));
+        assert_eq!(rules.local_policy()?, b"first\n");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The rule files read are checked as the matcher reads them: one under another case (a
+    /// volume that ignores case finds it) or reached through a link is none for it.
+    #[test]
+    fn rule_files_are_checked_as_the_matcher_reads_them() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-rule-files-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("d/sub"))?;
+        std::fs::write(root.join("d/sub/.gitignore"), "a\n")?;
+        let rules = Rules::new(&root).recording();
+        assert!(rules.ignored("d/sub/a", false));
+        let files = rules.rule_files();
+        assert_eq!(files.get("d/sub/.gitignore"), Some(&Some(b"a\n".to_vec())));
+        assert!(Rules::new(&root).same_rule_files(&files));
+        std::fs::rename(root.join("d/sub/.gitignore"), root.join("d/sub/.GITIGNORE"))?;
+        assert!(!Rules::new(&root).ignored("d/sub/a", false) && !Rules::new(&root).same_rule_files(&files));
+        std::fs::rename(root.join("d/sub/.GITIGNORE"), root.join("d/sub/.gitignore"))?;
+        std::fs::rename(root.join("d"), root.join("real"))?;
+        std::os::unix::fs::symlink("real", root.join("d"))?;
+        assert!(!Rules::new(&root).ignored("d/sub/a", false) && !Rules::new(&root).same_rule_files(&files));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Recording rules classify with the rule bytes that `same_rule_files` checked, though the file
+    /// changes after; rules that do not record keep nothing.
+    #[test]
+    fn checked_rule_files_are_the_ones_the_rules_match_with() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-rule-files-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join(".gitignore"), "a\n")?;
+        let plain = Rules::new(&root);
+        assert!(plain.ignored("a", false) && plain.rule_files().is_empty());
+        let first = Rules::new(&root).recording();
+        assert!(first.ignored("a", false));
+        let files = first.rule_files();
+        assert_eq!(files.get(".gitignore"), Some(&Some(b"a\n".to_vec())));
+        let rules = Rules::new(&root).recording();
+        assert!(rules.same_rule_files(&files));
+        std::fs::write(root.join(".gitignore"), "b\n")?;
+        assert!(rules.ignored("a", false) && !rules.ignored("b", false));
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

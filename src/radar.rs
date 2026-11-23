@@ -17,12 +17,14 @@ use crate::fsutil::{self, Src};
 use crate::ignore_rules::Rules;
 use crate::model::Line;
 use crate::overlay::{Layer, OpenOverlay};
-use crate::repo::{skip_path, Repo, Snap};
+use crate::repo::{skip_path, Repo, Snap, Temp};
+use crate::status_cache::FileFingerprint;
 use anyhow::{anyhow, Result};
 use layr_hashers::{Digest, GitCompatible};
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// Format of the saved state compares. Bump it when `changes::candidates`,
@@ -36,8 +38,10 @@ const COMPARE_FORMAT: u32 = 4;
 const COMPARE_DIR: &str = "overlap-compares";
 /// The folder under `meta/` that holds the saved compares of a line's head with its live folder.
 const LIVE_DIR: &str = "overlap-live";
-/// Format of the saved live compares. Bump it when `compare` changes its results.
-const LIVE_FORMAT: u32 = 3;
+/// Format of the saved live compares. Bump it when `compare` changes its results or `live_digest` its key.
+/// 4: the key of a capture leaves out its device and root (`capture_relative`), and holds the working folder;
+/// the rule files that the compare read are saved with it. 5: those rule files are the working folder's.
+const LIVE_FORMAT: u32 = 5;
 /// Threads that compare saved states at once.
 
 #[derive(Debug, Serialize)]
@@ -75,6 +79,9 @@ struct SavedLive {
     format: u32,
     head: String,
     digest: String,
+    /// The rule files that the compare read (`Rules::rule_files`). The scan does not observe all of
+    /// them: a nested tree is not scanned, but the rules in it can classify a path of our head.
+    rules: BTreeMap<String, Option<Vec<u8>>>,
     live: LiveChanges,
 }
 
@@ -86,23 +93,131 @@ struct LiveChanges {
     rules_changed: bool,
 }
 
+/// Our working folder as the overlap compares read it.
+struct Ours {
+    /// The capture that `root` is (btrfs, OverlayFS), removed on drop. `None`: the live folder (APFS).
+    capture: Option<Temp>,
+    root: PathBuf,
+    /// The ignore rules of the working folder, as status reads them: a nested volume is an empty
+    /// folder in a capture, but its rule files classify our head's paths in it.
+    rules: Rules,
+    /// The ignore rules of `root`, which the overlay layers are compared with.
+    layer_rules: Rules,
+    /// The working folder's device and inode: a new folder is another source.
+    source: String,
+    /// The clock before `root` was read.
+    started: u64,
+}
+
+impl Ours {
+    fn new(working: &Path, capture: Option<Temp>, source: String, started: u64) -> Ours {
+        let root = capture.as_ref().map_or_else(|| working.to_path_buf(), |c| c.path.clone());
+        Ours { capture, rules: Rules::new(working).recording(), layer_rules: Rules::new(&root), root, source, started }
+    }
+}
+
+/// `compare_live` of `head` (the state `head_id`) with our folder, saved in `file` for the folder
+/// it read. A saved compare is used only when the state, `live_digest` and the rule files it read
+/// (looked up as the rules read them) are the same: the compare reads only those, so the result is
+/// the same. A capture cannot change, so one digest serves; the live folder is observed again
+/// after the compare.
+fn saved_live(file: &Path, head_id: &str, head: &Snap, ours: &Ours) -> Result<LiveChanges> {
+    let local = local_digest(&ours.rules);
+    let digest = || -> Result<Option<String>> {
+        let _t = crate::trace::span("overlap scan digest");
+        let Some(local) = &local else { return Ok(None) };
+        scan_digest(ours, local)
+    };
+    let before = digest()?;
+    if let Some(digest) = &before {
+        let saved = std::fs::read(file).ok().and_then(|raw| serde_json::from_slice::<SavedLive>(&raw).ok());
+        let same = |s: &SavedLive| {
+            s.format == LIVE_FORMAT && s.head == head_id && s.digest == *digest && ours.rules.same_rule_files(&s.rules)
+        };
+        if let Some(saved) = saved.filter(same) {
+            let _t = crate::trace::span("overlap live saved");
+            return Ok(saved.live);
+        }
+    }
+    let found = {
+        let _t = crate::trace::span("overlap live compare");
+        compare_live(head, &ours.root, &ours.rules)?
+    };
+    if let Some(key) = before {
+        if ours.capture.is_some() || digest().ok().flatten().as_ref() == Some(&key) {
+            // A file that cannot be written only costs the next status a compare.
+            let rules = ours.rules.rule_files();
+            let saved = SavedLive { format: LIVE_FORMAT, head: head_id.to_string(), digest: key, rules, live: found.clone() };
+            let _ = write_live(file, &saved);
+        }
+    }
+    Ok(found)
+}
+
 fn write_live(file: &Path, saved: &SavedLive) -> Result<()> {
     std::fs::create_dir_all(file.parent().ok_or_else(|| anyhow!("live compare folder"))?)?;
     crate::fsutil::cache_write(file, &serde_json::to_vec(saved)?, 0o600)
 }
 
-/// Equality of verifiable observation evidence and of the local ignore policy (outside the tree)
-/// can reuse a previous comparison. Missing evidence, including mapped files, always requires
-/// another content read.
-fn scan_digest(live: &Path, rules: &Rules) -> Result<Option<String>> {
-    let scan = crate::fs::observe_tree(live)?;
-    let Some(local) = local_digest(rules) else { return Ok(None) };
-    if scan.values().any(|entry| !entry.verifiable()) {
-        return Ok(None);
+/// `live_digest` of our folder as it is now, with the local policy hash `local`.
+fn scan_digest(ours: &Ours, local: &str) -> Result<Option<String>> {
+    let scan = crate::fs::observe_tree(&ours.root)?;
+    if ours.capture.is_none() {
+        // Mount points are resolved paths. A list that cannot be read gives no key either.
+        let root = std::fs::canonicalize(&ours.root);
+        if root.and_then(|root| Ok(mounted_inside(&root, &crate::sys::mount_points()?))).unwrap_or(true) {
+            return Ok(None);
+        }
+        return live_digest(&scan, local, &ours.source, ours.started);
     }
+    // The key of a capture leaves out its root, but not the names in it: a volume nested there is
+    // a folder of another device, which the scan leaves out and the compare reads.
+    let mut names = std::fs::read_dir(&ours.root)?
+        .map(|entry| entry?.file_name().into_string().map_err(|_| anyhow!("non-UTF-8 file name")))
+        .filter(|name| !name.as_ref().is_ok_and(|name| skip_path(name)))
+        .collect::<Result<Vec<_>>>()?;
+    names.sort();
+    live_digest(&capture_relative(scan), local, &format!("{}\0{}", ours.source, names.join("\0")), ours.started)
+}
+
+/// Whether one of `mounts` is inside `root`. The scan leaves out what is on another device; a
+/// compare reads a file mounted there (FUSE takes a file as a mount point), and a folder mounted
+/// there can go away while it runs. Each digest checks again, so a compare that starts or ends
+/// with a mount inside is not saved. A capture holds no mounts. O(mounts).
+fn mounted_inside(root: &Path, mounts: &[PathBuf]) -> bool {
+    mounts.iter().any(|m| m != root && m.starts_with(root))
+}
+
+/// The observations of a capture as they are the same in each capture of an unchanged folder: each
+/// capture is a new device and gives its root new times; an entry keeps its inode, times and
+/// evidence. The live folder keeps both: its root records a top-level entry made and removed, and
+/// its devices tell a volume mounted inside it. O(n) in the entries.
+fn capture_relative(mut scan: BTreeMap<String, FileFingerprint>) -> BTreeMap<String, FileFingerprint> {
+    scan.remove("");
+    for entry in scan.values_mut() {
+        if let FileFingerprint::Verified { stat, .. } = entry {
+            stat.dev = 0;
+        }
+    }
+    scan
+}
+
+/// The key under which a compare of a folder can be reused: the observations of its entries, the
+/// local ignore policy (outside the tree) and the identity of the working folder (`source`).
+/// O(n) in the entries. `None`
+/// when an entry is not verifiable (mapped files) or may have changed again within its time
+/// stamp (`FileFingerprint::trusted` against `started`, the clock before the folder was read).
+fn live_digest(scan: &BTreeMap<String, FileFingerprint>, local: &str, source: &str, started: u64) -> Result<Option<String>> {
     let mut hash = GitCompatible::new();
-    hash.update(&serde_json::to_vec(&scan)?);
+    hash.update(source);
     hash.update(local);
+    for (path, entry) in scan {
+        let FileFingerprint::Verified { stat, evidence } = entry else { return Ok(None) };
+        if !entry.trusted(started) {
+            return Ok(None);
+        }
+        hash.update(serde_json::to_vec(&(path, stat, evidence))?);
+    }
     Ok(Some(hex::encode(hash.finalize())))
 }
 
@@ -305,9 +420,9 @@ impl StateCompare {
         }
         let _t = crate::trace::span("overlap compare miss");
         let found = compare(&self.base, &self.theirs, &rules)?;
-        // Saved only when the local policy stayed the one read before the compare. A save that
-        // fails costs only time on the next call.
-        if let Some(local) = local.filter(|local| local_digest(&rules).as_ref() == Some(local)) {
+        // `rules` read the local policy once, so the compare used the one in `local`. A save
+        // that fails costs only time on the next call.
+        if let Some(local) = local {
             let _ = self.write(&local, &found);
         }
         Ok(found)
@@ -531,53 +646,25 @@ impl<'a> Repo<'a> {
     /// The tree of our working folder to compare. APFS compares the live folder, as status does:
     /// a copy would clone every file, cache folders included. A fast line's live folder is its
     /// shadow (`working_src`): its mount has no APFS file identities.
-    fn radar_tree(&self, line: &Line) -> Result<(Option<crate::repo::Temp>, PathBuf)> {
+    fn radar_tree(&self, line: &Line) -> Result<Ours> {
         let working = self.working_src(line)?;
-        if !crate::fs::prefers_captured_comparison(&working) {
-            return Ok((None, working));
-        }
-        let captured = self.scan(line)?;
-        let path = captured.path.clone();
-        Ok((Some(captured), path))
+        let w = std::fs::symlink_metadata(&working)?;
+        let (source, started) = (format!("{}|{}", w.dev(), w.ino()), crate::status_cache::clock()?);
+        let capture = if crate::fs::prefers_captured_comparison(&working) { Some(self.scan(line)?) } else { None };
+        Ok(Ours::new(&working, capture, source, started))
     }
 
-    /// Our head -> live folder compare: one per call, shared by all merge bases.
-    fn our_head_live(&self, line: &Line, live: &Path, rules: &Rules, work: &mut Work) -> Result<()> {
+    /// Our head -> live folder compare: one per call, shared by all merge bases, saved per line
+    /// (`saved_live`).
+    fn our_head_live(&self, line: &Line, ours: &Ours, work: &mut Work) -> Result<()> {
         if work.head_live.is_none() {
+            let file = self.p.meta_dir().join(LIVE_DIR).join(format!("{}.json", line.id));
             work.head_live = Some(match self.tree(&line.head, work) {
-                Ok(head) => Some(self.live_compare(line, &head, live, rules)?),
+                Ok(head) => Some(saved_live(&file, &line.head, &head, ours)?),
                 Err(_) => None,
             });
         }
         Ok(())
-    }
-
-    /// `compare` of our head with the live folder, saved per line. A saved compare is used only
-    /// when the head and the scan of the folder (every path, its metadata and data identity) are
-    /// the same. The compare reads only those, so the result is the same. Other platforms compare.
-    fn live_compare(&self, line: &Line, head: &Snap, live: &Path, rules: &Rules) -> Result<LiveChanges> {
-        let digest = {
-            let _t = crate::trace::span("overlap scan digest");
-            scan_digest(live, rules)?
-        };
-        let file = self.p.meta_dir().join(LIVE_DIR).join(format!("{}.json", line.id));
-        if let Some(digest) = &digest {
-            let saved = std::fs::read(&file).ok().and_then(|raw| serde_json::from_slice::<SavedLive>(&raw).ok());
-            if let Some(saved) = saved.filter(|s| s.format == LIVE_FORMAT && s.head == line.head && s.digest == *digest) {
-                let _t = crate::trace::span("overlap live saved");
-                return Ok(saved.live);
-            }
-        }
-        let found = {
-            let _t = crate::trace::span("overlap live compare");
-            compare_live(head, live, rules)?
-        };
-        if let Some(digest) = digest.filter(|digest| scan_digest(live, rules).ok().flatten().as_ref() == Some(digest)) {
-            // A file that cannot be written only costs the next status a compare.
-            let saved = SavedLive { format: LIVE_FORMAT, head: line.head.clone(), digest, live: found.clone() };
-            let _ = write_live(&file, &saved);
-        }
-        Ok(found)
     }
 
     /// Plan our merge base -> head compare once per base. An identical head needs no job;
@@ -614,8 +701,7 @@ impl<'a> Repo<'a> {
         heads.push(line.head.as_str());
         self.hold(self.pin(&heads)?);
         // Taking the working folder tree is costly; do it only when another line needs it.
-        let mut ours: Option<(Option<crate::repo::Temp>, PathBuf)> = None;
-        let ignored = Rules::new(&self.working_src(line)?);
+        let mut ours: Option<Ours> = None;
         // The hidden overlays are read once for all lines: reading them reads every overlay setting.
         // The other overlays of the layers join them when first seen (`open_layers`).
         let mut open = self.hidden_overlays()?;
@@ -660,8 +746,8 @@ impl<'a> Repo<'a> {
                 let _t = crate::trace::span("overlap capture");
                 ours = Some(self.radar_tree(line)?);
             }
-            let ours_root = &ours.as_ref().expect("scanned above").1;
-            self.our_head_live(line, ours_root, &ignored, &mut work)?;
+            let our = ours.as_ref().expect("scanned above");
+            self.our_head_live(line, our, &mut work)?;
             let our_base = self.our_base_job(line, &base, &mut work)?;
             // show <state>:<path> and try use project read access for both head and auto states.
             let (their_layers, their_private, hidden) = t_layers.time(|| -> Result<_> {
@@ -673,7 +759,7 @@ impl<'a> Repo<'a> {
             })?;
             let job = work.jobs.len();
             work.jobs.push(StateCompare::new(&self.compare_dir(), &base, &state.id, root, theirs));
-            let layers = t_plans.time(|| self.overlay_plans(ctx, &open, &our_layers, &their_layers, ours_root, &mut work))?;
+            let layers = t_plans.time(|| self.overlay_plans(ctx, &open, &our_layers, &their_layers, our, &mut work))?;
             plans.push(OtherPlan {
                 name: other.name.clone(),
                 owner: other.owner,
@@ -696,8 +782,8 @@ impl<'a> Repo<'a> {
         // Step 3, on this thread: our changes per base and the caller's filters, in the order of the lines.
         let _step3 = crate::trace::span("overlap step 3");
         let mut overlaps = Vec::new();
-        if let Some((_, ours_root)) = ours.as_ref() {
-            let overlay_rules = Rules::new(ours_root);
+        if let Some(our) = ours.as_ref() {
+            let (ours_root, ignored) = (&our.root, &our.rules);
             let mut ours_keys: BTreeMap<String, OurChanges> = BTreeMap::new();
             let mut layer_keys: BTreeMap<(String, String), OurChanges> = BTreeMap::new();
             for p in &plans {
@@ -709,16 +795,16 @@ impl<'a> Repo<'a> {
                         new.insert(p.our_base.changes(
                             &work.jobs[p.job].base,
                             ours_root,
-                            &ignored,
+                            ignored,
                             &our_private,
                             &found,
                             head_live,
                         )?)
                     }
                 };
-                let mut theirs = visible(&found[p.job], &p.their_private, &ignored);
+                let mut theirs = visible(&found[p.job], &p.their_private, ignored);
                 theirs.retain(|path, _| !our_hidden.contains(path) && !p.hidden.contains(path));
-                ours.retain_changed(&mut theirs, ours_root, &our_private, &ignored)?;
+                ours.retain_changed(&mut theirs, ours_root, &our_private, ignored)?;
                 for (path, time) in theirs {
                     let changed_at = if time == 0 { p.state_time } else { time };
                     overlaps.push(Overlap { path, line: p.name.clone(), owner: p.owner, changed_at });
@@ -731,15 +817,15 @@ impl<'a> Repo<'a> {
                             new.insert(layer.our_base.changes(
                                 &work.jobs[layer.job].base,
                                 ours_root,
-                                &overlay_rules,
+                                &our.layer_rules,
                                 &our_hidden,
                                 &found,
                                 layer_live,
                             )?)
                         }
                     };
-                    let mut theirs = visible(&found[layer.job], &p.hidden, &overlay_rules);
-                    ours_layer.retain_changed(&mut theirs, ours_root, &our_hidden, &overlay_rules)?;
+                    let mut theirs = visible(&found[layer.job], &p.hidden, &our.layer_rules);
+                    ours_layer.retain_changed(&mut theirs, ours_root, &our_hidden, &our.layer_rules)?;
                     for (path, time) in theirs {
                         let changed_at = if time == 0 { layer.state_time } else { time };
                         overlaps.push(Overlap { path, line: p.name.clone(), owner: p.owner, changed_at });
@@ -761,7 +847,7 @@ impl<'a> Repo<'a> {
         open: &[OpenOverlay<'a>],
         our_layers: &[Layer],
         their_layers: &[Layer],
-        ours: &Path,
+        ours: &Ours,
         work: &mut Work,
     ) -> Result<Vec<LayerPlan>> {
         let mut plans = Vec::new();
@@ -801,7 +887,7 @@ impl<'a> Repo<'a> {
                 let live = match repo.tree(&layer.state, work) {
                     Ok(head) => {
                         let _t = crate::trace::span("overlap live compare");
-                        Some(compare_live(&head, ours, &Rules::new(ours))?)
+                        Some(compare_live(&head, &ours.root, &ours.layer_rules)?)
                     }
                     Err(_) => None,
                 };
@@ -1249,5 +1335,280 @@ mod tests {
         let slow = compare(&job.base, &job.theirs, &Rules::of(&job.theirs)).unwrap();
         assert_eq!(bytes(&job.run().unwrap()), bytes(&slow));
         test_probe::record(|p| assert_eq!(p.candidates, 1));
+    }
+
+    fn stat(dev: u64, ino: u64, time: i64) -> FileFingerprint {
+        let t = crate::status_cache::Timestamp { seconds: time, nanos: 0 };
+        let stat = crate::status_cache::FileStat {
+            dev,
+            ino,
+            size: 1,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            nlink: 1,
+            mtime: t.clone(),
+            ctime: t,
+        };
+        FileFingerprint::Verified { stat, evidence: None }
+    }
+
+    /// Two captures of one folder differ in the device of every entry and the times of the root;
+    /// in the live folder, and any other difference, they are a new key. An entry that cannot be
+    /// trusted gives none.
+    #[test]
+    fn the_live_key_is_the_same_for_each_capture_of_an_unchanged_folder() -> Result<()> {
+        let scan = |dev: u64, ino: u64, root_time: i64| -> BTreeMap<String, FileFingerprint> {
+            BTreeMap::from([("".to_string(), stat(dev, 256, root_time)), ("a".to_string(), stat(dev, ino, 10))])
+        };
+        let key = |scan: &BTreeMap<String, FileFingerprint>| live_digest(scan, "local", "source", 100);
+        let first = key(&scan(1, 257, 10))?;
+        assert!(first.is_some());
+        assert_ne!(key(&scan(2, 257, 10))?, first);
+        assert_ne!(key(&scan(1, 257, 20))?, first);
+        let captured = key(&capture_relative(scan(1, 257, 10)))?;
+        assert!(captured.is_some());
+        assert_eq!(key(&capture_relative(scan(2, 257, 20)))?, captured);
+        assert_ne!(key(&capture_relative(scan(1, 258, 10)))?, captured);
+        assert_ne!(key(&scan(1, 258, 10))?, first);
+        assert_ne!(live_digest(&scan(1, 257, 10), "other local", "source", 100)?, first);
+        assert_ne!(live_digest(&scan(1, 257, 10), "local", "other source", 100)?, first);
+        // Written within the second the folder was read in: it may change again with the same stamp.
+        assert_eq!(live_digest(&scan(1, 257, 10), "local", "source", 10)?, None);
+        // 10.999 and a clock of 11 can be a millisecond apart: a same-size rewrite keeps the stamps.
+        assert_eq!(live_digest(&scan(1, 257, 10), "local", "source", 11)?, None);
+        assert!(live_digest(&scan(1, 257, 10), "local", "source", 12)?.is_some());
+        let mut mapped = scan(1, 257, 10);
+        mapped.insert("b".to_string(), FileFingerprint::Unverifiable);
+        assert_eq!(key(&mapped)?, None);
+        Ok(())
+    }
+
+    /// A file or folder mounted inside the live folder gives no key.
+    #[test]
+    fn a_mount_inside_the_live_folder_gives_no_key() -> Result<()> {
+        let trees = Trees::new();
+        let live = trees.live();
+        std::fs::create_dir(live.join("dir"))?;
+        std::fs::write(live.join("file"), "1")?;
+        let outside = [PathBuf::from("/"), live.clone(), trees.0.join("outside"), trees.0.join("live2")];
+        assert!(!mounted_inside(&live, &outside));
+        for inside in [live.join("dir"), live.join("file"), live.join("gone")] {
+            assert!(mounted_inside(&live, &[outside.as_slice(), &[inside]].concat()));
+        }
+        // The folder through a link: the mount points name the resolved path.
+        std::os::unix::fs::symlink(&trees.0, trees.0.join("link"))?;
+        let ours = Ours::new(&trees.0.join("link/live"), None, "work".into(), crate::status_cache::clock()? + 2);
+        assert!(scan_digest(&ours, "local")?.is_some());
+        let resolved = std::fs::canonicalize(&ours.root)?;
+        assert!(!mounted_inside(&ours.root, &[resolved.join("file")]));
+        assert!(mounted_inside(&resolved, &[resolved.join("file")]));
+        Ok(())
+    }
+
+    /// The live folder (no capture) is observed again after the compare: unchanged, its compare is
+    /// saved and the next status reuses it. Its root stays in the key: a top-level file made and
+    /// removed between two reads changes it.
+    #[test]
+    fn an_unchanged_live_folder_reuses_its_compare_and_keeps_its_root_in_the_key() -> Result<()> {
+        let trees = Trees::new();
+        let (head, live) = (trees.head(), trees.live());
+        std::fs::write(head.join("a"), "1")?;
+        std::fs::write(live.join("a"), "2")?;
+        // As root on btrfs, an entry's evidence is the transaction of its inode item: the first
+        // read after a write moves the access time, and a delayed inode item reaches the tree in
+        // any commit, so the key can change while the files do not. Access times ahead of the
+        // other times stay on read (relatime); the commit puts them in the tree before the scan.
+        let ahead = std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        for path in [&live, &live.join("a")] {
+            std::fs::File::open(path)?.set_times(ahead)?;
+        }
+        #[cfg(target_os = "linux")]
+        rustix::fs::syncfs(std::fs::File::open(&live)?)?;
+        let started = crate::status_cache::clock()? + 2;
+        let ours = Ours::new(&live, None, "work".into(), started);
+        let (file, head) = (trees.0.join("live.json"), crate::repo::snap(&head));
+        reset_probe(Vec::new());
+        let cold = saved_live(&file, "head", &head, &ours)?;
+        assert_eq!(bytes(&saved_live(&file, "head", &head, &ours)?.found), bytes(&cold.found));
+        test_probe::record(|p| assert_eq!(p.candidates, 1));
+        let before = scan_digest(&ours, "local")?;
+        assert!(before.is_some());
+        std::fs::write(live.join(".gitignore"), "a\n")?;
+        std::fs::remove_file(live.join(".gitignore"))?;
+        assert_ne!(scan_digest(&ours, "local")?, before);
+        Ok(())
+    }
+
+    /// A rule file inside a nested tree, which the scan leaves out, classifies a path of our head:
+    /// edited in place, the scan is the same, and the saved compare is not used.
+    #[test]
+    fn a_changed_rule_file_that_the_scan_leaves_out_compares_again() -> Result<()> {
+        let trees = Trees::new();
+        let (head, live) = (trees.head(), trees.live());
+        if !crate::fs::host().namespace.supported(&live) {
+            return Ok(());
+        }
+        std::fs::create_dir(head.join("d"))?;
+        std::fs::write(head.join("d/a"), "1")?;
+        let nested = live.join("d");
+        crate::fs::create(&nested)?;
+        struct Nested(PathBuf);
+        impl Drop for Nested {
+            fn drop(&mut self) {
+                let _ = crate::fs::remove(&self.0);
+            }
+        }
+        let _nested = Nested(nested.clone());
+        std::fs::write(nested.join(".gitignore"), "a\n")?;
+        let ours = || -> Result<Ours> {
+            let started = crate::status_cache::clock()? + 2;
+            Ok(Ours::new(&live, None, "work".into(), started))
+        };
+        let (file, head) = (trees.0.join("live.json"), crate::repo::snap(&head));
+        let removed = |live: &LiveChanges| live.found.iter().any(|f| f.path == "d/a");
+        let first = ours()?;
+        let key = scan_digest(&first, "local")?;
+        assert!(key.is_some() && !crate::fs::observe_tree(&live)?.contains_key("d/.gitignore"));
+        assert!(!removed(&saved_live(&file, "head", &head, &first)?));
+        std::fs::write(nested.join(".gitignore"), "")?;
+        let second = ours()?;
+        assert_eq!(scan_digest(&second, "local")?, key);
+        assert!(removed(&saved_live(&file, "head", &head, &second)?));
+        Ok(())
+    }
+
+    /// A private folder with the folder `head`, the volume `work` and the volumes nested in it,
+    /// removed on drop.
+    struct Volumes(PathBuf, Vec<PathBuf>);
+
+    impl Volumes {
+        /// `None` where this filesystem makes no volumes.
+        fn new() -> Result<Option<Volumes>> {
+            if !crate::fs::host().namespace.supported(&std::env::temp_dir()) {
+                return Ok(None);
+            }
+            let volumes = Volumes(std::env::temp_dir().join(format!("layr-radar-live-{}", crate::ids::new_id())), Vec::new());
+            std::fs::create_dir_all(volumes.head())?;
+            // A frozen capture is published only into a private folder.
+            std::fs::set_permissions(&volumes.0, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            crate::fs::create(&volumes.work())?;
+            Ok(Some(volumes))
+        }
+        fn head(&self) -> PathBuf {
+            self.0.join("head")
+        }
+        fn work(&self) -> PathBuf {
+            self.0.join("work")
+        }
+        /// A volume at `rel` in `work`.
+        fn nest(&mut self, rel: &str) -> Result<PathBuf> {
+            let path = self.work().join(rel);
+            crate::fs::create(&path)?;
+            self.1.push(path.clone());
+            Ok(path)
+        }
+        /// Our folder as a status two seconds from now reads it: the files are a full second older
+        /// than its clock.
+        fn capture(&self) -> Result<Ours> {
+            let at = self.0.join(crate::store::temp_name());
+            let capture = Temp::capture(&self.work(), at, crate::fs::Protection::Frozen, crate::fs::CapturePurpose::Scan)?;
+            Ok(Ours::new(&self.work(), Some(capture), "work".into(), crate::status_cache::clock()? + 2))
+        }
+    }
+
+    impl Drop for Volumes {
+        fn drop(&mut self) {
+            for nested in self.1.iter().rev() {
+                let _ = crate::fs::remove(nested);
+            }
+            let _ = crate::fs::remove(&self.work());
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A nested volume is an empty folder in a capture, but its rule files, which status reads in
+    /// the working folder, hide our head's paths in it. Changed, the next status compares again.
+    #[test]
+    fn rules_in_a_nested_volume_of_the_working_folder_classify_its_capture() -> Result<()> {
+        let Some(mut volumes) = Volumes::new()? else { return Ok(()) };
+        std::fs::create_dir(volumes.head().join("d"))?;
+        std::fs::write(volumes.head().join("d/a"), "1")?;
+        let nested = volumes.nest("d")?;
+        std::fs::write(nested.join(".gitignore"), "a\n")?;
+        let mut ours = volumes.capture()?;
+        if ours.root.join("d/.gitignore").exists() {
+            // A capture by copy holds the nested tree: the rules are the same in both.
+            return Ok(());
+        }
+        let (file, head) = (volumes.0.join("live.json"), crate::repo::snap(&volumes.head()));
+        let removed = |live: &LiveChanges| live.found.iter().any(|f| f.path == "d/a");
+        reset_probe(Vec::new());
+        assert!(!removed(&saved_live(&file, "head", &head, &ours)?));
+        // The next statuses read the rules again; one capture keeps the scan the same (a new
+        // capture can give the empty folder a new inode).
+        ours.rules = Rules::new(&volumes.work()).recording();
+        assert!(!removed(&saved_live(&file, "head", &head, &ours)?));
+        test_probe::record(|p| assert_eq!(p.candidates, 1));
+        std::fs::write(nested.join(".gitignore"), "")?;
+        ours.rules = Rules::new(&volumes.work()).recording();
+        assert!(removed(&saved_live(&file, "head", &head, &ours)?));
+        test_probe::record(|p| assert_eq!(p.candidates, 2));
+        Ok(())
+    }
+
+    /// A volume nested at the top of the folder is left out of the scan (another device) and the
+    /// capture's root is left out of its key; its name is in the key.
+    #[test]
+    fn a_volume_nested_at_the_top_changes_the_key_of_a_capture() -> Result<()> {
+        let Some(mut volumes) = Volumes::new()? else { return Ok(()) };
+        std::fs::write(volumes.work().join("a"), "1")?;
+        let first = volumes.capture()?;
+        if std::fs::symlink_metadata(first.root.join("a"))?.ino() != std::fs::symlink_metadata(volumes.work().join("a"))?.ino() {
+            // A capture by copy (APFS) has new inodes: there is nothing to reuse.
+            return Ok(());
+        }
+        let key = scan_digest(&first, "local")?;
+        assert!(key.is_some() && scan_digest(&volumes.capture()?, "local")? == key);
+        volumes.nest("n")?;
+        let nested = volumes.capture()?;
+        assert!(!crate::fs::observe_tree(&nested.root)?.contains_key("n"));
+        assert_ne!(scan_digest(&nested, "local")?, key);
+        Ok(())
+    }
+
+    /// Captures of an unchanged folder reuse the saved compare of the first one; a new local
+    /// exclude, which the observations leave out (`.git`), compares again.
+    #[test]
+    fn a_second_capture_of_an_unchanged_folder_reuses_the_saved_live_compare() -> Result<()> {
+        let Some(volumes) = Volumes::new()? else { return Ok(()) };
+        let (head, work) = (volumes.head(), volumes.work());
+        std::fs::create_dir_all(work.join(".git/info"))?;
+        for (path, old, new) in [("a", "1", "2"), ("b", "1", "2"), ("same", "1", "1")] {
+            std::fs::write(head.join(path), old)?;
+            std::fs::write(work.join(path), new)?;
+        }
+        let capture = |exclude: &str| -> Result<Ours> {
+            std::fs::write(work.join(crate::ignore_rules::LOCAL_EXCLUDE), exclude)?;
+            volumes.capture()
+        };
+        let (first, second) = (capture("b\n")?, capture("b\n")?);
+        let ino = |root: &Path| std::fs::symlink_metadata(root.join("a")).map(|m| m.ino());
+        if ino(&first.root)? != ino(&work)? {
+            // A capture by copy (APFS) has new inodes: there is nothing to reuse.
+            return Ok(());
+        }
+        let (file, head) = (volumes.0.join("live.json"), crate::repo::snap(&head));
+        let changed = |live: &LiveChanges| live.found.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        reset_probe(Vec::new());
+        let cold = saved_live(&file, "head", &head, &first)?;
+        assert_eq!(changed(&cold), ["a"]);
+        let warm = saved_live(&file, "head", &head, &second)?;
+        assert_eq!(bytes(&warm.found), bytes(&cold.found));
+        test_probe::record(|p| assert_eq!(p.candidates, 1));
+        let third = capture("a\n")?;
+        assert_eq!(changed(&saved_live(&file, "head", &head, &third)?), ["b"]);
+        test_probe::record(|p| assert_eq!(p.candidates, 2));
+        Ok(())
     }
 }
