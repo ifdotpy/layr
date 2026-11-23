@@ -20,14 +20,15 @@ project layr-cloud `bash tools/checks/prepare-linux.sh`). It runs as root with n
 that the merge machine LAYR_MERGE_MACHINE moves, once for each new head, as on the AWS check job. Without it
 a change that moved a git pin of layr-cloud failed every check offline in seconds (2026-11-23).
 
-No timer: when no check is pending, the loop waits until the project changes in Layr Cloud (`layr wait`,
-layr 0.52 and later), then reads the new heads. After each check it pushes the result at once. A layr
-without `layr wait` sleeps IDLE seconds instead.
+When no check is pending, the loop waits for a change in Layr Cloud (`layr wait`, layr 0.52 and later)
+or a local retry, then reads the new heads. After each check it pushes the result at once. A layr
+without `layr wait` sleeps up to IDLE seconds instead.
 
 Usage: scoped-watch.py <project> <check>[,<check>...]
 """
 import importlib.util
 import json
+import math
 import os
 import platform
 import shlex
@@ -50,6 +51,8 @@ RETRY = 600
 # copy could not fetch it and every build was cold ("gateway bootstrap: HTTP 404", 2026-11-15).
 CACHE_EVERY = 600
 IDLE = 60
+# Give layr time to exit after its own deadline before the subprocess timeout.
+WAIT_GRACE = 2
 # The cursor files of `layr wait`, one for each project.
 WAIT_DIR = os.path.join(ROOT, 'wait')
 
@@ -132,10 +135,13 @@ class Runner:
             f.write(done)
 
     def next_check(self):
-        pending = self.layr('checks', 'pending', '--platform', self.platform, '--json')
-        if pending.returncode != 0:
+        while True:
+            pending = self.layr('checks', 'pending', '--platform', self.platform, '--json')
+            if pending.returncode == 0:
+                break
             log(step='pending', exit=pending.returncode, detail=pending.stderr.strip()[-300:])
-            return None
+            time.sleep(IDLE)
+            self.fetch_heads()
         queue = self.layr('queue', 'list', '--into', 'main', '--json')
         queued = set()
         if queue.returncode == 0:
@@ -145,19 +151,35 @@ class Runner:
         return choose(json.loads(pending.stdout)['pending'], queued, self.checks, int(now * 1000), set(self.failed))
 
     def wait_for_change(self):
-        """Wait until another machine changes the project (a new state, a queue entry, an approval), then
-        fetch the heads. The results of this runner do not count (`--others`)."""
+        """Wait for another machine to change the project or for a local retry, then fetch the heads."""
         if self.can_wait is None:
             self.can_wait = self.layr('wait', '--help').returncode == 0
+        retry_at = min(self.failed.values()) + RETRY if self.failed else None
+        left = retry_at - time.time() if retry_at is not None else None
+        if left is not None and left <= 0:
+            return
+        pause = not self.can_wait
         if self.can_wait:
             os.makedirs(WAIT_DIR, exist_ok=True)
             cursor = os.path.join(WAIT_DIR, f'{self.project}-scoped.cursor')
-            result = self.layr('wait', 'origin', '--cursor-file', cursor, '--others', timeout=None)
-            if result.returncode != 0:
-                log(step='wait', exit=result.returncode, detail=result.stderr.strip()[-300:])
-                time.sleep(IDLE)
-        else:
-            time.sleep(IDLE)
+            seconds = math.ceil(left) if left is not None else None
+            limit = ['--timeout', str(seconds)] if seconds is not None else []
+            try:
+                result = self.layr('wait', 'origin', '--cursor-file', cursor, '--others', *limit,
+                                   timeout=seconds + WAIT_GRACE if seconds is not None else None)
+            except subprocess.TimeoutExpired:
+                # The wait may have checkpointed an event before timing out.
+                pass
+            else:
+                if result.returncode != 0:
+                    log(step='wait', exit=result.returncode, detail=result.stderr.strip()[-300:])
+                    pause = True
+        if pause:
+            left = retry_at - time.time() if retry_at is not None else IDLE
+            time.sleep(max(0, min(IDLE, left)))
+        self.fetch_heads()
+
+    def fetch_heads(self):
         started = time.time()
         result = self.layr('fetch', 'origin', '--heads')
         if result.returncode not in (0, 2):

@@ -836,6 +836,16 @@ impl Store {
         epochs::connect(self)
     }
 
+    /// Set the deadline on an events remote before connecting it.
+    pub(crate) fn set_wait_deadline(&mut self, deadline: std::time::Instant) -> Result<()> {
+        match &mut self.backend {
+            Backend::Gateway(gateway) => gateway.deadline = Some(deadline),
+            Backend::Api(api) => api.deadline = Some(deadline),
+            _ => bail!(backend::EVENTS_REMOTE_REQUIRED),
+        }
+        Ok(())
+    }
+
     fn connect_transport(&mut self, ctx: &Ctx) -> Result<()> {
         self.backend = self.backend.root().clone();
         self.epoch = None;
@@ -864,7 +874,9 @@ impl Store {
                 return Ok(());
             }
             legacy_probe = true;
-            self.backend = Backend::open(&self.url)?;
+            let mut gateway = gateway::Gateway::open(&self.url)?;
+            gateway.deadline = api.deadline;
+            self.backend = Backend::Gateway(gateway);
             self.backend.as_caller(ctx)?;
         }
         if let Backend::Gateway(gateway) = &mut self.backend {
@@ -966,10 +978,19 @@ impl Store {
 
     /// Authenticated immutable-object access for person requests and executor claims.
     pub fn request_backend(&mut self, ctx: &Ctx) -> Result<&Backend> {
+        self.prepare_requests(ctx)?;
+        Ok(self.backend())
+    }
+
+    pub(crate) fn prepare_requests(&mut self, ctx: &Ctx) -> Result<()> {
         self.connect(ctx)?;
         let descriptor = self.descriptor()?;
         self.identity(&descriptor, self.paper_key_text.as_deref())?;
-        Ok(&self.backend)
+        Ok(())
+    }
+
+    pub(crate) fn backend(&self) -> &Backend {
+        &self.backend
     }
 
     /// Project vault identity for opening person requests on the trusted executor.

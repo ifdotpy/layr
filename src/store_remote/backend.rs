@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 pub use super::download::TransferStats;
 pub use layr_store::s3::Object;
 
+pub(super) const EVENTS_REMOTE_REQUIRED: &str = "layr wait needs a Layr Cloud remote (layr+https://)";
+
 /// An object that the store answered for and that cannot be used: its bytes do not decrypt or decode. Unlike a failed
 /// read, reading it again gives the same answer.
 #[derive(Debug)]
@@ -125,7 +127,7 @@ impl Backend {
             Self::Api(a) => a.events(after, wait),
             Self::Prefix(base, _) => base.events(after, wait),
             Self::Epoch(epoch) => epoch.current.events(after, wait),
-            _ => anyhow::bail!("layr wait needs a Layr Cloud remote (layr+https://)"),
+            _ => bail!(EVENTS_REMOTE_REQUIRED),
         }
     }
 

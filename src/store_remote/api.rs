@@ -17,13 +17,29 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The largest object that goes up with one `PUT /objects/<id>`; a larger one goes up in parts.
 pub(crate) const SINGLE_PUT_LIMIT: usize = 64 << 20;
 /// The largest object that a read takes into memory (a part holds at most one large frame).
 const OBJECT_READ_LIMIT: u64 = 4 << 30;
 const JSON_LIMIT: u64 = 64 << 20;
+
+#[derive(Debug)]
+pub(crate) struct ResponseError {
+    pub status: u16,
+    message: String,
+}
+
+impl std::fmt::Display for ResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ResponseError {}
 
 /// The project as `GET /api/v1/projects/<p>` gives it.
 #[derive(Clone, Debug, Deserialize)]
@@ -81,6 +97,7 @@ pub(crate) struct Session {
 
 pub struct Api {
     http: Client,
+    pub(super) deadline: Option<Instant>,
     /// `https://<host>/`.
     origin: reqwest::Url,
     project: String,
@@ -102,6 +119,7 @@ impl Clone for Api {
     fn clone(&self) -> Self {
         Self {
             http: self.http.clone(),
+            deadline: self.deadline,
             origin: self.origin.clone(),
             project: self.project.clone(),
             token: self.token.clone(),
@@ -262,8 +280,10 @@ impl Api {
             if target.scheme() != "https" && !cfg!(test) {
                 bail!("Layr Cloud redirected an object to a URL that is not HTTPS");
             }
-            response = super::gateway::send_again(true, || {
-                self.http.get(target.clone()).send().map_err(|e| anyhow!("Layr Cloud object URL: {e}"))
+            response = super::gateway::send_again(true, self.deadline, || {
+                super::gateway::limit_request(self.http.get(target.clone()), self.deadline, REQUEST_TIMEOUT)?
+                    .send()
+                    .map_err(|e| anyhow!("Layr Cloud object URL: {e}"))
             })?;
         }
         if !response.status().is_success() {
@@ -298,10 +318,11 @@ impl Api {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(super::gateway::connect_timeout(Duration::from_secs(10)))
-            .timeout(Duration::from_secs(600))
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
         Ok(Self {
             http,
+            deadline: None,
             origin,
             project: project.into(),
             token: None,
@@ -331,7 +352,7 @@ impl Api {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(super::gateway::connect_timeout(Duration::from_secs(10)))
-            .timeout(Duration::from_secs(600));
+            .timeout(REQUEST_TIMEOUT);
         for certificate in certificates {
             builder = builder.add_root_certificate(certificate);
         }
@@ -410,15 +431,18 @@ impl Api {
     /// Sends a request again while the server is busy (and on a lost connection for an idempotent one), then
     /// turns `426` into the minimum version the server needs.
     fn send(&self, idempotent: bool, build: impl Fn() -> RequestBuilder) -> Result<Response> {
-        let response =
-            super::gateway::send_again(idempotent, || build().send().map_err(|e| super::gateway::send_error("Layr Cloud", e)))?;
+        let response = super::gateway::send_again(idempotent, self.deadline, || {
+            super::gateway::limit_request(build(), self.deadline, REQUEST_TIMEOUT)?
+                .send()
+                .map_err(|e| super::gateway::send_error("Layr Cloud", e))
+        })?;
         if let Some(version) = response.headers().get("layr-server").and_then(|v| v.to_str().ok()) {
             if let Ok(mut server) = self.server.lock() {
                 *server = Some(version.to_string());
             }
         }
         if response.status() == StatusCode::UPGRADE_REQUIRED {
-            let body: serde_json::Value = serde_json::from_slice(&read_limited(response, 4096)?).unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&self.read_limited(response, 4096)?).unwrap_or_default();
             let minimum = body["error"]["minimum"].as_str().unwrap_or("a newer version");
             bail!("Layr Cloud needs layr {minimum} or newer; this is layr {}: update layr", client_version());
         }
@@ -429,7 +453,7 @@ impl Api {
     fn failure(&self, what: &str, response: Response) -> anyhow::Error {
         let status = response.status().as_u16();
         let body: serde_json::Value =
-            serde_json::from_slice(&read_limited(response, 65536).unwrap_or_default()).unwrap_or_default();
+            serde_json::from_slice(&self.read_limited(response, 65536).unwrap_or_default()).unwrap_or_default();
         let code = body["error"]["code"].as_str().unwrap_or("");
         let message = body["error"]["message"].as_str().unwrap_or("");
         let server = self.server_version().map(|v| format!(", server {v}")).unwrap_or_default();
@@ -438,14 +462,30 @@ impl Api {
             403 => "; the token has no right for this action",
             _ => "",
         };
-        anyhow!("Layr Cloud {what}: HTTP {status} {code} {message}{server}{hint}")
+        ResponseError { status, message: format!("Layr Cloud {what}: HTTP {status} {code} {message}{server}{hint}") }.into()
+    }
+
+    fn read_limited(&self, response: Response, limit: u64) -> Result<Vec<u8>> {
+        if response.content_length().is_some_and(|n| n > limit) {
+            bail!("Layr Cloud answer is too large");
+        }
+        let mut data = Vec::new();
+        response
+            .take(limit + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| super::gateway::body_read_error(format!("Layr Cloud body read failed: {e}"), e, self.deadline))?;
+        if data.len() as u64 > limit {
+            bail!("Layr Cloud answer is too large");
+        }
+        Ok(data)
     }
 
     fn json<T: serde::de::DeserializeOwned>(&self, what: &str, response: Response) -> Result<T> {
         if !response.status().is_success() {
             return Err(self.failure(what, response));
         }
-        serde_json::from_slice(&read_limited(response, JSON_LIMIT)?).with_context(|| format!("Layr Cloud {what}: invalid JSON"))
+        serde_json::from_slice(&self.read_limited(response, JSON_LIMIT)?)
+            .with_context(|| format!("Layr Cloud {what}: invalid JSON"))
     }
 
     /// The project, read once per command while it has an id (a project without records gets one at its
@@ -473,7 +513,7 @@ impl Api {
         url.query_pairs_mut().append_pair("limit", "1");
         let response = self.send(true, || self.request(Method::GET, url.clone()))?;
         if response.status() == StatusCode::NOT_FOUND {
-            let body: serde_json::Value = serde_json::from_slice(&read_limited(response, 65536)?).unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&self.read_limited(response, 65536)?).unwrap_or_default();
             if body["error"]["code"] == "not_found" && body["error"]["message"] == "no such route" {
                 return Ok(false);
             }
@@ -590,8 +630,10 @@ impl Api {
             if target.scheme() != "https" && !cfg!(test) {
                 bail!("Layr Cloud redirected an object to a URL that is not HTTPS");
             }
-            response = super::gateway::send_again(true, || {
-                self.http.get(target.clone()).send().map_err(|e| anyhow!("Layr Cloud object URL: {e}"))
+            response = super::gateway::send_again(true, self.deadline, || {
+                super::gateway::limit_request(self.http.get(target.clone()), self.deadline, REQUEST_TIMEOUT)?
+                    .send()
+                    .map_err(|e| anyhow!("Layr Cloud object URL: {e}"))
             })?;
         }
         if response.status() == StatusCode::NOT_FOUND {
@@ -600,7 +642,7 @@ impl Api {
         if !response.status().is_success() {
             return Err(self.failure(&format!("read of object {id}"), response));
         }
-        let bytes = read_limited(response, OBJECT_READ_LIMIT)?;
+        let bytes = self.read_limited(response, OBJECT_READ_LIMIT)?;
         if Keying::Plain.id(kind, &bytes) != want {
             bail!("Layr Cloud object {id} does not match its id");
         }
@@ -655,7 +697,7 @@ impl Api {
         if !response.status().is_success() {
             return Err(self.failure("record segment", response));
         }
-        Ok(Some(read_limited(response, JSON_LIMIT)?))
+        Ok(Some(self.read_limited(response, JSON_LIMIT)?))
     }
 
     /// Uploads a segment: true when the server took it, false when it holds these records already.
@@ -668,7 +710,7 @@ impl Api {
         match response.status().as_u16() {
             200 | 201 => Ok(true),
             409 => {
-                let answer: serde_json::Value = serde_json::from_slice(&read_limited(response, 65536)?).unwrap_or_default();
+                let answer: serde_json::Value = serde_json::from_slice(&self.read_limited(response, 65536)?).unwrap_or_default();
                 let held = answer["last"].as_u64().or_else(|| answer["error"]["last"].as_u64()).unwrap_or(0);
                 if held >= last {
                     return Ok(false);
@@ -742,7 +784,7 @@ impl Api {
         if !response.status().is_success() {
             return Err(self.failure(&format!("index of pack {pack}"), response));
         }
-        read_limited(response, JSON_LIMIT)
+        self.read_limited(response, JSON_LIMIT)
     }
 
     /// The pack that holds each object of `ids` (`POST /objects/locate`, at most 1000 per request): object id
@@ -820,7 +862,8 @@ impl Api {
                 Ok(Cas::Done(self.json::<Refs>("refs/cas", response)?.refs))
             }
             409 => {
-                let answer: serde_json::Value = serde_json::from_slice(&read_limited(response, JSON_LIMIT)?).unwrap_or_default();
+                let answer: serde_json::Value =
+                    serde_json::from_slice(&self.read_limited(response, JSON_LIMIT)?).unwrap_or_default();
                 let list = answer["conflicts"]
                     .as_array()
                     .or_else(|| answer["error"]["conflicts"].as_array())
@@ -833,7 +876,8 @@ impl Api {
                 ))
             }
             403 => {
-                let answer: serde_json::Value = serde_json::from_slice(&read_limited(response, JSON_LIMIT)?).unwrap_or_default();
+                let answer: serde_json::Value =
+                    serde_json::from_slice(&self.read_limited(response, JSON_LIMIT)?).unwrap_or_default();
                 let rule = answer["rule"].as_str().or_else(|| answer["error"]["rule"].as_str()).unwrap_or("role");
                 let missing =
                     answer["missing"].as_array().or_else(|| answer["error"]["missing"].as_array()).cloned().unwrap_or_default();
@@ -921,7 +965,7 @@ impl Api {
             if !response.status().is_success() {
                 return Err(self.failure("person request", response));
             }
-            return Ok(Some(read_limited(response, layr_store::request::MAX_BYTES as u64)?));
+            return Ok(Some(self.read_limited(response, layr_store::request::MAX_BYTES as u64)?));
         }
         if scope.is_empty() && format::public_release_file(rest) {
             let path = rest.strip_prefix("public/release/").unwrap();
@@ -933,7 +977,7 @@ impl Api {
             if !response.status().is_success() {
                 return Err(self.failure("public release file", response));
             }
-            return Ok(Some(read_limited(response, 32 << 20)?));
+            return Ok(Some(self.read_limited(response, 32 << 20)?));
         }
         if secret_layout(rest) {
             return Ok(None);
@@ -1050,18 +1094,6 @@ impl Api {
         }
         bail!("{prefix} has no Layr Cloud API listing")
     }
-}
-
-fn read_limited(response: Response, limit: u64) -> Result<Vec<u8>> {
-    if response.content_length().is_some_and(|n| n > limit) {
-        bail!("Layr Cloud answer is too large");
-    }
-    let mut data = Vec::new();
-    response.take(limit + 1).read_to_end(&mut data).map_err(|e| anyhow!("Layr Cloud body read failed: {e}"))?;
-    if data.len() as u64 > limit {
-        bail!("Layr Cloud answer is too large");
-    }
-    Ok(data)
 }
 
 /// The session file that `layr login` writes for a host.

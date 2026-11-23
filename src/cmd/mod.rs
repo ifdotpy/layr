@@ -260,6 +260,10 @@ pub fn adopt_git(
 }
 
 pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
+    here_with_git_follow(ctx, true)
+}
+
+fn here_with_git_follow(ctx: &Ctx, follow: bool) -> Result<Here<'_>> {
     let loc = ctx.locate()?;
     crate::store::set_holder_line(loc.line.as_deref());
     let repo = Repo::open(ctx, &loc.project)?;
@@ -269,7 +273,7 @@ pub fn here(ctx: &Ctx) -> Result<Here<'_>> {
     };
     // Git moved HEAD in a fast line: the head of the line follows before the command reads it.
     let line = match line {
-        Some(l) if loc.line.is_some() => Some(follow_git(ctx, &repo, l)),
+        Some(l) if follow && loc.line.is_some() => Some(follow_git(ctx, &repo, l)),
         other => other,
     };
     // The local ignore file of the line applies also where a command scans a copy of the folder.
