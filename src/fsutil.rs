@@ -298,26 +298,22 @@ fn remove_empty_folders(path: &Path) -> Result<()> {
 /// A clash that the removals do not clear (an untracked `dir/x` where `Dir/x` comes) is refused
 /// before anything changes.
 pub fn replace_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str], own: Option<(u32, u32)>) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    refuse_remaining_clashes(dst, gone, write)?;
-    for g in gone {
-        remove_entry(dst, g)?;
-    }
-    for w in write {
-        copy_entry(src, w, dst, w, own)?;
-    }
-    Ok(())
+    replace_entries_with(dst, gone, write, |path| copy_entry(src, path, dst, path, own))
 }
 
 /// `replace_entries` into a working folder: written files get the current time.
 pub fn replace_work_entries(src: &Path, dst: &Path, gone: &[&str], write: &[&str], own: Option<(u32, u32)>) -> Result<()> {
+    replace_entries_with(dst, gone, write, |path| copy_work_entry(src, path, dst, path, own))
+}
+
+fn replace_entries_with(dst: &Path, gone: &[&str], write: &[&str], copy: impl Fn(&str) -> Result<()>) -> Result<()> {
     #[cfg(target_os = "macos")]
     refuse_remaining_clashes(dst, gone, write)?;
     for g in gone {
         remove_entry(dst, g)?;
     }
     for w in write {
-        copy_work_entry(src, w, dst, w, own)?;
+        copy(w)?;
     }
     Ok(())
 }
@@ -2052,6 +2048,34 @@ mod write_tests {
     use super::{atomic_write, cache_write, copy_entry};
     use std::fs;
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn replacements_remove_paths_first_and_keep_their_timestamp_policy() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-replace-{}", crate::ids::new_id()));
+        let src = root.join("src");
+        fs::create_dir_all(src.join("dir"))?;
+        let path = src.join("dir/file");
+        fs::write(&path, b"new")?;
+        let file = fs::File::open(&path)?;
+        let old = 978_307_200;
+        super::set_mtime(&file, old, 0)?;
+
+        let snapshot = root.join("snapshot");
+        let work = root.join("work");
+        for dst in [&snapshot, &work] {
+            fs::create_dir(dst)?;
+            fs::write(dst.join("dir"), b"old")?;
+        }
+        super::replace_entries(&src, &snapshot, &["dir"], &["dir/file"], None)?;
+        super::replace_work_entries(&src, &work, &["dir"], &["dir/file"], None)?;
+        for dst in [&snapshot, &work] {
+            assert_eq!(fs::read(dst.join("dir/file"))?, b"new");
+        }
+        assert_eq!(fs::metadata(snapshot.join("dir/file"))?.mtime(), old);
+        assert!(fs::metadata(work.join("dir/file"))?.mtime() > old);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

@@ -1896,7 +1896,6 @@ dependencies = [
  "fuser",
  "futures-util",
  "globset",
- "grep-matcher",
  "grep-printer",
  "grep-regex",
  "grep-searcher",

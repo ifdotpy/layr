@@ -203,16 +203,17 @@ pub fn numstat_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
 }
 
 pub fn name_status_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
+    format_name_status(files, '\t', '\n')
+}
+
+fn format_name_status(files: &[AnalyzedDiff<'_>], field: char, record: char) -> String {
     let mut s = String::new();
     for f in files {
         match f.status() {
-            'R' => s.push_str(&format!(
-                "R{:03}\t{}\t{}\n",
-                f.similarity(),
-                f.old.as_ref().unwrap().path,
-                f.new.as_ref().unwrap().path
-            )),
-            c => s.push_str(&format!("{c}\t{}\n", f.path())),
+            'R' => {
+                s.push_str(&format!("R{:03}{field}{}{field}{}{record}", f.similarity(), f.old.as_ref().unwrap().path, f.path()))
+            }
+            c => s.push_str(&format!("{c}{field}{}{record}", f.path())),
         }
     }
     s
@@ -242,19 +243,7 @@ pub fn numstat_z_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
 }
 
 pub fn name_status_z_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
-    let mut s = String::new();
-    for f in files {
-        match f.status() {
-            'R' => s.push_str(&format!(
-                "R{:03}\0{}\0{}\0",
-                f.similarity(),
-                f.old.as_ref().unwrap().path,
-                f.new.as_ref().unwrap().path
-            )),
-            c => s.push_str(&format!("{c}\0{}\0", f.path())),
-        }
-    }
-    s
+    format_name_status(files, '\0', '\0')
 }
 
 pub fn name_only_z_analyzed(files: &[AnalyzedDiff<'_>]) -> String {
@@ -333,6 +322,17 @@ pub(crate) mod regression {
             });
         }
         files
+    }
+
+    #[test]
+    fn name_status_nul_keeps_literal_path_bytes() {
+        let side = |path: &str| Side { path: path.into(), mode: 0o100644, data: b"same".to_vec(), big: None };
+        let files = [
+            FileDiff { old: Some(side("old\tname")), new: Some(side("new\nname")) },
+            FileDiff { old: None, new: Some(side("added")) },
+        ];
+        let analyzed = files.each_ref().map(AnalyzedDiff::new);
+        assert_eq!(name_status_z_analyzed(&analyzed).as_bytes(), b"R100\0old\tname\0new\nname\0A\0added\0");
     }
 
     #[test]

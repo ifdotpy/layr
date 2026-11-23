@@ -2242,19 +2242,20 @@ Helm хранит charts в OCI registry: config `application/vnd.cncf.helm.conf
 1. Layr README — https://github.com/ifdotpy/layr
 2. Layr overlays (design, status, benchmarks) — https://github.com/ifdotpy/layr/blob/main/docs/overlays.md
 3. LAYR Studio / codex-studio — https://github.com/ifdotpy/codex-studio
-4. Layr Desk README — https://github.com/ifdotpy/layr-desk
-5. Layr Desk design (crypto, S3, format, findings) — https://github.com/ifdotpy/layr-desk/blob/main/docs/design.md
-6. Layr Desk Rust writer — https://github.com/ifdotpy/layr-desk/blob/main/crates/desk-core/src/writer.rs
-7. Layr Desk Rust format — https://github.com/ifdotpy/layr-desk/blob/main/crates/desk-core/src/format.rs
-8. LAYR Studio product/runtime docs — https://github.com/ifdotpy/codex-studio/tree/main/docs
+4. Layr Desk historical sources at Cloud commit `31610ce34b188552707aecca3bccb81a1b803fa9` (see the [repository migration](cloud-repo-design.md))
+   - `README.md`
+   - `docs/design.md` (crypto, S3, format, findings)
+   - `crates/desk-core/src/writer.rs`
+   - `crates/desk-core/src/format.rs`
+5. LAYR Studio product/runtime docs — https://github.com/ifdotpy/codex-studio/tree/main/docs
 
 ### AWS / платформенная документация
 
-9. S3 conditional writes — https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html
-10. S3 pricing (актуализировать перед расчётом) — https://aws.amazon.com/s3/pricing/
-11. EBS pricing (актуализировать перед расчётом) — https://aws.amazon.com/ebs/pricing/
-12. EC2 Instance Store lifetime — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-store-lifetime.html
-13. S3 Versioning/delete markers — https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeleteMarker.html
+6. S3 conditional writes — https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html
+7. S3 pricing (актуализировать перед расчётом) — https://aws.amazon.com/s3/pricing/
+8. EBS pricing (актуализировать перед расчётом) — https://aws.amazon.com/ebs/pricing/
+9. EC2 Instance Store lifetime — https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-store-lifetime.html
+10. S3 Versioning/delete markers — https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeleteMarker.html
 
 ### Проблемы индустрии (2.6)
 
@@ -2267,7 +2268,7 @@ Helm хранит charts в OCI registry: config `application/vnd.cncf.helm.conf
 - [Databricks: Neon](https://www.databricks.com/blog/databricks-neon)
 - [17M robot PRs a month](https://bex.co/blog/2026/09/08/ai-coding-agents-open-source-maintainership)
 - [AgentConn: review bottleneck](https://agentconn.com/blog/10x-prs-1x-reviewers-code-quality-bottleneck-gate-2026/)
-- [Graphite: merge queue](https://graphite.com/blog/what-is-a-merge-queue)
+- [Graphite: merge queue](https://graphite.com/docs/graphite-merge-queue)
 - [GitHub: cache eviction policy](https://github.blog/changelog/2025-09-29-new-date-for-enforcement-of-cache-eviction-policy/)
 - [Depot: slow checkout](https://depot.dev/blog/why-organizations-have-slow-actions-checkout.md)
 - [Quash: flaky test statistics](https://quashbugs.com/blog/flaky-test-statistics)
@@ -2287,7 +2288,7 @@ Helm хранит charts в OCI registry: config `application/vnd.cncf.helm.conf
 ### Chromium и сборка (часть II)
 
 - [Chromium build instructions](https://www.chromium.org/developers/how-tos/get-the-code/)
-- [Chromium Siso](https://chromium.googlesource.com/infra/infra/+/main/go/src/infra/build/siso/)
+- [Chromium Siso](https://chromium.googlesource.com/build/+/refs/heads/main/siso/)
 - [Remote Execution API](https://github.com/bazelbuild/remote-apis)
 - [Buildbarn](https://github.com/buildbarn), [NativeLink](https://github.com/TraceMachina/nativelink), [BuildBuddy](https://github.com/buildbuddy-io/buildbuddy): серверы REAPI
 - [NativeLink: Chromium и Siso](https://docs.nativelink.com/deployment/chromium)

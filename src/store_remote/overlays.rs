@@ -989,6 +989,24 @@ pub(crate) fn sweep_caches(store: &Store, ctx: &Ctx, repo: &Repo, dry_run: bool)
     Ok(out)
 }
 
+fn open_overlay_project<'a>(ctx: &'a Ctx, repo: &Repo, name: &str) -> Result<Project<'a>> {
+    let pname = format!("{}%{name}", repo.p.name);
+    if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
+        Project::open_partial(&ctx.store, &pname)
+    } else {
+        Project::create_empty_overlay(&ctx.store, &pname)
+    }
+}
+
+fn read_overlay(store: &mut Store, ctx: &Ctx, repo: &Repo, layer: &mut Repo, name: &str, opts: &Options) -> Result<Report> {
+    let opts = &fetch_selection(repo, name, opts)?;
+    if repo.limited_history(name)? || !opts.lines.is_empty() {
+        reader::fetch_layer(store, ctx, layer, opts, repo)
+    } else {
+        reader::fetch(store, ctx, layer, opts)
+    }
+}
+
 const SELECTION_OMISSION: &str = "overlays outside --overlay were skipped";
 
 fn main_only(opts: &Options) -> bool {
@@ -1086,12 +1104,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 }
                 return Ok(());
             };
-            let pname = format!("{}%{name}", repo.p.name);
-            let mut op = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
-                Project::open_partial(&ctx.store, &pname)?
-            } else {
-                Project::create_empty_overlay(&ctx.store, &pname)?
-            };
+            let mut op = open_overlay_project(ctx, repo, &name)?;
             if !op.id.is_empty() && op.id != published.key.overlay {
                 bail!("overlay {name} has another project id");
             }
@@ -1145,12 +1158,7 @@ pub(super) fn fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, repor
                 )?;
             }
             let mut scoped = layer(store, &published, Some(identity), false)?;
-            let opts = &fetch_selection(repo, &name, opts)?;
-            let fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
-                reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
-            } else {
-                reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
-            };
+            let fetched = read_overlay(&mut scoped, ctx, repo, &mut orepo, &name, opts)?;
             merge(report, fetched, &name, "fetch");
             // Fetched states of another machine move its overlay lines: the history limit applies now, as after a
             // local move, so the states beyond it go in this command.
@@ -1271,12 +1279,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
         }
         let mut one = || -> Result<()> {
             let scope = format!("overlays/{name}/");
-            let pname = format!("{}%{name}", repo.p.name);
-            let op = if crate::store::db_file(&ctx.store.project_dir(&pname)?).exists() {
-                Project::open_partial(&ctx.store, &pname)?
-            } else {
-                Project::create_empty_overlay(&ctx.store, &pname)?
-            };
+            let op = open_overlay_project(ctx, repo, &name)?;
             // A new copy takes the overlay id from the first record of the layer; the records check it after.
             let project = if op.id.is_empty() {
                 let segments = api.segments(&scope)?;
@@ -1291,12 +1294,7 @@ pub(super) fn api_fetch(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, r
             let mut orepo = Repo { restore_from_remote: true, p: op, ctx: None };
             let mut scoped = api_layer(store, &name, &project)?;
             scoped.private_dir()?;
-            let opts = &fetch_selection(repo, &name, opts)?;
-            let mut fetched = if repo.limited_history(&name)? || !opts.lines.is_empty() {
-                reader::fetch_layer(&mut scoped, ctx, &mut orepo, opts, repo)?
-            } else {
-                reader::fetch(&mut scoped, ctx, &mut orepo, opts)?
-            };
+            let mut fetched = read_overlay(&mut scoped, ctx, repo, &mut orepo, &name, opts)?;
             super::fetch_refs(&scoped, &orepo, &mut fetched)?;
             merge(report, fetched, &name, "fetch");
             repo.after_overlay_move(ctx, &name);

@@ -883,10 +883,11 @@ fn check_first_cache_fetch(
     opts: &Options,
     cache_of: Option<&str>,
 ) {
+    // With --line, exercise selection on an overlay without a history limit.
     let mut declaration = crate::model::DraftRecord::new("overlay.create");
     declaration.data = serde_json::json!({"name":name,"config":{
             format!("overlay.{name}"):{"owner":ctx.caller.uid,"root":"target","mode":"follow"},
-            format!("overlay.{name}.history"):1,
+            format!("overlay.{name}.history"):opts.lines.is_empty().then_some(1),
             format!("overlay.{name}.trust"):"protected"}});
     repo.p.lock_maintenance().unwrap().append(declaration, &ctx.actor()).unwrap();
     let dir = ctx.store.project_dir(&format!("p%{name}")).unwrap();
