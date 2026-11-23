@@ -784,18 +784,6 @@ pub fn clone_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, dst
 
 #[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
 const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
-/// Extent flags that give no stable device offset: unknown, delayed allocation, inline data.
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-const FIEMAP_UNSTABLE: u32 = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_DATA_INLINE;
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-const FIEMAP_EXTENT_UNKNOWN: u32 = 0x2;
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-const FIEMAP_EXTENT_DELALLOC: u32 = 0x4;
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x200;
-
 /// `struct file_dedupe_range` with one `struct file_dedupe_range_info`.
 #[repr(C)]
 #[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
@@ -810,29 +798,6 @@ struct DedupeArgs {
     bytes_deduped: u64,
     status: i32,
     reserved3: u32,
-}
-
-#[repr(C)]
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-struct FiemapExtent {
-    logical: u64,
-    physical: u64,
-    length: u64,
-    reserved64: [u64; 2],
-    flags: u32,
-    reserved: [u32; 3],
-}
-
-#[repr(C)]
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-struct Fiemap {
-    start: u64,
-    length: u64,
-    flags: u32,
-    mapped_extents: u32,
-    extent_count: u32,
-    reserved: u32,
-    extent: FiemapExtent,
 }
 
 /// Share a byte range of `src` with `dst` when the kernel finds the bytes equal (FIDEDUPERANGE).
@@ -860,25 +825,270 @@ pub fn dedupe_range(src: &impl AsFd, src_off: u64, len: u64, dst: &impl AsFd, ds
     }
 }
 
-/// The device offset of the byte at `off`, or `None` when the file system gives none (a hole,
-/// delayed allocation, inline data, or no FIEMAP). Equal offsets in two files mean one extent.
-#[cfg_attr(any(target_os = "macos", feature = "overlayfs"), allow(dead_code))]
-pub fn physical_at(f: &impl AsFd, off: u64) -> Option<u64> {
-    let mut m = Fiemap {
-        start: off,
-        length: 1,
-        flags: 0,
-        mapped_extents: 0,
-        extent_count: 1,
-        reserved: 0,
-        extent: FiemapExtent { logical: 0, physical: 0, length: 0, reserved64: [0; 2], flags: 0, reserved: [0; 3] },
-    };
-    ioctl_ptr(f.as_fd(), FS_IOC_FIEMAP, &mut m).ok()?;
-    let e = &m.extent;
-    if m.mapped_extents == 0 || e.flags & FIEMAP_UNSTABLE != 0 || off < e.logical {
-        return None;
+/// The extents of whole files (Linux `FIEMAP`).
+#[cfg(target_os = "linux")]
+pub mod fiemap {
+    use super::*;
+
+    const FS_IOC_FIEMAP: libc::c_ulong = 0xc020_660b;
+    /// Extent flags that give no stable device offset: unknown, delayed allocation, inline data.
+    const FIEMAP_UNSTABLE: u32 = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_DATA_INLINE;
+    const FIEMAP_EXTENT_LAST: u32 = 0x1;
+    const FIEMAP_EXTENT_UNKNOWN: u32 = 0x2;
+    const FIEMAP_EXTENT_DELALLOC: u32 = 0x4;
+    const FIEMAP_EXTENT_DATA_INLINE: u32 = 0x200;
+    const FIEMAP_EXTENT_SHARED: u32 = 0x2000;
+
+    /// `struct fiemap_extent`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct FiemapExtent {
+        logical: u64,
+        physical: u64,
+        length: u64,
+        reserved64: [u64; 2],
+        flags: u32,
+        reserved: [u32; 3],
     }
-    Some(e.physical + (off - e.logical))
+
+    /// `struct fiemap` with room for `N` extents.
+    #[repr(C)]
+    struct Fiemap<const N: usize> {
+        start: u64,
+        length: u64,
+        flags: u32,
+        mapped_extents: u32,
+        extent_count: u32,
+        reserved: u32,
+        extents: [FiemapExtent; N],
+    }
+
+    impl<const N: usize> Fiemap<N> {
+        /// Up to `N` extents of the `length` bytes at `start` (`FS_IOC_FIEMAP`).
+        fn query(f: BorrowedFd, start: u64, length: u64) -> io::Result<Self> {
+            let mut map = Fiemap {
+                start,
+                length,
+                flags: 0,
+                mapped_extents: 0,
+                extent_count: N as u32,
+                reserved: 0,
+                extents: [FiemapExtent::default(); N],
+            };
+            ioctl_ptr(f, FS_IOC_FIEMAP, &mut map)?;
+            Ok(map)
+        }
+
+        fn mapped(&self) -> &[FiemapExtent] {
+            &self.extents[..(self.mapped_extents as usize).min(N)]
+        }
+    }
+
+    /// The device offset of the byte at `off`, or `None` when the file system gives none (a hole,
+    /// delayed allocation, inline data, or no FIEMAP). Equal offsets in two files mean one extent.
+    #[cfg_attr(feature = "overlayfs", allow(dead_code))]
+    pub fn physical_at(f: &impl AsFd, off: u64) -> Option<u64> {
+        let map = Fiemap::<1>::query(f.as_fd(), off, 1).ok()?;
+        let e = map.mapped().first()?;
+        if e.flags & FIEMAP_UNSTABLE != 0 || off < e.logical {
+            return None;
+        }
+        Some(e.physical + (off - e.logical))
+    }
+
+    /// Pass the extents of an open file to `visit` in order, one batch per `FIEMAP` call of up to
+    /// 256 extents, through the last one. Nothing is kept between calls.
+    fn read(file: &impl AsFd, mut visit: impl FnMut(&[FiemapExtent])) -> io::Result<()> {
+        let mut start = 0;
+        loop {
+            let map = Fiemap::<256>::query(file.as_fd(), start, u64::MAX - start)?;
+            let batch = map.mapped();
+            let last = batch.iter().position(|e| e.flags & FIEMAP_EXTENT_LAST != 0);
+            // XFS may leave the last flag off: then one more call returns no extent, and the walk ends.
+            if !batch.is_empty() {
+                visit(&batch[..last.map_or(batch.len(), |i| i + 1)]);
+            }
+            match batch.last() {
+                Some(e) if last.is_none() => start = e.logical + e.length,
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    /// The extents of a file as (logical offset, physical address, length) when every one is plain
+    /// data at a device address (no flag but last and shared), else `None`: inline and encoded data
+    /// have no address to compare. Equal lists mean the same data.
+    pub fn plain_extents(file: &impl AsFd) -> io::Result<Option<Vec<(u64, u64, u64)>>> {
+        let mut key = Some(Vec::new());
+        // An ineligible key still reads on: a later FIEMAP error is still returned.
+        read(file, |batch| add_plain(&mut key, batch))?;
+        Ok(key.filter(|key| !key.is_empty()))
+    }
+
+    /// Add the extents of `batch` to `key`, or drop the key when one of them is not plain.
+    fn add_plain(key: &mut Option<Vec<(u64, u64, u64)>>, batch: &[FiemapExtent]) {
+        if batch.iter().any(|e| e.flags & !(FIEMAP_EXTENT_LAST | FIEMAP_EXTENT_SHARED) != 0) {
+            *key = None;
+        }
+        if let Some(key) = key {
+            key.extend(batch.iter().map(|e| (e.logical, e.physical, e.length)));
+        }
+    }
+
+    /// An extent returned by FIEMAP; unstable addresses are absent.
+    pub struct MappedExtent {
+        pub logical: u64,
+        pub addr: Option<u64>,
+        pub len: u64,
+        pub shared: bool,
+    }
+
+    /// The extents of an open file: physical address, length, and whether another file or snapshot
+    /// shares it. btrfs, XFS and ext4.
+    pub fn extents(file: &impl AsFd) -> io::Result<Vec<MappedExtent>> {
+        let mut out = Vec::new();
+        read(file, |batch| out.extend(batch.iter().map(mapped)))?;
+        Ok(out)
+    }
+
+    fn mapped(e: &FiemapExtent) -> MappedExtent {
+        MappedExtent {
+            logical: e.logical,
+            addr: (e.flags & FIEMAP_UNSTABLE == 0 && e.physical != 0).then_some(e.physical),
+            len: e.length,
+            shared: e.flags & FIEMAP_EXTENT_SHARED != 0,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn extent(logical: u64, physical: u64, flags: u32) -> FiemapExtent {
+            FiemapExtent { logical, physical, length: 4096, flags, ..Default::default() }
+        }
+
+        #[test]
+        fn plain_extents_have_only_the_last_and_shared_flags() {
+            let shared = extent(0, 8192, FIEMAP_EXTENT_SHARED);
+            let last = extent(4096, 16384, FIEMAP_EXTENT_LAST);
+            let key = |batches: &[&[FiemapExtent]]| {
+                let mut key = Some(Vec::new());
+                batches.iter().for_each(|batch| add_plain(&mut key, batch));
+                key
+            };
+            assert_eq!(key(&[&[shared], &[last]]), Some(vec![(0, 8192, 4096), (4096, 16384, 4096)]));
+            assert_eq!(key(&[&[extent(0, 0, 0)]]), Some(vec![(0, 0, 4096)]));
+            const ENCODED: u32 = 0x8;
+            for flags in [FIEMAP_EXTENT_DATA_INLINE, ENCODED, FIEMAP_EXTENT_DELALLOC | FIEMAP_EXTENT_LAST] {
+                let other = extent(4096, 16384, flags);
+                assert_eq!(key(&[&[shared, other]]), None, "flags {flags:#x}");
+                // A key dropped in one batch stays dropped.
+                assert_eq!(key(&[&[other], &[last]]), None, "flags {flags:#x}");
+            }
+        }
+
+        #[test]
+        fn mapped_extents_have_stable_addresses_only() {
+            let cases = [
+                (extent(0, 8192, 0), Some(8192), false),
+                (extent(0, 8192, FIEMAP_EXTENT_SHARED | FIEMAP_EXTENT_LAST), Some(8192), true),
+                (extent(0, 0, 0), None, false),
+                (extent(0, 8192, FIEMAP_EXTENT_UNKNOWN), None, false),
+                (extent(0, 8192, FIEMAP_EXTENT_DELALLOC), None, false),
+                (extent(0, 8192, FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_SHARED), None, true),
+            ];
+            for (raw, addr, shared) in cases {
+                let mapped = mapped(&raw);
+                assert_eq!(
+                    (mapped.logical, mapped.addr, mapped.len, mapped.shared),
+                    (0, addr, 4096, shared),
+                    "flags {:#x}",
+                    raw.flags
+                );
+            }
+        }
+
+        /// A file of `blocks` blocks of incompressible data, each after a hole wider than any
+        /// allocation unit, so that every block is one extent. Removed before it is returned.
+        const STRIDE: u64 = 128 * 1024;
+        fn sparse_file(blocks: u64) -> io::Result<std::fs::File> {
+            use std::os::unix::fs::FileExt;
+            let path = std::env::temp_dir().join(format!("layr-fiemap-{}", crate::ids::new_id()));
+            let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+            std::fs::remove_file(&path)?;
+            let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+            let mut block = [0u8; 4096];
+            for i in 0..blocks {
+                for byte in &mut block {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    *byte = seed.to_le_bytes()[0];
+                }
+                file.write_all_at(&block, i * STRIDE)?;
+            }
+            file.sync_all()?;
+            Ok(file)
+        }
+
+        fn unsupported<T>(result: &io::Result<T>) -> bool {
+            let skip = matches!(result, Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP));
+            if skip {
+                eprintln!("no FIEMAP here");
+            }
+            skip
+        }
+
+        /// More extents than one `FIEMAP` call returns: the cursor continues after the last one.
+        #[test]
+        fn fiemap_reads_every_extent_past_one_call() -> io::Result<()> {
+            const EXTENTS: u64 = 300;
+            let file = sparse_file(EXTENTS)?;
+            let (mut raw, mut batches) = (Vec::new(), 0);
+            let result = read(&file, |batch| {
+                raw.extend_from_slice(batch);
+                batches += 1;
+            });
+            if unsupported(&result) {
+                return Ok(());
+            }
+            result?;
+            // One call returns at most 256 extents; XFS can return fewer, so more calls are fine.
+            assert!(batches >= EXTENTS.div_ceil(256), "{batches} calls");
+            let mapped: Vec<u64> = extents(&file)?.iter().map(|e| e.logical).collect();
+            let offsets: Vec<u64> = raw.iter().map(|e| e.logical).collect();
+            assert_eq!(mapped, offsets);
+            // XFS keeps space after a write as unwritten extents (speculative preallocation): data are the others.
+            const FIEMAP_EXTENT_UNWRITTEN: u32 = 0x800;
+            let data: Vec<u64> = raw.iter().filter(|e| e.flags & FIEMAP_EXTENT_UNWRITTEN == 0).map(|e| e.logical).collect();
+            assert_eq!(data, (0..EXTENTS).map(|i| i * STRIDE).collect::<Vec<_>>());
+            // XFS may leave the last flag off; a flag that is there marks the last extent only.
+            let flagged: Vec<usize> =
+                raw.iter().enumerate().filter(|(_, e)| e.flags & FIEMAP_EXTENT_LAST != 0).map(|(i, _)| i).collect();
+            assert!(flagged.is_empty() || flagged == [raw.len() - 1], "{flagged:?}");
+            Ok(())
+        }
+
+        /// The device offset of a byte is its extent's address plus its offset in the extent;
+        /// a hole has none.
+        #[test]
+        fn physical_offsets_follow_the_extent_list() -> io::Result<()> {
+            let file = sparse_file(2)?;
+            let plain = plain_extents(&file);
+            if unsupported(&plain) {
+                return Ok(());
+            }
+            assert_eq!(plain_extents(&sparse_file(0)?)?, None);
+            let plain = plain?.unwrap_or_default();
+            assert!(matches!(plain[..], [(0, _, len), (STRIDE, _, _)] if len < STRIDE), "{plain:?}");
+            let ((first, len), second) = ((plain[0].1, plain[0].2), plain[1].1);
+            let offsets = [0, 100, len, STRIDE, STRIDE + 100];
+            let expected = [Some(first), Some(first + 100), None, Some(second), Some(second + 100)];
+            assert_eq!(offsets.map(|off| physical_at(&file, off)), expected);
+            Ok(())
+        }
+    }
 }
 
 // ----- processes -----
@@ -2581,136 +2791,6 @@ pub fn apfs_space_read(dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<Vec
             out.push(SpaceEntry { name, dir, ino, links, alloc, private, clone });
             pos += len;
         }
-    }
-}
-
-/// Every extent of an open file (`FIEMAP`): logical offset, physical address, length and the
-/// flags of the extent (`FIEMAP_EXTENT_*`). Used to find files with the same data.
-#[cfg(target_os = "linux")]
-pub fn fiemap_full(file: &std::fs::File) -> io::Result<Vec<(u64, u64, u64, u32)>> {
-    const EXTENT_LAST: u32 = 0x1;
-    const COUNT: usize = 256;
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    struct Extent {
-        logical: u64,
-        physical: u64,
-        length: u64,
-        reserved64: [u64; 2],
-        flags: u32,
-        reserved: [u32; 3],
-    }
-    #[repr(C)]
-    struct Map {
-        start: u64,
-        length: u64,
-        flags: u32,
-        mapped: u32,
-        count: u32,
-        reserved: u32,
-        extents: [Extent; COUNT],
-    }
-    let mut out = Vec::new();
-    let mut start = 0u64;
-    loop {
-        let mut map = Map {
-            start,
-            length: u64::MAX - start,
-            flags: 0,
-            mapped: 0,
-            count: COUNT as u32,
-            reserved: 0,
-            extents: [Extent::default(); COUNT],
-        };
-        // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
-        if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mapped = (map.mapped as usize).min(COUNT);
-        if mapped == 0 {
-            return Ok(out);
-        }
-        for e in &map.extents[..mapped] {
-            out.push((e.logical, e.physical, e.length, e.flags));
-            if e.flags & EXTENT_LAST != 0 {
-                return Ok(out);
-            }
-        }
-        let last = map.extents[mapped - 1];
-        start = last.logical + last.length;
-    }
-}
-
-/// An extent returned by FIEMAP; unstable addresses are absent.
-#[cfg(target_os = "linux")]
-pub struct MappedExtent {
-    pub logical: u64,
-    pub addr: Option<u64>,
-    pub len: u64,
-    pub shared: bool,
-}
-
-/// The extents of an open file (`FIEMAP`): physical address, length, and whether another file
-/// or snapshot shares it (`FIEMAP_EXTENT_SHARED`). btrfs, XFS and ext4.
-#[cfg(target_os = "linux")]
-pub fn fiemap_extents(file: &std::fs::File) -> io::Result<Vec<MappedExtent>> {
-    const EXTENT_LAST: u32 = 0x1;
-    const EXTENT_SHARED: u32 = 0x2000;
-    const COUNT: usize = 256;
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    struct Extent {
-        logical: u64,
-        physical: u64,
-        length: u64,
-        reserved64: [u64; 2],
-        flags: u32,
-        reserved: [u32; 3],
-    }
-    #[repr(C)]
-    struct Map {
-        start: u64,
-        length: u64,
-        flags: u32,
-        mapped: u32,
-        count: u32,
-        reserved: u32,
-        extents: [Extent; COUNT],
-    }
-    let mut out = Vec::new();
-    let mut start = 0u64;
-    loop {
-        let mut map = Map {
-            start,
-            length: u64::MAX - start,
-            flags: 0,
-            mapped: 0,
-            count: COUNT as u32,
-            reserved: 0,
-            extents: [Extent::default(); COUNT],
-        };
-        // SAFETY: the descriptor is live and `map` is a valid fiemap buffer with room for COUNT extents.
-        if unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mapped = (map.mapped as usize).min(COUNT);
-        if mapped == 0 {
-            return Ok(out);
-        }
-        for e in &map.extents[..mapped] {
-            let addressable = e.flags & FIEMAP_UNSTABLE == 0;
-            out.push(MappedExtent {
-                logical: e.logical,
-                addr: (addressable && e.physical != 0).then_some(e.physical),
-                len: e.length,
-                shared: e.flags & EXTENT_SHARED != 0,
-            });
-            if e.flags & EXTENT_LAST != 0 {
-                return Ok(out);
-            }
-        }
-        let last = map.extents[mapped - 1];
-        start = last.logical + last.length;
     }
 }
 

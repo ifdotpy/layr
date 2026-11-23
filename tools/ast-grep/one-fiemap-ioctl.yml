@@ -1,0 +1,80 @@
+id: one-fiemap-ioctl
+language: Rust
+severity: error
+message: Read extents through `sys::fiemap`; `Fiemap::query` is the one `FS_IOC_FIEMAP` ioctl.
+note: A second FIEMAP call site brings back a copy of the kernel structs and of the cursor loop.
+files:
+  - src/**/*.rs
+  - crates/**/*.rs
+utils:
+  ioctl-name:
+    any:
+      - kind: identifier
+        regex: ^(r#)?ioctl(_ptr)?$
+      - kind: scoped_identifier
+        has:
+          field: name
+          regex: ^(r#)?ioctl(_ptr)?$
+  fiemap-request:
+    any:
+      - kind: identifier
+        regex: ^FS_IOC_FIEMAP$
+      - kind: scoped_identifier
+        has:
+          field: name
+          regex: ^FS_IOC_FIEMAP$
+rule:
+  kind: call_expression
+  all:
+    # An ioctl call ...
+    - has:
+        field: function
+        any:
+          - matches: ioctl-name
+          - kind: generic_function
+            has:
+              field: function
+              matches: ioctl-name
+    # ... whose request (second argument) is FS_IOC_FIEMAP, cast or not ...
+    - has:
+        field: arguments
+        has:
+          nthChild:
+            position: 2
+            ofRule:
+              not:
+                any:
+                  - kind: line_comment
+                  - kind: block_comment
+          any:
+            - matches: fiemap-request
+            - kind: type_cast_expression
+              has:
+                field: value
+                matches: fiemap-request
+  # ... outside `query` of the inherent `impl Fiemap` (the nearest function counts).
+  not:
+    inside:
+      kind: function_item
+      stopBy:
+        kind: function_item
+      has:
+        field: name
+        regex: ^query$
+      inside:
+        kind: declaration_list
+        inside:
+          kind: impl_item
+          not:
+            has:
+              field: trait
+              regex: .
+          has:
+            field: type
+            any:
+              - kind: type_identifier
+                regex: ^Fiemap$
+              - kind: generic_type
+                has:
+                  field: type
+                  regex: ^Fiemap$

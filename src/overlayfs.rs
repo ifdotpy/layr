@@ -2499,7 +2499,7 @@ impl Files {
             }
         }
         let from = File::open(src).with_context(|| format!("open {}", src.display()))?;
-        let key = plain_extents(&from).map(|extents| (m.len(), extents));
+        let key = crate::sys::fiemap::plain_extents(&from).ok().flatten().map(|extents| (m.len(), extents));
         let shared = key.as_ref().and_then(|k| self.seen.get(k).cloned());
         let to =
             fs::OpenOptions::new().write(true).create_new(true).open(dst).with_context(|| format!("create {}", dst.display()))?;
@@ -2957,14 +2957,4 @@ impl ProjectCopier for Copier {
     fn finish(self: Box<Self>) -> Result<()> {
         Copier::finish(*self)
     }
-}
-
-pub(crate) fn plain_extents(file: &File) -> Option<Vec<(u64, u64, u64)>> {
-    const LAST: u32 = 0x1;
-    const SHARED: u32 = 0x2000;
-    let extents = crate::sys::fiemap_full(file).ok()?;
-    if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
-        return None;
-    }
-    Some(extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect())
 }

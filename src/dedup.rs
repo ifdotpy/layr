@@ -259,9 +259,10 @@ fn dedupe_match(files: &[Entry], m: &Match) -> io::Result<u64> {
     Ok(done)
 }
 
+#[cfg(all(target_os = "linux", not(feature = "overlayfs")))]
 fn shared_match(files: &[Entry], m: &Match) -> bool {
     let (Ok(a), Ok(b)) = (open_plain(&files[m.src].path), open_plain(&files[m.dst].path)) else { return false };
-    match (crate::sys::physical_at(&a, m.src_off), crate::sys::physical_at(&b, m.dst_off)) {
+    match (crate::sys::fiemap::physical_at(&a, m.src_off), crate::sys::fiemap::physical_at(&b, m.dst_off)) {
         (Some(x), Some(y)) => x == y,
         _ => false,
     }

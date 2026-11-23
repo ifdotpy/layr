@@ -1,0 +1,53 @@
+id: one-fiemap-ioctl
+valid:
+  - |
+    impl<const N: usize> Fiemap<N> {
+        fn query(f: BorrowedFd) -> io::Result<Self> { ioctl_ptr(f, FS_IOC_FIEMAP, &mut map)?; Ok(map) }
+    }
+  - |
+    fn describe() -> String { describe_request(FS_IOC_FIEMAP) }
+  - |
+    fn dedupe(f: BorrowedFd) { ioctl_ptr(f, FIDEDUPERANGE, &mut args).ok(); }
+  - |
+    fn other(fd: i32) { unsafe { libc::ioctl(fd, FS_IOC_FIEMAP as libc::c_ulong + 1, p) }; }
+invalid:
+  - |
+    impl FiemapOther {
+        fn query(f: BorrowedFd) -> io::Result<()> { ioctl_ptr(f, FS_IOC_FIEMAP, &mut map) }
+    }
+  - |
+    impl Trait for &Fiemap {
+        fn query(f: BorrowedFd) -> io::Result<()> { ioctl_ptr(f, FS_IOC_FIEMAP, &mut map) }
+    }
+  - |
+    impl Fiemap {
+        fn other() { impl Trait for Other { fn query() { ioctl(fd, FS_IOC_FIEMAP, p); } } }
+    }
+  - |
+    impl Fiemap {
+        fn query() { fn inner() { ioctl(fd, FS_IOC_FIEMAP, p); } }
+    }
+  - |
+    fn fiemap_full(file: &File) {
+        unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP as _, &mut map as *mut Map) };
+    }
+  - |
+    fn physical_at(f: &impl AsFd) { ioctl_ptr(f.as_fd(), self::FS_IOC_FIEMAP, &mut m).ok(); }
+  - |
+    fn a(fd: i32) { unsafe { ioctl(fd, ::libc::FS_IOC_FIEMAP, p) }; }
+  - |
+    fn b(fd: i32) { unsafe { ioctl(fd, <Dev as Api>::FS_IOC_FIEMAP, p) }; }
+  - |
+    fn c(fd: i32) { unsafe { libc :: ioctl(fd, FS_IOC_FIEMAP, p) }; }
+  - |
+    fn d(fd: i32) { unsafe { ioctl(fd, FS_IOC_FIEMAP/*request*/as _, p) }; }
+  - |
+    fn e(fd: i32) { unsafe { ioctl(fd, FS_IOC_FIEMAP as <Dev as Api>::Request, p) }; }
+  - |
+    fn f(fd: i32) { unsafe { ioctl(fd, FS_IOC_FIEMAP) }; }
+  - |
+    fn g(fd: i32) { ioctl_ptr::<Map>(fd, FS_IOC_FIEMAP, p); }
+  - |
+    fn h(fd: i32) { unsafe { r#ioctl(fd, FS_IOC_FIEMAP, p) }; }
+  - |
+    fn i(fd: i32) { unsafe { ioctl(fd, /* request */ FS_IOC_FIEMAP, p) }; }

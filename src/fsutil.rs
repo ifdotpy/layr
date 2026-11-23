@@ -1052,13 +1052,9 @@ fn copy_entry_impl(
             fchown(file, own)?;
             file.set_permissions(fs::Permissions::from_mode(mode | 0o200))?;
             let synchronized = (|| -> Result<()> {
-                let size = rustix::fs::flistxattr_query(file)?;
-                let mut names = vec![0; size];
-                let size = rustix::fs::flistxattr(file, names.as_mut_slice())?;
-                for name in names[..size].split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
-                    if layr_objects::fsx::keep_xattr(name) && !meta.attributes.xattrs.iter().any(|(wanted, _)| wanted == name) {
-                        rustix::fs::fremovexattr(file, name)?;
-                    }
+                let wanted = |name: &[u8]| meta.attributes.xattrs.iter().any(|(wanted, _)| wanted == name);
+                for name in xattr_names(file, |name| layr_objects::fsx::keep_xattr(name) && !wanted(name))? {
+                    rustix::fs::fremovexattr(file, name.as_slice())?;
                 }
                 for (name, value) in &meta.attributes.xattrs {
                     if layr_objects::fsx::keep_xattr(name) {
@@ -1128,13 +1124,7 @@ fn copy_entry_impl(
             sync_user_xattrs(&source, &dest)?;
         }
         #[cfg(target_os = "macos")]
-        {
-            use std::os::fd::AsFd;
-            let source = open_ro(&src)?;
-            let dest = t.open_folder(dst_rel)?;
-            sync_saved_xattrs(&source, &dest)?;
-            crate::sys::apfs_copy_acl_fd(source.as_fd(), dest.as_fd())?;
-        }
+        sync_saved_attributes(&open_ro(&src)?, &t.open_folder(dst_rel)?)?;
         t.chmod(dst_rel, m.mode() & 0o7777)?;
         return Ok(());
     }
@@ -1144,11 +1134,7 @@ fn copy_entry_impl(
     let s = open_ro(&src)?;
     let finish = |d: &File| -> Result<()> {
         #[cfg(target_os = "macos")]
-        {
-            use std::os::fd::AsFd;
-            sync_saved_xattrs(&s, d)?;
-            crate::sys::apfs_copy_acl_fd(s.as_fd(), d.as_fd())?;
-        }
+        sync_saved_attributes(&s, d)?;
         d.set_permissions(fs::Permissions::from_mode(m.mode() & 0o7777))?;
         if now {
             set_mtime(d, 0, rustix::fs::UTIME_NOW as i64)?;
@@ -1246,82 +1232,68 @@ pub fn copy_metadata(src: &File, dst: &File) -> Result<()> {
 /// Copy extended attributes through descriptors without replacing a layer identity.
 pub fn copy_xattrs(src: &File, dst: &File) -> Result<()> {
     let directory = src.metadata()?.is_dir();
-    let size = rustix::fs::flistxattr_query(src)?;
-    let mut names = vec![0; size];
-    let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
-    for name in names[..size].split(|b| *b == 0).filter(|name| !name.is_empty()) {
-        if directory && name == b"com.layr.subvolume" {
-            continue;
-        }
-        let size = rustix::fs::fgetxattr_query(src, name)?;
-        let mut value = vec![0; size];
-        let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
-        rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
-    }
-    Ok(())
+    copy_named_xattrs(src, dst, &xattr_names(src, |name| !(directory && name == b"com.layr.subvolume"))?)
 }
 
-/// Copy the user attributes and POSIX ACLs of a file into a new stage file. Layer markers
-/// (`trusted.*`) are not copied: the storage writes its own. Security labels are not copied
-/// either: setting one can need privileges, and the policy labels new files.
+/// The user attributes and POSIX ACLs of a file, the ones a stage file takes from its source.
+/// Layer markers (`trusted.*`) are not copied: the storage writes its own. Security labels are
+/// not copied either: setting one can need privileges, and the policy labels new files.
+#[cfg(target_os = "linux")]
+fn user_xattr(name: &[u8]) -> bool {
+    name.starts_with(b"user.") || name.starts_with(b"system.posix_acl_")
+}
+
+/// Copy the user attributes and POSIX ACLs of a file into a new stage file.
 #[cfg(target_os = "linux")]
 fn copy_user_xattrs(src: &File, dst: &File) -> Result<()> {
-    let size = rustix::fs::flistxattr_query(src)?;
-    let mut names = vec![0; size];
-    let size = rustix::fs::flistxattr(src, names.as_mut_slice())?;
-    for name in names[..size].split(|b| *b == 0).filter(|n| n.starts_with(b"user.") || n.starts_with(b"system.posix_acl_")) {
-        let size = rustix::fs::fgetxattr_query(src, name)?;
-        let mut value = vec![0; size];
-        let size = rustix::fs::fgetxattr(src, name, value.as_mut_slice())?;
-        rustix::fs::fsetxattr(dst, name, &value[..size], rustix::fs::XattrFlags::empty())?;
-    }
-    Ok(())
+    copy_named_xattrs(src, dst, &xattr_names(src, user_xattr)?)
 }
 
 /// Make the stage's user attributes match the source, including removals.
 #[cfg(target_os = "linux")]
 fn sync_user_xattrs(src: &File, dst: &File) -> Result<()> {
-    let names = |file: &File| -> Result<Vec<Vec<u8>>> {
-        let size = rustix::fs::flistxattr_query(file)?;
-        let mut bytes = vec![0; size];
-        let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
-        Ok(bytes[..size]
-            .split(|b| *b == 0)
-            .filter(|n| n.starts_with(b"user.") || n.starts_with(b"system.posix_acl_"))
-            .map(|n| n.to_vec())
-            .collect())
-    };
-    let source = names(src)?;
-    for name in names(dst)? {
-        if !source.contains(&name) {
-            rustix::fs::fremovexattr(dst, name.as_slice())?;
-        }
-    }
-    copy_user_xattrs(src, dst)
+    sync_xattrs(src, dst, user_xattr)
 }
 
-/// Synchronize the attributes stored in snapshots without changing Layr's own markers.
+/// Synchronize the attributes stored in snapshots and the ACL without changing Layr's own
+/// markers.
 #[cfg(target_os = "macos")]
-pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
-    let names = |file: &File| -> Result<Vec<Vec<u8>>> {
-        let size = rustix::fs::flistxattr_query(file)?;
-        let mut bytes = vec![0; size];
-        let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
-        Ok(bytes[..size]
-            .split(|b| *b == 0)
-            .filter(|n| !n.is_empty() && layr_objects::fsx::keep_xattr(n))
-            .map(|n| n.to_vec())
-            .collect())
-    };
-    let source = names(src)?;
-    for name in names(dst)? {
-        if !source.contains(&name) {
-            rustix::fs::fremovexattr(dst, name.as_slice())
-                .with_context(|| format!("remove the attribute {}", String::from_utf8_lossy(&name)))?;
-        }
-    }
-    for name in source {
-        let size = rustix::fs::fgetxattr_query(src, name.as_slice())?;
+fn sync_saved_attributes(src: &File, dst: &File) -> Result<()> {
+    use std::os::fd::AsFd;
+    sync_xattrs(src, dst, layr_objects::fsx::keep_xattr)?;
+    Ok(crate::sys::apfs_copy_acl_fd(src.as_fd(), dst.as_fd())?)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The descriptors that `xattr_names` listed on this thread: one size query and one read each.
+    static XATTR_LISTS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The names of the extended attributes of `file` that `keep` selects.
+fn xattr_names(file: &File, keep: impl Fn(&[u8]) -> bool) -> Result<Vec<Vec<u8>>> {
+    #[cfg(test)]
+    XATTR_LISTS.with(|lists| lists.borrow_mut().push(std::os::fd::AsRawFd::as_raw_fd(file)));
+    let size = rustix::fs::flistxattr_query(file)?;
+    let mut bytes = vec![0; size];
+    let size = rustix::fs::flistxattr(file, bytes.as_mut_slice())?;
+    Ok(bytes[..size].split(|b| *b == 0).filter(|name| !name.is_empty() && keep(name)).map(<[u8]>::to_vec).collect())
+}
+
+/// The error of reading an extended attribute that does not exist.
+#[cfg(target_os = "linux")]
+const NO_XATTR: i32 = libc::ENODATA;
+#[cfg(target_os = "macos")]
+const NO_XATTR: i32 = libc::ENOATTR;
+
+/// Copy the attributes `names` of `src` to `dst`, skipping one another writer removed after it was
+/// listed.
+fn copy_named_xattrs(src: &File, dst: &File, names: &[Vec<u8>]) -> Result<()> {
+    for name in names {
+        let size = match rustix::fs::fgetxattr_query(src, name.as_slice()) {
+            Err(e) if e.raw_os_error() == NO_XATTR => continue,
+            size => size?,
+        };
         let mut value = vec![0; size];
         let size = rustix::fs::fgetxattr(src, name.as_slice(), value.as_mut_slice())?;
         match rustix::fs::fsetxattr(dst, name.as_slice(), &value[..size], rustix::fs::XattrFlags::empty()) {
@@ -1333,6 +1305,21 @@ pub(crate) fn sync_saved_xattrs(src: &File, dst: &File) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Make the attributes of `dst` that `keep` selects match those of `src`, including removals.
+/// They are written in the order the source lists them. O((s + d) log s) for s source and d
+/// destination names.
+fn sync_xattrs(src: &File, dst: &File, keep: impl Fn(&[u8]) -> bool) -> Result<()> {
+    let source = xattr_names(src, &keep)?;
+    let mut sorted: Vec<&[u8]> = source.iter().map(Vec::as_slice).collect();
+    sorted.sort_unstable();
+    for name in xattr_names(dst, &keep)? {
+        if sorted.binary_search(&name.as_slice()).is_err() {
+            rustix::fs::fremovexattr(dst, name.as_slice())?;
+        }
+    }
+    copy_named_xattrs(src, dst, &source)
 }
 
 /// Linux symlink descriptors do not support fgetxattr. The caller pins both parent folders.
@@ -1756,7 +1743,7 @@ pub fn apfs_space(root: &Path) -> Result<Space> {
 
 /// Account for unaddressable extents separately from addressable extents.
 #[cfg(target_os = "linux")]
-fn fiemap_held(extents: &[crate::sys::MappedExtent], dev: u64, ino: u64, f: &mut dyn FnMut(&Held)) {
+fn fiemap_held(extents: &[crate::sys::fiemap::MappedExtent], dev: u64, ino: u64, f: &mut dyn FnMut(&Held)) {
     let alloc = extents.iter().map(|x| x.len).sum();
     let own = extents.iter().filter(|x| !x.shared).map(|x| x.len).sum();
     // An inode key preserves hard-link sharing when FIEMAP has no physical address.
@@ -1782,7 +1769,7 @@ pub fn fiemap_visit(root: &Path, f: &mut dyn FnMut(&Held)) -> Result<()> {
             if m.is_dir() {
                 walk(&e.path(), f, seen)?;
             } else if m.is_file() && (m.nlink() <= 1 || seen.insert((m.dev(), m.ino()))) {
-                match File::open(e.path()).and_then(|file| crate::sys::fiemap_extents(&file)) {
+                match File::open(e.path()).and_then(|file| crate::sys::fiemap::extents(&file)) {
                     Ok(extents) => fiemap_held(&extents, m.dev(), m.ino(), f),
                     Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                     Err(err) => return Err(err).with_context(|| e.path().display().to_string()),
@@ -1813,7 +1800,7 @@ pub fn fiemap_visit_shallow(
         if m.is_dir() {
             dirs(entry.path());
         } else if m.is_file() && (m.nlink() <= 1 || seen.lock().unwrap().insert((m.dev(), m.ino()))) {
-            match File::open(entry.path()).and_then(|file| crate::sys::fiemap_extents(&file).map(|extents| (file, extents))) {
+            match File::open(entry.path()).and_then(|file| crate::sys::fiemap::extents(&file).map(|extents| (file, extents))) {
                 Ok((file, extents)) => fiemap_held(&extents, m.dev(), m.ino(), &mut |held| f(held, &file, m.dev())),
                 Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {}
                 Err(err) => return Err(err).with_context(|| entry.path().display().to_string()),
@@ -1911,14 +1898,89 @@ mod range_tests {
         let stage = fs::File::open(root.join("stage")).unwrap();
         let old = std::ffi::CString::new("user.old").unwrap();
         let new = std::ffi::CString::new("user.new").unwrap();
-        rustix::fs::fsetxattr(&stage, old.as_c_str(), b"old", rustix::fs::XattrFlags::empty()).unwrap();
-        rustix::fs::fsetxattr(&source, new.as_c_str(), b"new", rustix::fs::XattrFlags::empty()).unwrap();
+        let (both, first) = (c"user.both".to_owned(), c"user.a-first".to_owned());
+        // The source names are out of order: the sync searches them sorted.
+        let sources = [(&new, b"new".as_slice()), (&both, b"source"), (&first, b"first")];
+        let stages = [(&old, b"old".as_slice()), (&both, b"stage")];
+        for (file, name, value) in sources.map(|(n, v)| (&source, n, v)).into_iter().chain(stages.map(|(n, v)| (&stage, n, v))) {
+            rustix::fs::fsetxattr(file, name.as_c_str(), value, rustix::fs::XattrFlags::empty()).unwrap();
+        }
+        super::XATTR_LISTS.with(|lists| lists.borrow_mut().clear());
         super::sync_user_xattrs(&source, &stage).unwrap();
+        // The source is listed once: its names serve both the removals and the copy.
+        use std::os::fd::AsRawFd;
+        assert_eq!(super::XATTR_LISTS.with(|lists| lists.take()), [source.as_raw_fd(), stage.as_raw_fd()]);
         let mut value = [0; 32];
         assert_eq!(rustix::fs::fgetxattr(&stage, old.as_c_str(), &mut value[..]).unwrap_err(), rustix::io::Errno::NODATA);
-        let len = rustix::fs::fgetxattr(&stage, new.as_c_str(), &mut value[..]).unwrap();
-        assert_eq!(&value[..len], b"new");
+        for (name, expected) in sources {
+            let len = rustix::fs::fgetxattr(&stage, name.as_c_str(), &mut value[..]).unwrap();
+            assert_eq!(&value[..len], expected);
+        }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn copying_attributes_skips_one_removed_after_listing() {
+        let root = std::env::temp_dir().join(format!("layr-copy-removed-attribute-{}", crate::ids::new_id()));
+        fs::create_dir_all(root.join("source")).unwrap();
+        fs::create_dir_all(root.join("stage")).unwrap();
+        let source = fs::File::open(root.join("source")).unwrap();
+        let stage = fs::File::open(root.join("stage")).unwrap();
+        rustix::fs::fsetxattr(&source, c"user.kept", b"kept", rustix::fs::XattrFlags::empty()).unwrap();
+        // `user.gone` was listed, then removed by another writer before the copy.
+        let names = [b"user.gone".to_vec(), b"user.kept".to_vec()];
+        super::copy_named_xattrs(&source, &stage, &names).unwrap();
+        let mut value = [0; 8];
+        assert_eq!(rustix::fs::fgetxattr(&stage, c"user.gone", &mut value[..]).unwrap_err(), rustix::io::Errno::NODATA);
+        let len = rustix::fs::fgetxattr(&stage, c"user.kept", &mut value[..]).unwrap();
+        assert_eq!(&value[..len], b"kept");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stage_files_take_user_attributes_and_acls_only() -> anyhow::Result<()> {
+        for name in ["user.x", "system.posix_acl_access", "system.posix_acl_default"] {
+            assert!(super::user_xattr(name.as_bytes()), "{name}");
+        }
+        for name in ["", "user", "trusted.layr", "security.selinux", "security.capability", "system.other"] {
+            assert!(!super::user_xattr(name.as_bytes()), "{name}");
+        }
+        // A POSIX ACL in the kernel's xattr form: version 2, then (tag, permissions, id) entries
+        // sorted by tag: owner rw, the owner's user id r, group r, mask r, other r.
+        let uid = rustix::process::geteuid().as_raw();
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in
+            [(0x01u16, 6u16, u32::MAX), (0x02, 4, uid), (0x04, 4, u32::MAX), (0x10, 4, u32::MAX), (0x20, 4, u32::MAX)]
+        {
+            acl.extend(tag.to_le_bytes().into_iter().chain(perm.to_le_bytes()).chain(id.to_le_bytes()));
+        }
+        let root = std::env::temp_dir().join(format!("layr-sync-acl-{}", crate::ids::new_id()));
+        fs::create_dir_all(root.join("source"))?;
+        fs::create_dir_all(root.join("stage"))?;
+        let (source, stage) = (fs::File::open(root.join("source"))?, fs::File::open(root.join("stage"))?);
+        let names = [c"system.posix_acl_access", c"system.posix_acl_default"];
+        let set = names.iter().try_for_each(|name| rustix::fs::fsetxattr(&source, *name, &acl, rustix::fs::XattrFlags::empty()));
+        let synced = match set {
+            Err(rustix::io::Errno::NOTSUP) => None,
+            set => Some(set.map_err(anyhow::Error::from).and_then(|()| super::sync_user_xattrs(&source, &stage))),
+        };
+        let mut value = [0; 64];
+        let copied: Vec<_> = names
+            .iter()
+            .map(|name| rustix::fs::fgetxattr(&stage, *name, &mut value[..]).map(|len| value[..len].to_vec()))
+            .collect();
+        fs::remove_dir_all(root)?;
+        let Some(synced) = synced else {
+            eprintln!("no POSIX ACLs here");
+            return Ok(());
+        };
+        synced?;
+        for copied in copied {
+            assert_eq!(copied?, acl);
+        }
+        Ok(())
     }
 
     #[cfg(any(target_os = "macos", all(target_os = "linux", not(feature = "overlayfs"))))]
@@ -1943,7 +2005,7 @@ mod range_tests {
     #[test]
     fn unaddressable_extents_are_not_deduplicated_by_address_zero() {
         let mut keys = Vec::new();
-        use crate::sys::MappedExtent;
+        use crate::sys::fiemap::MappedExtent;
         for ino in [1, 1, 2] {
             let extents = [MappedExtent { logical: 0, addr: None, len: 4096, shared: false }];
             super::fiemap_held(&extents, 7, ino, &mut |held| {
