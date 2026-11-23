@@ -2522,7 +2522,7 @@ pub(super) fn observe_paths(
 fn status_fingerprints(scan: BTreeMap<String, ScanEntry>) -> BTreeMap<String, crate::status_cache::FileFingerprint> {
     use crate::status_cache::{FileFingerprint, FileStat, ObservationEvidence, Timestamp};
     scan.into_iter()
-        .filter(|(p, _)| !crate::repo::skip_path(p))
+        .filter(|(p, e)| !crate::repo::skip_entry(p, e.meta.is_dir()))
         .map(|(p, e)| {
             let evidence = match e.data {
                 Some(data) => match data.generation {

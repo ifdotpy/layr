@@ -77,7 +77,7 @@ retire()
 (work / "f0").write_text("staged\n")
 run("add", "f0")
 retire()
-time.sleep(1.1)
+time.sleep(2)  # Trusted from the stamp's second plus two.
 result = run("save", "-qm", "saved", extra={"LAYR_TRACE": "1"})
 # The warning compares after publication, once, without an eager comparison to reuse.
 assert result.stderr.count("status full comparison") == 1, result.stderr
@@ -90,7 +90,7 @@ run("add", "f0", cwd=topic)
 retire()
 run("save", "-qm", "topic", cwd=topic)
 retire()
-time.sleep(1.1)
+time.sleep(2)  # Trusted from the stamp's second plus two.
 result = run("merge", "-q", "topic", extra={"LAYR_TRACE": "1", "LAYR_NO_STATUS_CACHE": "1"})
 assert result.stderr.count("status full comparison") == 1, result.stderr
 assert (work / "f0").read_text() == "topic\n"
@@ -124,7 +124,7 @@ run("add", "f0", cwd=next_work)
 retire()
 run("save", "-qm", "next", cwd=next_work)
 retire()
-time.sleep(1.1)
+time.sleep(2)  # Trusted from the stamp's second plus two.
 result = paused(["merge", "-q", "next"], "prepared comparison ready", lambda: (work / "f2").write_text("concurrent merge\n"))
 assert "prepared comparison invalidated" in result, result
 assert (work / "f2").read_text() == "concurrent merge\n"

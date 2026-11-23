@@ -52,7 +52,7 @@ for i in range(40):
     (work / f'many{i:02}').write_text(f'many {i}\n')
 run('add', '-A')
 run('save', '-m', 'many files')
-time.sleep(1.1)  # Index entries younger than a second are compared again (racy).
+time.sleep(2)  # Index entries are compared again (racy) until their second plus two.
 with (work / 'many00').open('a') as output:
     output.write('staged\n')
 run('add', 'many00')

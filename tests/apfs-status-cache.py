@@ -51,8 +51,8 @@ try:
     run(main, 'line', 'new', '-q', 'topic')
     work = main.parent / 'topic'
     # The saved status trusts only entries whose times are a full second older than the scan (racy files):
-    # the new line's entries have the time of its clone.
-    time.sleep(1.1)
+    # the new line's entries have the time of its clone. A stamp in second s is trusted from s + 2.
+    time.sleep(2)
     same('first status compares all', fast=False)
     same('nothing changed')
 
@@ -85,13 +85,13 @@ try:
     os.utime(work / 'd0/sub0/f15', ns=(0, 10**18))
     same('only a new time')
     run(work, 'add', 'new.txt', 'd0/sub0/f0')
-    time.sleep(1.1)  # The new stage is racy for a second: its status is not saved before that.
+    time.sleep(2)  # The new stage is racy until its second plus two: its status is not saved before that.
     same('status after add compares all', fast=False)
     (work / 'new.txt').write_text('new and changed\n')
     same('a staged and changed file')
     (work / '.gitignore').write_text('build/\n')
     same('a changed .gitignore compares all', fast=False)
-    time.sleep(1.1)  # The .gitignore change is racy for a second: the save could not trust it.
+    time.sleep(2)  # The .gitignore change is racy until its second plus two: the save could not trust it.
     run(work, 'add', '-A')
     run(work, 'save', '-qm', 'all')
     # A named save computes the status that it names the left out files from (t96), and saves

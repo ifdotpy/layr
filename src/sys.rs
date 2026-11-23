@@ -2536,6 +2536,10 @@ pub fn apfs_clear_acl(path: &std::path::Path) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 pub fn mount_points() -> io::Result<Vec<std::path::PathBuf>> {
     use std::os::unix::ffi::OsStrExt;
+    // getmntinfo reuses one buffer for the process: a call on another thread can free it while
+    // this one copies it.
+    static CALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _call = CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut entries: *mut libc::statfs = std::ptr::null_mut();
     // SAFETY: getmntinfo points `entries` at `count` records in a buffer it owns; they are read before
     // the next call. MNT_NOWAIT reads the kernel's list without asking each file system.

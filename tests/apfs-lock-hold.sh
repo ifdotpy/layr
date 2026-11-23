@@ -18,8 +18,9 @@ l add tracked.txt && l save -qm tracked
 mkdir -p bulk
 for i in $(seq 1 300); do printf '%s\n' "$i" > "bulk/f$i"; done
 printf 'edited\n' > tracked.txt
-# A prepared save trusts only entries a full second older than its observation (racy files).
-sleep 1.1
+# A prepared save trusts only entries a full second older than its observation (racy files): a
+# stamp in second s from s + 2.
+sleep 2
 
 trace=$(LAYR_TRACE=1 l restore tracked.txt 2>&1)
 eq "restore discards the edit" "tracked" "$(cat tracked.txt)"
@@ -123,7 +124,7 @@ eq "the merge brings the file" "side" "$(cat side.txt)"
 # Both already-up-to-date paths must prepare a dirty automatic-save layer before the lock.
 head=$(l rev-parse head)
 printf 'dirty up-to-date\n' > tracked.txt
-sleep 1.1  # not racy for the prepared save
+sleep 2  # not racy for the prepared save
 trace=$(LAYR_TRACE=1 l merge -q side 2>&1)
 has "an up-to-date merge publishes its prepared save" "publish prepared save" "$trace"
 eq "an up-to-date merge copies no layer under the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
@@ -149,7 +150,7 @@ eq "the layered source is already up to date" "$head" "$(l rev-parse head)"
 cd "$Q/lines/main" || exit 1
 l overlay use --none >/dev/null || exit 1
 printf 'dirty layered up-to-date\n' > tracked.txt
-sleep 1.1  # not racy for the prepared comparison
+sleep 2  # not racy for the prepared comparison
 trace=$(LAYR_TRACE=1 l merge -q already-layered 2>&1)
 has "an up-to-date overlay merge publishes its prepared save" "publish prepared save" "$trace"
 eq "an up-to-date overlay merge copies no layer under the lock" "" "$(locked "$trace" | grep -E "$copies|thin write")"
@@ -182,6 +183,7 @@ cd "$P/rp-base" || exit 1
 printf 'base\n' > rpb.txt && l add rpb.txt && l save -qm rpb
 cd "$P/rp-work" || exit 1
 eq "the replay fixture shows no overlays" "line rp-work shows no overlays" "$(l overlay use)"
+sleep 2  # not racy for the prepared comparison: rp1.txt and rp2.txt are younger than 2 s
 trace=$(LAYR_TRACE=1 l replay rp-base 2>&1)
 has "replay merges before the lock" "prepare replay" "$trace"
 has "replay takes the lock" "store lock taken" "$trace"

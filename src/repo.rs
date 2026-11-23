@@ -395,6 +395,12 @@ pub fn skip_path(p: &str) -> bool {
     p == ".git" || p.starts_with(".git/") || cache_journal_name(p)
 }
 
+/// `skip_path` for an entry that a scan observes: a folder named as a cache journal is no journal,
+/// and comparisons read what it holds.
+pub fn skip_entry(p: &str, is_dir: bool) -> bool {
+    skip_path(p) && !(is_dir && cache_journal_name(p))
+}
+
 /// The kinds of change to a line, for `Repo::authorize_line`.
 #[derive(Clone, Copy, Debug)]
 pub enum LineOp<'a> {
@@ -5527,7 +5533,7 @@ mod status_policy_tests {
                     crate::thin::empty_layer(&hook_stage, &base_id, &base_root).unwrap();
                     #[cfg(not(target_os = "macos"))]
                     crate::fs::create(&hook_stage).unwrap();
-                    std::thread::sleep(std::time::Duration::from_millis(1100));
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                 }))
             });
             let result = if report { repo.prepare_status_report(&line).map(|_| ()) } else { repo.status(&line).map(|_| ()) };
@@ -5549,7 +5555,7 @@ mod status_policy_tests {
             assert!(st.untracked.is_empty());
             assert_eq!(std::fs::read(work.join("file"))?, b"tracked");
         }
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::thread::sleep(std::time::Duration::from_secs(2));
         let prepared = repo.prepare_status_report(&line)?;
         std::fs::write(work.join("file"), b"concurrent write")?;
         {
@@ -5557,7 +5563,7 @@ mod status_policy_tests {
             assert!(prepared.revalidate(&repo, &locked)?.is_none(), "a concurrent writer invalidates the capture");
         }
         std::fs::write(work.join("file"), b"tracked")?;
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::thread::sleep(std::time::Duration::from_secs(2));
         let prepared = repo.prepare_status_report(&line)?;
         std::fs::write(work.join(crate::ignore_rules::LOCAL_EXCLUDE), b"file\n")?;
         {
