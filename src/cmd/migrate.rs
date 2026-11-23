@@ -272,7 +272,7 @@ fn candidates(repo: &Repo, store: Option<&Store>) -> Result<Vec<Candidate>> {
 /// Why the project cannot be migrated now: a command holds the project lock or a line lock, or
 /// the daemon of this user serves the store (its follow passes, syncs and gc write). None when
 /// nothing runs.
-fn busy(repo: &Repo) -> Result<Option<String>> {
+fn busy(repo: &Repo, new_project: bool) -> Result<Option<String>> {
     use rustix::fs::{flock, FlockOperation};
     let meta = repo.p.meta_dir();
     let free = |path: &Path| -> Result<bool> {
@@ -306,6 +306,13 @@ fn busy(repo: &Repo) -> Result<Option<String>> {
     }
     // On Linux the daemon socket can be the root service that runs this command: only the
     // locks count there. On macOS the user daemon is its own process.
+    // `init --from-git` migrates the project it just made: the daemon has no work in it yet.
+    #[cfg(not(target_os = "macos"))]
+    let _ = new_project;
+    #[cfg(target_os = "macos")]
+    if new_project {
+        return Ok(None);
+    }
     #[cfg(target_os = "macos")]
     if let crate::service::Hello::Running { root: Some(served), .. } =
         crate::service::hello(&crate::service::user_daemon_socket())
@@ -328,7 +335,7 @@ fn human(bytes: u64) -> String {
 }
 
 pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let a = parse(&Spec::new().flag("-n|--dry-run").flag("--resume").flag("--delete-old").value("--leave-missing"), args)?;
+    let a = parse(&Spec::new().flag("-n|--dry-run").flag("--resume").flag("--delete-old").flag("--new-project").value("--leave-missing"), args)?;
     if a.pos.len() > 1 {
         return Err(exit(128, USAGE));
     }
@@ -361,7 +368,7 @@ pub fn migrate(ctx: &Ctx, args: &[String]) -> Result<i32> {
             ),
         ));
     }
-    if let Some(why) = busy(repo)? {
+    if let Some(why) = busy(repo, a.has("--new-project"))? {
         if dry {
             outln!(ctx, "would refuse now: {why}");
         } else {

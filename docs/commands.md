@@ -65,7 +65,7 @@ snapshot fallback. APFS supplies change counters and clone identities. Set
 
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 
-A project made from a git checkout keeps its states as objects (store v2, [objects](objects.md)): `init --from-git` runs `layr migrate --delete-old` for its first states. `--snapshots` keeps snapshot storage (v1). `init` makes store v2 only with `--objects`.
+A project made from a git checkout keeps its states as objects (store v2, [objects](objects.md)): `init --from-git` runs `layr migrate --delete-old` for its first states; a running user daemon does not block this first migration. `--snapshots` keeps snapshot storage (v1). `init` makes store v2 only with `--objects`.
 
 `init [<project>] --from-git <checkout>` makes a project from a Git checkout, in place. The
 history comes from the folder, with no network: the local branches resolve as `local/<branch>`

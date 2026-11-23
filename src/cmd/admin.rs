@@ -2919,7 +2919,7 @@ fn init_from_git(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Err(e.context(format!("the line stays at {}; the checkout is back at {}", w.display(), src.display())));
     }
     if !a.has("--snapshots") {
-        if let Err(e) = run(&ctx.store.root, &["migrate", &name, "--delete-old"]) {
+        if let Err(e) = run(&ctx.store.root, &["migrate", &name, "--delete-old", "--new-project"]) {
             eprintln!("warning: project {name} keeps snapshot storage (v1); `layr migrate` moves it later: {e:#}");
         } else if let Err(e) = run(&src, &["gc", "-q"]) {
             // The files of the history then live once, in the object store (docs/git-on-objects.md).
