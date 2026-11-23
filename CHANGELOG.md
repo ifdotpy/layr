@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.54.0](https://github.com/ifdotpy/layr/compare/v0.53.0...v0.54.0) (2026-11-23)
+
+
+### Features
+
+* **pkg:** package a given release build of layr (LAYR_BIN)
+
+
+### Bug Fixes
+
+* **checks:** Run the seed command of the project on each new main in the scoped watcher
+* **init:** Let the first migration run while the user daemon serves the store
+
+
+### Performance Improvements
+
+* **save:** Check the later cache walks of a line delete against the first walk's map
+* **history:** Share one object store per history command and compare only selected paths
+
+
+## [0.53.0](https://github.com/ifdotpy/layr/compare/v0.52.0...v0.53.0) (2026-11-23)
+
+
+### Features
+
+* **remote:** Add layr wait, and run the scoped checks on a signal
+
+
+### Bug Fixes
+
+* **layrfs:** Read the signature of the app before testing it
+* **layrfs:** A tool server in another mount namespace leaves the tool to the real one
+
+
+### Performance Improvements
+
+* **checks:** Run one macOS test per core, the longest first
+
 ## [0.53.0](https://github.com/ifdotpy/layr/compare/v0.52.0...v0.53.0) (2026-11-23)
 
 
