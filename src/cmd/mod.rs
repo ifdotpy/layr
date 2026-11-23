@@ -40,6 +40,7 @@ pub mod review;
 pub mod transfer;
 pub mod view;
 pub mod volume;
+pub mod waitcmd;
 pub mod work;
 
 pub use crate::pathspec::{glob, matches};
@@ -346,6 +347,7 @@ Git bridge:
    git remote, fetch, pull, push, clone, sync
    queue add/list/remove/run
    follow [<remote>/<branch> | --run | --tick | --remove]
+   wait [<remote>] [--cursor-file <path>] [--others] [--timeout <seconds>] [--json]
 Overlays (files with their own readers and history, shown in lines):
    overlay create, set, list, readers, use, move, remote, log, show, diff, grep, ls-files
 Projects and machines:
@@ -367,7 +369,7 @@ pub const COMMANDS: &[&str] = &[
     "merge", "pick", "invert", "replay", "save", "undo", "op", "try", "bisect", "access", "protect", "approve", "checks", "ref",
     "release", "queue", "request", "requests", "view", "attest", "attestations", "change", "comment", "react", "review", "probe", "gc", "du",
     "fsck", "reindex", "init", "projects", "debug", "config", "remote", "fetch", "pull", "push", "git", "clone", "login", "overlay",
-    "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "volume", "project",
+    "export", "sync", "serve-peer", "person", "mount", "daemon", "follow", "wait", "volume", "project",
     "usage", "keep", "objects",
     "migrate", "fs", "tool",
     // Handled in main.rs before a store opens; listed for `--help`.
@@ -465,6 +467,7 @@ pub fn run(ctx: &Ctx, argv: &[String]) -> Result<i32> {
         "config" => admin::config(ctx, rest),
         "remote" => remote::remote(ctx, rest),
         "follow" => followcmd::follow(ctx, rest),
+        "wait" => waitcmd::wait(ctx, rest),
         "volume" => volume::volume(ctx, rest),
         "project" => project::project(ctx, rest),
         "usage" => crate::cmd::usage::show(ctx, rest),

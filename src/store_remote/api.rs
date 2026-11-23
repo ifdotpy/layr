@@ -890,6 +890,18 @@ impl Api {
         Ok(Some(self.json("login", response)?))
     }
 
+    /// One long-poll of the project events (`GET /api/v1/projects/<p>/events`, docs/remotes.md, "Wait for a
+    /// change").
+    pub fn events(&self, after: Option<&str>, wait: u64) -> Result<serde_json::Value> {
+        let mut url = self.project_url("events")?;
+        url.query_pairs_mut().append_pair("wait", &wait.min(25).to_string());
+        if let Some(after) = after {
+            url.query_pairs_mut().append_pair("after", after);
+        }
+        let response = self.send(true, || self.request(Method::GET, url.clone()))?;
+        self.json("events", response)
+    }
+
     // ----- the store key space -----
 
     pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {

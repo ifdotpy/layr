@@ -118,6 +118,17 @@ impl Backend {
         }
     }
 
+    /// One long-poll of the project events of a Layr Cloud remote.
+    pub fn events(&self, after: Option<&str>, wait: u64) -> Result<serde_json::Value> {
+        match self {
+            Self::Gateway(g) => g.events(after, wait),
+            Self::Api(a) => a.events(after, wait),
+            Self::Prefix(base, _) => base.events(after, wait),
+            Self::Epoch(epoch) => epoch.current.events(after, wait),
+            _ => anyhow::bail!("layr wait needs a Layr Cloud remote (layr+https://)"),
+        }
+    }
+
     pub fn root(&self) -> &Backend {
         if let Self::Epoch(epoch) = self {
             &epoch.root

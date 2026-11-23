@@ -84,7 +84,11 @@ bash tools/checks/install-services.sh PROJECT
 The daemon has cgroup memory/process ceilings. `layr-checks@PROJECT` runs the
 watcher as the non-root service user and restarts on failure or VM boot.
 `layr-sync@PROJECT.timer` fetches the heads, then pushes the results, every
-120 seconds with up to 30 seconds of jitter. Stop this project's units before replacing its binary or policy.
+120 seconds with up to 30 seconds of jitter. The scoped watcher (`install-services.sh PROJECT CHECKS`,
+`layr-scoped-checks@PROJECT`) has no timer: when no check is pending, it waits for a change of the
+project by another machine (`layr wait origin --others`, docs/remotes.md), fetches the heads, and
+pushes each result right after its check. Its installer disables the sync timer.
+Stop this project's units before replacing its binary or policy.
 An executor elsewhere keeps both machine-local execution flags off.
 A shared gateway limit also applies to runners behind the same public IP.
 Respect HTTP 429 `Retry-After`; pause transport while an owner publishes a large

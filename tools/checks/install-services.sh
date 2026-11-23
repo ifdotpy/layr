@@ -1,7 +1,8 @@
 #!/bin/bash
 # Run as root after provisioning the dedicated runner's own store and project role.
 # With CHECKS (a comma list, such as unit), the runner takes only those checks of queued and recent
-# states (layr-scoped-checks@PROJECT, scoped-watch.py) in place of every pending check.
+# states (layr-scoped-checks@PROJECT, scoped-watch.py) in place of every pending check. The scoped watcher
+# waits for a change of the project (layr wait), fetches and pushes by itself: it needs no layr-sync timer.
 set -euo pipefail
 project=${1:?usage: install-services.sh project [checks]} checks=${2:-}
 test "$(id -u)" = 0
@@ -18,4 +19,9 @@ if [ -n "$checks" ]; then
     systemctl daemon-reload
 fi
 systemctl enable --now layr-runner-daemon.service
-systemctl enable --now "$watcher" "layr-sync@$project.timer"
+if [ -n "$checks" ]; then
+    systemctl disable --now "layr-sync@$project.timer" 2> /dev/null || true
+    systemctl enable --now "$watcher"
+else
+    systemctl enable --now "$watcher" "layr-sync@$project.timer"
+fi
