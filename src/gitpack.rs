@@ -1082,6 +1082,15 @@ mod fsk {
             made: Mutex::new((HashMap::new(), 0)),
         });
         server.current()?;
+        // The project can go without an unmount (a test removes its temporary store): the server then ends. Before,
+        // such servers ran on for days; a Mac runner had 312 of them (2026-11-23).
+        let objects = project.join("meta/objects");
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(30));
+            if !objects.exists() {
+                std::process::exit(0);
+            }
+        });
         let ctl = d.join("ctl");
         mkfifo(&ctl)?;
         std::fs::write(d.join("server.pid"), format!("{}\n", std::process::id()))?;
