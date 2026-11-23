@@ -184,7 +184,9 @@ the project changes on a Layr Cloud remote (default `origin`), then ends with ex
   cursor and ends at once (`start`): the caller has not read the project yet.
 - `--others`: only a record segment of another machine counts. Each change of a project writes
   one, and the results and approvals that this machine pushes do not wake it again.
-- `--timeout`: end after this many seconds without a change (`timeout`). 0 or no option: no limit.
+- `--timeout`: end after this many seconds without a change (`timeout`), including remote setup.
+  If it expires during setup or initial cursor discovery, the cursor file stays untouched and the
+  JSON cursor is `null`. 0 or no option: no limit.
 - The end is one line: `layr wait: change (<n> events)`, `start`, `restart`, `timeout` or `resync`.
   `resync` means that the server cannot prove that no event was lost: read the project in full.
   `restart`: the server restarted (another epoch in the cursor), for example for a new release of it.

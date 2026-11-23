@@ -8,7 +8,7 @@ use super::{
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use reqwest::{
-    blocking::{Client, Response},
+    blocking::{Client, RequestBuilder, Response},
     Method,
 };
 use serde::Deserialize;
@@ -16,7 +16,7 @@ use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) const OBJECT_LIMIT: usize = 32 << 20;
 /// The request header by which a client says that it follows a signed CDN URL, and the type of that answer
@@ -207,6 +207,7 @@ struct SessionToken {
 
 pub struct Gateway {
     http: Client,
+    pub(super) deadline: Option<Instant>,
     base: reqwest::Url,
     token: Option<String>,
     machine: Option<String>,
@@ -230,6 +231,7 @@ impl Clone for Gateway {
     fn clone(&self) -> Self {
         Self {
             http: self.http.clone(),
+            deadline: self.deadline,
             base: self.base.clone(),
             token: self.token.clone(),
             machine: self.machine.clone(),
@@ -251,6 +253,7 @@ impl Clone for Gateway {
 
 /// Tries of a request that the gateway refuses as busy (503 or 429) before the error goes to the caller.
 const BUSY_TRIES: u32 = 8;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(150);
 
 thread_local! {
     /// Set by `quick`: a fetch on demand that a command waits for (`fetch_caches_on_demand`).
@@ -310,51 +313,80 @@ pub fn unreachable(e: &anyhow::Error) -> bool {
     })
 }
 
+pub(super) fn body_read_error(message: String, error: std::io::Error, deadline: Option<Instant>) -> anyhow::Error {
+    if deadline.is_some()
+        && (error.kind() == std::io::ErrorKind::TimedOut
+            || error.get_ref().and_then(|e| e.downcast_ref::<reqwest::Error>()).is_some_and(reqwest::Error::is_timeout))
+    {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, message).into()
+    } else {
+        anyhow!(message)
+    }
+}
+
+fn remaining(deadline: Option<Instant>) -> Result<Option<Duration>> {
+    let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+    if left == Some(Duration::ZERO) {
+        return Err(Unreachable("remote request deadline reached".into()).into());
+    }
+    Ok(left)
+}
+
+pub(super) fn limit_request(request: RequestBuilder, deadline: Option<Instant>, timeout: Duration) -> Result<RequestBuilder> {
+    Ok(match remaining(deadline)? {
+        Some(left) => request.timeout(left.min(timeout)),
+        None => request,
+    })
+}
+
 /// Sends with `send` again while the gateway answers busy (503, 429): it waits `Retry-After` (at most 30 s) or a
 /// doubling backoff from 0.5 s to 8 s, at most `BUSY_TRIES` times. A refused request did nothing on the gateway, so
 /// a GET, a conditional PUT and a DELETE may go again. Other answers return at once.
 /// `send_busy` for a request that a repeat cannot harm (GET, HEAD, a create-only PUT that answers 412 when the first
 /// one landed): it is sent again also on 502 and 504 and when the connection fails, as when the gateway restarts
 /// for a release or a project change (about 2 s). Authenticated Git manifest GETs also retry a deadline (408).
-pub(super) fn send_again(idempotent: bool, send: impl FnMut() -> Result<Response>) -> Result<Response> {
-    send_again_with(idempotent, false, send, |_| {})
+pub(super) fn send_again(
+    idempotent: bool,
+    deadline: Option<Instant>,
+    send: impl FnMut() -> Result<Response>,
+) -> Result<Response> {
+    send_again_with(idempotent, false, deadline, send, |_| {})
 }
 
 fn send_again_with(
     idempotent: bool,
     manifest_get: bool,
+    deadline: Option<Instant>,
     mut send: impl FnMut() -> Result<Response>,
     mut discard: impl FnMut(Response),
 ) -> Result<Response> {
-    let mut wait = std::time::Duration::from_millis(500);
+    let mut wait = Duration::from_millis(500);
     let mut attempt = 1;
     loop {
-        let response = match send() {
-            Ok(response) => response,
-            Err(_) if idempotent && attempt < BUSY_TRIES && !is_quick() => {
-                std::thread::sleep(wait);
-                wait = (wait * 2).min(std::time::Duration::from_secs(8));
-                attempt += 1;
-                continue;
+        remaining(deadline)?;
+        let delay = match send() {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let again = matches!(status, 429 | 503)
+                    || (idempotent && matches!(status, 502 | 504))
+                    || (manifest_get && transient_read_status(u64::from(status)));
+                if !again || attempt >= BUSY_TRIES {
+                    return Ok(response);
+                }
+                let after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .map(|s| Duration::from_secs(s.min(30)));
+                discard(response);
+                after.unwrap_or(wait)
             }
+            Err(_) if idempotent && attempt < BUSY_TRIES && !is_quick() => wait,
             Err(e) => return Err(e),
         };
-        let status = response.status().as_u16();
-        let again = matches!(status, 429 | 503)
-            || (idempotent && matches!(status, 502 | 504))
-            || (manifest_get && transient_read_status(u64::from(status)));
-        if !again || attempt >= BUSY_TRIES {
-            return Ok(response);
-        }
-        let after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|s| std::time::Duration::from_secs(s.min(30)));
-        discard(response);
-        std::thread::sleep(after.unwrap_or(wait));
-        wait = (wait * 2).min(std::time::Duration::from_secs(8));
+        std::thread::sleep(remaining(deadline)?.map_or(delay, |left| delay.min(left)));
+        wait = (wait * 2).min(Duration::from_secs(8));
         attempt += 1;
     }
 }
@@ -386,7 +418,7 @@ impl Gateway {
     }
 
     fn retry_with(&self, idempotent: bool, manifest_get: bool, send: impl FnMut() -> Result<Response>) -> Result<Response> {
-        send_again_with(idempotent, manifest_get, send, |response| {
+        send_again_with(idempotent, manifest_get, self.deadline, send, |response| {
             let _ = self.bytes(response, 1 << 20);
         })
     }
@@ -394,7 +426,7 @@ impl Gateway {
     /// Count requests, and buffered request bodies in full, at the attempt boundary. The body stays the buffer
     /// that every try shares: counting must not copy an upload. A streamed body counts as HTTP reads it.
     fn execute(&self, builder: reqwest::blocking::RequestBuilder, upload: bool) -> Result<Response> {
-        let request = builder.build().map_err(reqwest::Error::without_url)?;
+        let request = limit_request(builder, self.deadline, REQUEST_TIMEOUT)?.build().map_err(reqwest::Error::without_url)?;
         if let Some(length) = request.body().and_then(reqwest::blocking::Body::as_bytes).map(<[u8]>::len) {
             let counter = if upload { &self.counters.uploaded } else { &self.counters.control_sent };
             counter.fetch_add(length as u64, Ordering::Relaxed);
@@ -442,7 +474,7 @@ impl Gateway {
         super::download::Counted { inner: response, counters: self.counters.clone(), payload, upload: false }
             .take(limit as u64 + 1)
             .read_to_end(&mut data)
-            .map_err(|_| anyhow!("gateway body read failed"))?;
+            .map_err(|e| body_read_error("gateway body read failed".into(), e, self.deadline))?;
         if data.len() > limit {
             bail!("gateway response is too large");
         }
@@ -493,10 +525,11 @@ impl Gateway {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(connect_timeout(Duration::from_secs(5)))
-            .timeout(Duration::from_secs(150))
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
         Ok(Self {
             http,
+            deadline: None,
             base,
             token: None,
             machine: None,
@@ -633,7 +666,7 @@ impl Gateway {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(connect_timeout(Duration::from_secs(5)))
-            .timeout(Duration::from_secs(150));
+            .timeout(REQUEST_TIMEOUT);
         for certificate in certificates {
             builder = builder.add_root_certificate(certificate);
         }
@@ -2931,7 +2964,7 @@ pub(super) mod tests {
     /// returns its status and body. It stops at a "GET /quit" request and returns the log of all requests before it.
     fn proof_gateway(
         recipient: String,
-        answer: impl Fn(&str, &str) -> (&'static str, String) + Send + 'static,
+        mut answer: impl FnMut(&str, &str) -> (&'static str, String) + Send + 'static,
     ) -> (TestEndpoint, std::thread::JoinHandle<Vec<String>>) {
         use std::io::{Read, Write};
         let (listener, address) = test_listener();
@@ -3031,9 +3064,9 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn events_long_poll_with_the_read_proof_of_the_client() {
+    fn events_long_poll_with_the_read_proof_of_the_client() -> Result<()> {
         let identity = keys::generate_identity();
-        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, bearer| {
+        let (address, server) = proof_gateway(keys::recipient_of(&identity)?, |request, bearer| {
             if request == "GET /v1/p/project/events" && bearer == "old.proof" {
                 ("200 OK", r#"{"project":"project","events":[],"cursor":"1.2.3"}"#.into())
             } else {
@@ -3041,8 +3074,104 @@ pub(super) mod tests {
             }
         });
         let gateway = proof_client(&address, &identity, 600_000);
-        assert_eq!(gateway.events(Some("1.1.3"), 99).unwrap()["cursor"], "1.2.3");
+        assert_eq!(gateway.events(Some("1.1.3"), 99)?["cursor"], "1.2.3");
         assert_eq!(quit(&address, server), ["GET /v1/p/project/events old.proof"]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_events_retry_uses_the_remaining_request_deadline() -> Result<()> {
+        let identity = keys::generate_identity();
+        let mut attempts = 0;
+        let (address, server) = proof_gateway(keys::recipient_of(&identity)?, move |_, bearer| {
+            if bearer == "old.proof" {
+                return ("401 Unauthorized", "{}".into());
+            }
+            attempts += 1;
+            if attempts == 1 {
+                ("503 Service Unavailable", "{}".into())
+            } else {
+                // The reply would fit a fresh 1 s timeout, but not after the 0.5 s retry delay.
+                std::thread::sleep(Duration::from_millis(800));
+                ("200 OK", r#"{"events":[],"cursor":"1.2.3"}"#.into())
+            }
+        });
+        let mut gateway = proof_client(&address, &identity, 600_000);
+        let started = Instant::now();
+        gateway.deadline = Some(started + Duration::from_secs(1));
+        let result = gateway.events(Some("1.1.3"), 1);
+        assert!(result.as_ref().is_err_and(unreachable), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "elapsed: {:?}", started.elapsed());
+        assert_eq!(
+            quit(&address, server),
+            [
+                "GET /v1/p/project/events old.proof",
+                "GET /v1/p/project/challenge -",
+                "POST /v1/p/project/token -",
+                "GET /v1/p/project/events new.proof1",
+                "GET /v1/p/project/events new.proof1",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_first_events_request_caps_retry_after_by_the_deadline() -> Result<()> {
+        use std::io::Write;
+        let (listener, endpoint) = test_listener();
+        let server = std::thread::spawn(move || -> Result<_> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let head = String::from_utf8(read_head(&mut stream))?;
+            write!(stream, "HTTP/1.1 503 Busy\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+            Ok(head)
+        });
+        let mut gateway = Gateway::open("layr+https://localhost/project")?;
+        endpoint.configure(&mut gateway);
+        let started = Instant::now();
+        gateway.deadline = Some(started + Duration::from_secs(1));
+        let result = gateway.clone().events(None, 0);
+        let head = server.join().map_err(|_| anyhow!("server failed"))??;
+        assert!(head.starts_with("GET /v1/p/project/events?wait=0 HTTP/"), "{head}");
+        assert!(result.as_ref().is_err_and(|e| e.to_string().contains("deadline reached")), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(3), "elapsed: {:?}", started.elapsed());
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_finite_wait_classifies_a_stalled_events_body_as_timed_out() -> Result<()> {
+        use std::io::Write;
+        for finite in [false, true] {
+            let (listener, endpoint) = test_listener();
+            let (release, stall) = std::sync::mpsc::channel::<()>();
+            let server = std::thread::spawn(move || -> Result<()> {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let _ = read_head(&mut stream);
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 48\r\nConnection: close\r\n\r\n{{")?;
+                let _ = stall.recv_timeout(Duration::from_secs(3));
+                Ok(())
+            });
+            let mut gateway = Gateway::open("layr+https://localhost/project")?;
+            endpoint.configure(&mut gateway);
+            let budget = Duration::from_millis(250);
+            let mut builder = Client::builder().no_proxy().timeout(budget);
+            if let TestEndpoint::Unix(path) = &endpoint {
+                builder = builder.unix_socket(path.clone());
+            }
+            gateway.http = builder.build()?;
+            gateway.deadline = finite.then(|| Instant::now() + budget);
+            let result = gateway.events(Some("1.1.3"), 1);
+            drop(release);
+            server.join().map_err(|_| anyhow!("server failed"))??;
+            let Err(error) = result else { bail!("expected a body read failure") };
+            assert_eq!(format!("{error:#}"), "gateway events: gateway body read failed");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+                finite.then_some(std::io::ErrorKind::TimedOut)
+            );
+        }
+        Ok(())
     }
 
     #[test]

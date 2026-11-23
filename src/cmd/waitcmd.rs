@@ -4,7 +4,7 @@
 //! timer. The command long-polls the events of the project (25 seconds for each request) and ends
 //! when an event comes. With `--cursor-file`, the cursor of the last answer stays in that file, so
 //! a change during the pass of the caller ends the next wait at once.
-use super::{exit, here};
+use super::{exit, here_with_git_follow};
 use crate::args::{parse, Spec};
 use crate::ctx::Ctx;
 use anyhow::{Context, Result};
@@ -64,10 +64,19 @@ fn epoch(cursor: &str) -> &str {
 }
 
 /// An error that a later request can end: no connection, or a server that is busy or restarts (5xx, 429).
-fn transient(e: &anyhow::Error) -> bool {
-    let text = format!("{e:#}");
+fn transient(e: &anyhow::Error, deadline: Option<Instant>) -> bool {
+    let status = e.downcast_ref::<crate::store_remote::api::ResponseError>().map(|e| e.status).or_else(|| {
+        e.chain().find_map(|cause| {
+            let message = cause.to_string();
+            let (_, status) = message.split_once(": HTTP ")?;
+            status.split_ascii_whitespace().next()?.parse().ok()
+        })
+    });
     crate::store_remote::gateway::unreachable(e)
-        || ["HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504"].iter().any(|s| text.contains(s))
+        || (deadline.is_some()
+            && e.chain()
+                .any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|e| e.kind() == std::io::ErrorKind::TimedOut)))
+        || matches!(status, Some(429 | 500 | 502 | 503 | 504))
 }
 
 fn read_cursor(ctx: &Ctx, path: &Path) -> Result<Option<String>> {
@@ -92,78 +101,107 @@ pub fn wait(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.pos.len() > 1 {
         return Err(exit(128, USAGE));
     }
-    let timeout = a
+    let deadline = a
         .get("--timeout")
         .map(|t| t.parse::<u64>().map_err(|_| exit(128, "--timeout takes whole seconds (0: no limit)")))
         .transpose()?
         .filter(|&t| t > 0)
-        .map(Duration::from_secs);
+        .map(|seconds| {
+            Instant::now().checked_add(Duration::from_secs(seconds)).ok_or_else(|| exit(128, "--timeout is too large"))
+        })
+        .transpose()?;
     let file: Option<PathBuf> = a.get("--cursor-file").map(|p| ctx.cwd.join(p));
-    let h = here(ctx)?;
+    let as_json = a.has("--json");
+    // A finite wait only needs the project. Following Git can block on the line lock.
+    let h = here_with_git_follow(ctx, deadline.is_none())?;
     let mut store = crate::store_remote::open_named(a.pos.first().map(String::as_str).unwrap_or("origin"), &h.repo)?;
-    let backend = store.request_backend(ctx)?;
-    let own = a.has("--others").then(|| ctx.store.machine.id.clone());
-    let saved = match &file {
-        Some(path) => read_cursor(ctx, path)?,
-        None => None,
+    if let Some(deadline) = deadline {
+        store.set_wait_deadline(deadline)?;
+    }
+    let Some(()) = initialize(deadline, || store.prepare_requests(ctx))? else {
+        return report(&End::Timeout, None, as_json);
     };
+    let backend = store.backend();
+    let own = a.has("--others").then(|| &*ctx.store.machine.id);
+    let keep = |c: &str| file.as_deref().map_or(Ok(()), |f| write_cursor(ctx, f, c));
+    let events = |after: &str, seconds| backend.events(Some(after), seconds);
+    let saved = file.as_deref().map(|path| read_cursor(ctx, path)).transpose()?.flatten();
     let (end, cursor) = match saved {
-        Some(after) => {
-            poll(backend, after, timeout, own.as_deref(), |c| file.as_deref().map_or(Ok(()), |f| write_cursor(ctx, f, c)))?
-        }
+        Some(after) => poll(events, after, deadline, own, keep)?,
         None => {
-            // No cursor: the current one, from an answer that does not wait.
-            let answer = backend.events(None, 0)?;
+            // No cursor: fetch the current one without long-polling.
+            let Some(answer) = initialize(deadline, || backend.events(None, 0))? else {
+                return report(&End::Timeout, None, as_json);
+            };
             let now = cursor_of(&answer)?;
-            match &file {
-                // The caller has not seen the project with this file yet: it reads the project now.
-                Some(_) => (End::Start, now),
-                None => poll(backend, now, timeout, own.as_deref(), |_| Ok(()))?,
+            if file.is_some() {
+                (End::Start, now)
+            } else {
+                poll(events, now, deadline, own, keep)?
             }
         }
     };
-    if let Some(path) = &file {
-        write_cursor(ctx, path, &cursor)?;
-    }
-    report(&end, &cursor, a.has("--json"))
+    keep(&cursor)?;
+    report(&end, Some(&cursor), as_json)
 }
 
 fn cursor_of(answer: &Value) -> Result<String> {
     answer["cursor"].as_str().filter(|c| valid_cursor(c)).map(str::to_string).context("the events answer has no cursor")
 }
 
-/// Long-polls from `after` until a counted event, a resync or the timeout. `keep` saves each new cursor.
-fn poll(
-    backend: &crate::store_remote::backend::Backend,
-    mut after: String,
-    timeout: Option<Duration>,
-    own: Option<&str>,
-    keep: impl Fn(&str) -> Result<()>,
-) -> Result<(End, String)> {
-    let started = Instant::now();
-    let (mut found, mut delay, mut reported) = (0, 5, String::new());
+/// Preserve a single setup attempt for unlimited waits.
+fn initialize<T>(deadline: Option<Instant>, mut request: impl FnMut() -> Result<T>) -> Result<Option<T>> {
+    let Some(limit) = deadline else { return request().map(Some) };
+    Ok(retry_request(deadline, |_| request())?.filter(|_| Instant::now() < limit))
+}
+
+fn retry_request<T>(deadline: Option<Instant>, mut request: impl FnMut(Option<Duration>) -> Result<T>) -> Result<Option<T>> {
+    let remaining = || deadline.map(|d| d.saturating_duration_since(Instant::now()));
+    let (mut delay, mut reported) = (5, String::new());
     loop {
-        let left = timeout.map(|t| t.saturating_sub(started.elapsed()));
-        if found == 0 && left.is_some_and(|l| l.is_zero()) {
-            return Ok((End::Timeout, after));
+        let left = remaining();
+        if left == Some(Duration::ZERO) {
+            return Ok(None);
         }
-        // After a counted event, read the rest of a burst without waiting, then end.
-        let seconds = if found > 0 { 0 } else { left.map_or(25, |l| l.as_secs().clamp(1, 25)) };
-        let answer = match backend.events(Some(&after), seconds) {
-            Ok(answer) => answer,
-            Err(e) if transient(&e) => {
+        match request(left) {
+            Ok(answer) => return Ok(Some(answer)),
+            Err(e) if transient(&e, deadline) => {
+                let backoff = Duration::from_secs(delay);
+                let sleep = remaining().map_or(backoff, |left| backoff.min(left));
+                if sleep.is_zero() {
+                    continue;
+                }
                 let message = format!("{e:#}");
                 if message != reported {
                     eprintln!("layr wait: {message}; trying again");
                     reported = message;
                 }
-                std::thread::sleep(Duration::from_secs(delay));
+                std::thread::sleep(sleep);
                 delay = (delay * 2).min(60);
-                continue;
             }
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Long-polls from `after` until a counted event, a resync or the timeout. `keep` checkpoints each reply.
+fn poll(
+    mut events: impl FnMut(&str, u64) -> Result<Value>,
+    mut after: String,
+    deadline: Option<Instant>,
+    own: Option<&str>,
+    mut keep: impl FnMut(&str) -> Result<()>,
+) -> Result<(End, String)> {
+    let mut found = 0;
+    loop {
+        let answer = retry_request(deadline, |left| {
+            // After a counted event, read the rest of a burst without waiting, then end.
+            let seconds = if found > 0 { 0 } else { left.map_or(25, |l| l.as_secs().clamp(1, 25)) };
+            events(&after, seconds)
+        })?;
+        let Some(answer) = answer else {
+            return Ok((if found == 0 { End::Timeout } else { End::Change(found) }, after));
         };
-        (delay, reported) = (5, String::new());
         let next = cursor_of(&answer)?;
         let restarted = epoch(&next) != epoch(&after);
         after = next;
@@ -181,7 +219,7 @@ fn poll(
     }
 }
 
-fn report(end: &End, cursor: &str, as_json: bool) -> Result<i32> {
+fn report(end: &End, cursor: Option<&str>, as_json: bool) -> Result<i32> {
     let events = if let End::Change(n) = end { *n } else { 0 };
     if as_json {
         println!("{}", json!({"reason": end.name(), "events": events, "cursor": cursor}));
@@ -209,9 +247,57 @@ mod tests {
     fn a_restart_is_another_epoch_and_a_busy_server_is_tried_again() {
         assert_eq!(epoch("19.4.17"), "19");
         assert_ne!(epoch("19.4.17"), epoch("20.0.17"));
-        assert!(transient(&anyhow::anyhow!("gateway: HTTP 503")));
-        assert!(transient(&anyhow::anyhow!("Layr Cloud events: HTTP 502 busy")));
-        assert!(!transient(&anyhow::anyhow!("gateway: HTTP 404")));
+        assert!(transient(&anyhow::anyhow!("gateway: HTTP 503"), None));
+        assert!(transient(&anyhow::anyhow!("Layr Cloud events: HTTP 502 busy"), None));
+        assert!(!transient(&anyhow::anyhow!("gateway: HTTP 404"), None));
+        assert!(!transient(&anyhow::anyhow!("gateway: HTTP 401 (previous HTTP 503)"), Some(Instant::now())));
+    }
+
+    #[test]
+    fn a_busy_server_cannot_extend_a_wait_past_its_deadline() -> Result<()> {
+        let budget = Duration::from_millis(100);
+        let started = Instant::now();
+        let (end, cursor) = poll(
+            |_, _| Err(anyhow::anyhow!("gateway: HTTP 503")),
+            "1.1.1".into(),
+            Some(started + budget),
+            None,
+            |_| anyhow::bail!("the cursor did not advance"),
+        )?;
+        assert_eq!((end, cursor.as_str()), (End::Timeout, "1.1.1"));
+        assert!(started.elapsed() < Duration::from_secs(2), "elapsed: {:?}", started.elapsed());
+        Ok(())
+    }
+
+    #[test]
+    fn a_body_timeout_is_transient_only_with_a_deadline() {
+        let error = std::io::Error::new(std::io::ErrorKind::TimedOut, "stalled body").into();
+        assert!(!transient(&error, None));
+        assert!(transient(&error, Some(Instant::now())));
+    }
+
+    #[test]
+    fn a_wait_reports_counted_events_if_the_deadline_interrupts_the_burst() -> Result<()> {
+        let answers = [
+            Ok(json!({"cursor": "1.1.1", "events": []})),
+            Ok(json!({"cursor": "1.2.1", "events": [{}], "more": true})),
+            Err(anyhow::anyhow!("gateway: HTTP 503")),
+        ];
+        let mut answers = answers.into_iter();
+        let mut saved = Vec::new();
+        let (end, cursor) = poll(
+            |_, _| answers.next().context("three polls before the deadline")?,
+            "1.1.1".into(),
+            Some(Instant::now() + Duration::from_millis(100)),
+            None,
+            |cursor| {
+                saved.push(cursor.to_owned());
+                Ok(())
+            },
+        )?;
+        assert_eq!((end, cursor.as_str()), (End::Change(1), "1.2.1"));
+        assert_eq!(saved, ["1.1.1", "1.2.1"]);
+        Ok(())
     }
 
     #[test]

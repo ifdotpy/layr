@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """The choice of the scoped check watcher (scoped-watch.py)."""
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
+from subprocess import CompletedProcess, TimeoutExpired
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('scoped_watch', Path(__file__).with_name('scoped-watch.py'))
 watch = importlib.util.module_from_spec(spec)
@@ -44,26 +47,23 @@ class Choose(unittest.TestCase):
 
 
 class Signal(unittest.TestCase):
-    """No timer: an idle runner waits for a change of the project, and each result goes out at once."""
+    """An idle runner wakes on project changes or local retries, and pushes results at once."""
 
     def runner(self, wait_ok=True, can_wait=True):
         runner = watch.Runner.__new__(watch.Runner)
         runner.project, runner.calls, runner.can_wait = 'p', [], None
+        runner.platform, runner.checks, runner.failed = 'linux-x86_64', {'unit'}, {}
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         watch.WAIT_DIR = folder.name
 
-        class Done:
-            def __init__(self, code):
-                self.returncode, self.stderr, self.stdout = code, '', ''
-
         def layr(*args, timeout=1800):
             runner.calls.append((args, timeout))
             if args == ('wait', '--help'):
-                return Done(0 if can_wait else 1)
+                return CompletedProcess(args, 0 if can_wait else 1, '', '')
             if args[0] == 'wait':
-                return Done(0 if wait_ok else 1)
-            return Done(0)
+                return CompletedProcess(args, 0 if wait_ok else 1, '', '')
+            return CompletedProcess(args, 0, '', '')
         runner.layr = layr
         return runner
 
@@ -91,6 +91,89 @@ class Signal(unittest.TestCase):
             watch.time.sleep = sleep
         self.assertEqual(sleeps, [watch.IDLE])
         self.assertEqual([a for a, _ in runner.calls], [('wait', '--help'), ('fetch', 'origin', '--heads')])
+
+    def test_a_quiet_project_wakes_at_the_earliest_local_retry(self):
+        runner = self.runner()
+        older, newer = item(NOW - HOUR), item(NOW)
+        now = NOW / 1000
+        runner.failed = {newer['state']: now, older['state']: now - watch.RETRY + 0.25}
+        original = runner.layr
+
+        def layr(*args, timeout=1800):
+            nonlocal now
+            if args[:2] == ('checks', 'pending'):
+                return CompletedProcess(args, 0, json.dumps({'pending': [newer, older]}), '')
+            if args[:2] == ('queue', 'list'):
+                return CompletedProcess(args, 0, '[]', '')
+            result = original(*args, timeout=timeout)
+            if args[:2] == ('wait', 'origin'):
+                self.assertEqual(args[-2:], ('--timeout', '1'))
+                self.assertEqual(timeout, 1 + watch.WAIT_GRACE)
+                now += int(args[-1])
+            return result
+
+        runner.layr = layr
+        with patch.object(watch.time, 'time', lambda: now):
+            self.assertIsNone(runner.next_check())
+            runner.wait_for_change()
+            self.assertEqual(runner.next_check(), older)
+
+    def test_a_wait_that_ignores_its_timeout_returns_to_the_scan(self):
+        runner = self.runner()
+        pending = item(NOW)
+        now = NOW / 1000
+        runner.failed = {pending['state']: now - watch.RETRY + 0.25}
+        calls = []
+
+        def layr(*args, timeout=1800):
+            nonlocal now
+            calls.append(args[:2])
+            if args == ('wait', '--help'):
+                return CompletedProcess(args, 0, '', '')
+            if args[:2] == ('checks', 'pending'):
+                return CompletedProcess(args, 0, json.dumps({'pending': [pending]}), '')
+            if args[:2] == ('queue', 'list'):
+                return CompletedProcess(args, 0, '[]', '')
+            if args == ('fetch', 'origin', '--heads'):
+                return CompletedProcess(args, 0, '', '')
+            self.assertEqual(args[:2], ('wait', 'origin'))
+            self.assertEqual(timeout, 1 + watch.WAIT_GRACE)
+            now += timeout
+            raise TimeoutExpired(args, timeout)
+
+        runner.layr = layr
+        with patch.object(watch.time, 'time', lambda: now):
+            self.assertIsNone(runner.next_check())
+            runner.wait_for_change()
+            self.assertEqual(runner.next_check(), pending)
+        self.assertEqual(calls[-3:], [('fetch', 'origin'), ('checks', 'pending'), ('queue', 'list')])
+
+    def test_a_failed_pending_list_fetches_heads_before_rescanning(self):
+        runner = self.runner()
+        pending = item(NOW)
+        calls = []
+
+        def layr(*args):
+            command = args[:2]
+            calls.append(command)
+            if command == ('checks', 'pending'):
+                if ('fetch', 'origin') not in calls:
+                    self.assertEqual(calls, [('checks', 'pending')])
+                    return CompletedProcess(args, 1, '', 'unavailable')
+                return CompletedProcess(args, 0, json.dumps({'pending': [pending]}), '')
+            if command == ('fetch', 'origin'):
+                self.assertEqual(args[2:], ('--heads',))
+                return CompletedProcess(args, 0, '', '')
+            self.assertEqual(command, ('queue', 'list'))
+            return CompletedProcess(args, 0, '[]', '')
+
+        runner.layr = layr
+        with patch.object(watch.time, 'time', return_value=NOW / 1000), \
+                patch.object(watch.time, 'sleep', side_effect=calls.append), patch.object(watch, 'log'):
+            self.assertEqual(runner.next_check(), pending)
+        self.assertEqual(calls, [
+            ('checks', 'pending'), watch.IDLE, ('fetch', 'origin'), ('checks', 'pending'), ('queue', 'list'),
+        ])
 
     def test_a_result_is_pushed_at_once(self):
         runner = self.runner()
