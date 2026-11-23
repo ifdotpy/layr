@@ -20,8 +20,8 @@ With `line.kind fast`, a line that cannot be fast (see Requirements) is made cla
 - The line belongs to the user who makes it (no `--owner`).
 - Linux: the service (`layr daemon`, root) and `/dev/fuse`. Every Linux build has LayrFS (FUSE).
 - macOS 27 or later on Apple silicon, and the LayrFS file system extension:
-  1. Install `layr-<version>.pkg`. It puts `layr` in `/usr/local/bin` and `LayrFSHost.app` in
-     `/Applications`, then opens the app. Without the package: drag `LayrFSHost.app` to
+  1. Install `layr-<version>.pkg`. It puts `layr` in `/usr/local/bin` and `Layr.app` in
+     `/Applications`, then opens the app. Without the package: drag `Layr.app` to
      `/Applications` in Finder and open it.
   2. The app opens System Settings > General > Login Items & Extensions > File System Extensions.
   3. Turn on LayrFS.

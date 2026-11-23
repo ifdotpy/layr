@@ -1,6 +1,6 @@
 #!/bin/zsh
-# A release of LayrFSHost.app for other Macs: Developer ID signature, notarization, stapled
-# ticket, and a zip (LayrFSHost-<version>.zip in build-release/).
+# A release of Layr.app (the LayrFS app) for other Macs: Developer ID signature, notarization, stapled
+# ticket, and a zip (Layr-<version>.zip in build-release/).
 #
 # Needs a paid Apple Developer team, signed in to Xcode (Settings > Accounts) with the role
 # Account Holder or Admin. Xcode then signs with a cloud-managed Developer ID certificate and
@@ -50,8 +50,8 @@ echo "export (Developer ID, $DESTINATION)"
 xcodebuild -exportArchive -archivePath $OUT/LayrFSHost.xcarchive -exportOptionsPlist $OUT/export.plist \
     -exportPath $OUT/export -allowProvisioningUpdates > $OUT/export.log 2>&1 ||
     { grep -E "error:" $OUT/export.log | sort -u >&2; exit 1; }
-APP=$OUT/export/LayrFSHost.app
-ZIP=$OUT/LayrFSHost-$VERSION.zip
+APP=$OUT/export/Layr.app
+ZIP=$OUT/Layr-$VERSION.zip
 
 if [ "$DESTINATION" = upload ]; then
     # Xcode uploaded the archive for notarization: wait for the ticket, then take the app.

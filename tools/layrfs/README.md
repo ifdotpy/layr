@@ -17,7 +17,7 @@ Requirements: macOS 27.0 or later, Xcode 27.2, a paid Apple Developer team.
 | Path | Content |
 | --- | --- |
 | `project.yml` | XcodeGen spec. `DEVELOPMENT_TEAM` is the only signing value. |
-| `LayrFSHost/` | Host app (`dev.layr.fshost`). It only carries the extension and opens the settings pane. |
+| `LayrFSHost/` | Host app `Layr.app` (`dev.layr.fshost`; `LayrFSHost.app` up to 0.53). It only carries the extension and opens the settings pane. |
 | `LayrFS/` | FSKit extension (`dev.layr.fshost.fs`, short name `layrfs`). |
 | `LayrFS/Posix.swift` | Backend: `getattrlistat`, `getattrlistbulk`, `openat`, `pread`/`pwrite`, `renameat`, and so on. |
 | `LayrFS/Overlay.swift` | Overlay core without FSKit: merge, whiteouts, copy-up, lazy index of the lower tree. |
@@ -63,7 +63,7 @@ Notes:
 Verify the signature:
 
 ```sh
-APP=build-signed/Build/Products/Release/LayrFSHost.app
+APP=build-signed/Build/Products/Release/Layr.app
 codesign -d --entitlements - "$APP/Contents/Extensions/LayrFS.appex"
 codesign --verify --deep --strict --verbose=2 "$APP"
 ```
@@ -81,15 +81,15 @@ merged view with the mirror: content, modes, links, IDs, whiteouts, and a reload
 
 ## Install and enable
 
-1. Copy the app: `ditto build-signed/Build/Products/Release/LayrFSHost.app ~/Applications/LayrFSHost.app`
-2. Launch it once: `open ~/Applications/LayrFSHost.app`
+1. Copy the app: `ditto build-signed/Build/Products/Release/Layr.app ~/Applications/Layr.app`
+2. Launch it once: `open ~/Applications/Layr.app`
 3. Check the registration: `pluginkit -m -v -p com.apple.fskit.fsmodule` (look for `dev.layr.fshost.fs`).
 4. Open System Settings > General > Login Items & Extensions > File System Extensions. The host app button also opens this pane.
 5. Turn on LayrFS.
 
-Step 3 lists the extension also when it is off. `LayrFSHost --status` (the binary in
+Step 3 lists the extension also when it is off. `Layr --status` (the binary in
 `Contents/MacOS`) prints `enabled`, `disabled` or `missing`; `layr line new --fast` uses it.
-`LayrFSHost --open-settings` opens the pane.
+`Layr --open-settings` opens the pane.
 
 An app update stops the extension and so all its mounts. Unmount before you replace the app.
 

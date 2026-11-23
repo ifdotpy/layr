@@ -588,7 +588,7 @@ also of files written while it runs.
 - macOS: a fast line whose mount is gone is mounted again by a command (tests/fast-remount-macos.sh)
   and by the user service at its start. `line new --fast` checks that the extension is installed.
 - `tools/layrfs/release.sh`: Developer ID signature, notarization and a stapled zip of
-  LayrFSHost.app.
+  Layr.app (LayrFSHost.app up to 0.53).
 - The service loop (the child of the FUSE server process) gets SIGTERM when its parent goes: a
   kill of the daemon's pid stops the whole service, as before the fork (tests/t111-daemon-plist.sh).
 - Caches bound to their build location (main, 2026-11-17): a fast line's cache tree carries the

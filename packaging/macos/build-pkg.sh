@@ -1,7 +1,7 @@
 #!/bin/zsh
 # The macOS installer of layr: layr-<version>.pkg in packaging/macos/build/. It installs
 #   /usr/local/bin/layr          the command (Developer ID signature, hardened runtime)
-#   /Applications/LayrFSHost.app the LayrFS file system extension of fast lines
+#   /Applications/Layr.app       the LayrFS file system extension of fast lines
 # and then opens the app as the person who installs it: the system registers the extension, and
 # the app opens the settings pane where that person turns LayrFS on (only a person can).
 # macOS 27 or later, Apple silicon.
@@ -59,17 +59,17 @@ if [ -z "$UNSIGNED" ]; then
     codesign --force --options runtime --timestamp --sign "$APP_ID" $OUT/root/usr/local/bin/layr
 fi
 
-echo "LayrFSHost.app"
+echo "Layr.app"
 if [ -z "$UNSIGNED" ]; then
     # Developer ID signature and notarization of the app (tools/layrfs/release.sh).
     TEAM_ID=$TEAM_ID NOTARY_PROFILE=$NOTARY_PROFILE $REPO/tools/layrfs/release.sh >/dev/null
-    ditto $REPO/tools/layrfs/build-release/export/LayrFSHost.app $OUT/root/Applications/LayrFSHost.app
+    ditto $REPO/tools/layrfs/build-release/export/Layr.app $OUT/root/Applications/Layr.app
 else
     (cd $REPO/tools/layrfs && { command -v xcodegen >/dev/null && xcodegen generate >/dev/null || true; } &&
         xcodebuild -project LayrFSHost.xcodeproj -scheme LayrFSHost -configuration Release \
             -derivedDataPath $OUT/xcode CODE_SIGNING_ALLOWED=NO build > $OUT/xcode.log 2>&1) ||
         { grep -E "error:" $OUT/xcode.log | sort -u >&2; exit 1; }
-    ditto $OUT/xcode/Build/Products/Release/LayrFSHost.app $OUT/root/Applications/LayrFSHost.app
+    ditto $OUT/xcode/Build/Products/Release/Layr.app $OUT/root/Applications/Layr.app
 fi
 
 cat > $OUT/scripts/postinstall <<'EOF'
@@ -78,11 +78,18 @@ cat > $OUT/scripts/postinstall <<'EOF'
 # opens the settings pane when LayrFS is off. No one at the screen: the first open does it.
 # Another target volume ($3) is not this system: its first start registers the app.
 [ "${3:-/}" = / ] || exit 0
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+# Packages up to 0.53 installed the same app as LayrFSHost.app: two copies carry one extension.
+old=/Applications/LayrFSHost.app
+if [ "$(/usr/bin/defaults read "$old/Contents/Info" CFBundleIdentifier 2>/dev/null)" = dev.layr.fshost ]; then
+    $lsregister -u "$old" 2>/dev/null || true
+    rm -rf "$old"
+fi
+$lsregister -f /Applications/Layr.app
 user=$(stat -f %Su /dev/console)
 [ -n "$user" ] && [ "$user" != root ] || exit 0
 uid=$(id -u "$user")
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/LayrFSHost.app
-launchctl asuser "$uid" sudo -u "$user" /usr/bin/open -g /Applications/LayrFSHost.app || true
+launchctl asuser "$uid" sudo -u "$user" /usr/bin/open -g /Applications/Layr.app || true
 exit 0
 EOF
 chmod 755 $OUT/scripts/postinstall
