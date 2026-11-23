@@ -15,11 +15,14 @@
 #
 # Usage: TEAM_ID=<team> NOTARY_PROFILE=<profile> ./build-pkg.sh
 #   UNSIGNED=1 ./build-pkg.sh   a package without signatures or notarization (a test of the layout)
+#   LAYR_BIN=<path>              package this release build of layr (its version must be the one of
+#                                Cargo.toml) instead of a cargo build in target/
 set -euo pipefail
 D=${0:A:h}
 REPO=${D:h:h}
 OUT=$D/build
 UNSIGNED=${UNSIGNED:-}
+LAYR_BIN=${LAYR_BIN:-}
 VERSION=$(awk -F'"' '/^version *=/ { print $2; exit }' $REPO/Cargo.toml)
 PKG=$OUT/layr-$VERSION.pkg
 [ "$(uname -m)" = arm64 ] || { echo "build on Apple silicon" >&2; exit 1; }
@@ -44,8 +47,13 @@ rm -rf $OUT
 mkdir -p $OUT/root/usr/local/bin $OUT/root/Applications $OUT/scripts
 
 echo "layr $VERSION"
-(cd $REPO && cargo build --release --locked -q)
-cp $REPO/target/release/layr $OUT/root/usr/local/bin/layr
+if [ -z "$LAYR_BIN" ]; then
+    (cd $REPO && cargo build --release --locked -q)
+    LAYR_BIN=$REPO/target/release/layr
+fi
+[[ "$("$LAYR_BIN" version)" == "layr version $VERSION "* ]] ||
+    { echo "$LAYR_BIN is not layr $VERSION" >&2; exit 1; }
+cp "$LAYR_BIN" $OUT/root/usr/local/bin/layr
 strip -S $OUT/root/usr/local/bin/layr
 if [ -z "$UNSIGNED" ]; then
     codesign --force --options runtime --timestamp --sign "$APP_ID" $OUT/root/usr/local/bin/layr
