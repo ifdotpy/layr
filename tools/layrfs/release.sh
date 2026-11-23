@@ -78,7 +78,8 @@ codesign --verify --deep --strict $APP
 signature=$(codesign -dvv $APP 2>&1)
 [[ "$signature" == *"Authority=Developer ID Application"* ]] ||
     { echo "the app is not signed with Developer ID" >&2; exit 1; }
-codesign -d --entitlements - $APP/Contents/Extensions/LayrFS.appex 2>/dev/null | grep -q com.apple.developer.fskit.fsmodule ||
+entitlements=$(codesign -d --entitlements - $APP/Contents/Extensions/LayrFS.appex 2>/dev/null) || true
+[[ "$entitlements" == *com.apple.developer.fskit.fsmodule* ]] ||
     { echo "the extension lacks the FSKit entitlement" >&2; exit 1; }
 xcrun stapler validate $APP
 spctl --assess --type execute --verbose $APP
