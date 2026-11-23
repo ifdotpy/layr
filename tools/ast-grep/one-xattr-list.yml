@@ -1,0 +1,16 @@
+id: one-xattr-list
+language: Rust
+severity: error
+message: List attributes through `fsutil::xattr_names` and give the policy as its `keep` argument.
+note: Each copy of the list, get and set loop had its own filter; one helper keeps the policies visible.
+files:
+  - src/**/*.rs
+rule:
+  pattern: rustix::fs::flistxattr($$$)
+  not:
+    inside:
+      kind: function_item
+      stopBy: end
+      has:
+        field: name
+        regex: ^xattr_names$

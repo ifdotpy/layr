@@ -1,0 +1,7 @@
+id: one-xattr-list
+valid:
+  - |
+    fn xattr_names(file: &File) { rustix::fs::flistxattr(file, bytes.as_mut_slice()); }
+invalid:
+  - |
+    fn copy_xattrs(src: &File) { rustix::fs::flistxattr(src, names.as_mut_slice()); }

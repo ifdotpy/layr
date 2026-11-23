@@ -1932,3 +1932,28 @@ fn writable_capture_shortcut_and_disabled_fallback_preserve_nested_snapshot_sema
     fs.remove(source.ownership).map_err(|failure| failure.error)?;
     Ok(())
 }
+
+/// A reader copy onto a file with one link writes it in place: kept attributes that the source
+/// lacks go, the others take the source's values.
+#[test]
+fn reader_copies_in_place_replace_stale_attributes() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = Scratch::new()?;
+    let source = MemoryTree::new(attributes(0o755));
+    write(&source, "file", b"new")?;
+    let mut file_attributes = attributes(0o644);
+    file_attributes.xattrs = vec![(b"user.keep".to_vec(), b"new".to_vec())];
+    source.set_metadata(&RelDir::Path(path("file")), &file_attributes)?;
+    let destination = scratch.directory("destination")?;
+    let target = destination.join("file");
+    std::fs::write(&target, b"old")?;
+    for (name, value) in [("user.keep", b"old".as_slice()), ("user.stale", b"stale")] {
+        rustix::fs::setxattr(&target, name, value, rustix::fs::XattrFlags::empty())?;
+    }
+    let inode = std::fs::metadata(&target)?.ino();
+    crate::fsutil::copy_entry(&ReaderOnly(&source), "file", &destination, "file", None)?;
+    assert_eq!(std::fs::metadata(&target)?.ino(), inode);
+    assert_eq!(std::fs::read(&target)?, b"new");
+    assert_eq!(layr_objects::fsx::xattrs(&target)?, file_attributes.xattrs);
+    Ok(())
+}

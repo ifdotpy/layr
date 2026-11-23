@@ -497,16 +497,15 @@ impl Copier {
     }
 
     fn share_file(&mut self, src: &Path, dst: &Path) -> Result<()> {
-        // Only plain extents: inline and encoded data have no physical address to compare.
-        const LAST: u32 = 0x1;
-        const SHARED: u32 = 0x2000;
-        let source = File::open(src).with_context(|| format!("open {}", src.display()))?;
-        let extents = crate::sys::fiemap_full(&source).with_context(|| format!("extents of {}", src.display()))?;
-        if extents.is_empty() || extents.iter().any(|e| e.3 & !(LAST | SHARED) != 0) {
-            return Ok(());
-        }
-        let key =
-            (source.metadata()?.len(), extents.iter().map(|&(logical, physical, len, _)| (logical, physical, len)).collect());
+        // Close the source before the copy opens two more descriptors.
+        let key = {
+            let source = File::open(src).with_context(|| format!("open {}", src.display()))?;
+            let Some(extents) = sys::fiemap::plain_extents(&source).with_context(|| format!("extents of {}", src.display()))?
+            else {
+                return Ok(());
+            };
+            (source.metadata()?.len(), extents)
+        };
         match self.seen.get(&key) {
             Some(first) => {
                 let (from, to) = (File::open(first)?, fs::OpenOptions::new().write(true).open(dst)?);

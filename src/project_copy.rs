@@ -65,16 +65,11 @@ pub(crate) fn sparse_sharing_regression(mut copy: impl FnMut(&Path, &Path) -> Re
         }
         file.set_len(size)?;
         file.sync_all()?;
-        let allocated = crate::sys::fiemap_full(&file)?;
-        const LAST: u32 = 0x1;
-        const SHARED: u32 = 0x2000;
-        assert!(!allocated.is_empty(), "fixture needs allocated data");
-        assert!(allocated.iter().all(|e| e.3 & !(LAST | SHARED) == 0), "fixture needs plain extents: {allocated:?}");
+        let current = crate::sys::fiemap::plain_extents(&file)?.context("fixture needs allocated plain extents")?;
         assert!(
-            allocated.iter().all(|(logical, _, len, _)| logical.saturating_add(*len) < size),
-            "fixture needs a trailing hole: {allocated:?}"
+            current.iter().all(|(logical, _, len)| logical.saturating_add(*len) < size),
+            "fixture needs a trailing hole: {current:?}"
         );
-        let current: Vec<_> = allocated.into_iter().map(|(l, p, n, _)| (l, p, n)).collect();
         if let Some(first) = &extents {
             assert_eq!(&current, first, "fixture files must share the same allocated data");
         } else {
