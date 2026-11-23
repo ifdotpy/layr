@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.54.2](https://github.com/ifdotpy/layr/compare/v0.54.1...v0.54.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **remote:** Honor wait and scoped check retry deadlines
+
+
+## [0.54.1](https://github.com/ifdotpy/layr/compare/v0.54.0...v0.54.1) (2026-11-23)
+
+
+### Performance Improvements
+
+* **status:** Reuse the saved live compare of an unchanged folder
+
 ## [0.54.1](https://github.com/ifdotpy/layr/compare/v0.54.0...v0.54.1) (2026-11-23)
 
 
