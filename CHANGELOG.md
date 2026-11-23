@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.55.2](https://github.com/ifdotpy/layr/compare/v0.55.1...v0.55.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **layrfs:** read the entitlements of the extension before testing them
+
+
+## [0.55.1](https://github.com/ifdotpy/layr/compare/v0.55.0...v0.55.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **gitpack:** End the macOS pack server when its project is gone
+
 ## [0.54.1](https://github.com/ifdotpy/layr/compare/v0.54.0...v0.54.1) (2026-11-23)
 
 
