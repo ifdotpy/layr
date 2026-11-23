@@ -171,6 +171,38 @@ A store whose `store.json` later names another mode is refused, so a writer of t
 project into a plain one.
 Use `--mode secret` when you clone a project that must stay encrypted.
 
+## Wait for a change
+
+`layr wait [<remote>] [--cursor-file <path>] [--others] [--timeout <seconds>] [--json]` waits until
+the project changes on a Layr Cloud remote (default `origin`), then ends with exit 0. A machine job
+(a check runner, a follow, a release) runs it before each pass. It does not need a timer.
+
+- The command long-polls the events of the project (layr-cloud `docs/api.md`, "Events"). One
+  request waits up to 25 seconds; the command sends the next one at once.
+- `--cursor-file`: the cursor of the last answer stays in this file. A change while the caller
+  works ends the next wait at once. Without a cursor in the file, the command writes the current
+  cursor and ends at once (`start`): the caller has not read the project yet.
+- `--others`: only a record segment of another machine counts. Each change of a project writes
+  one, and the results and approvals that this machine pushes do not wake it again.
+- `--timeout`: end after this many seconds without a change (`timeout`). 0 or no option: no limit.
+- The end is one line: `layr wait: change (<n> events)`, `start`, `restart`, `timeout` or `resync`.
+  `resync` means that the server cannot prove that no event was lost: read the project in full.
+  `restart`: the server restarted (another epoch in the cursor), for example for a new release of it.
+  `--json` prints `{"reason","events","cursor"}`.
+- A lost connection or a busy server (HTTP 429, 5xx) is tried again after 5 seconds, then up to
+  every 60 seconds. Any other error
+  (no access, no such project) ends the command with an error.
+- The access is the access of a read: a read proof of the store identity, a person session, or no
+  token for a Public project. A `file://` or `s3://` remote has no events.
+
+Example: a job that runs again each time it ends (launchd `KeepAlive`, systemd `Restart=always`):
+
+```sh
+layr --project p wait origin --cursor-file "$state/wait.cursor" --others
+layr --project p fetch origin --heads
+...
+```
+
 ## Layr Cloud API v1 (Public and Private)
 
 A `layr+https://<host>/<project>` remote whose mode is `private` or `public` talks to the Layr Cloud

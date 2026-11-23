@@ -946,6 +946,23 @@ impl Gateway {
         }
     }
 
+    /// One long-poll of the project events (`GET /v1/p/<project>/events`, docs/remotes.md, "Wait for a
+    /// change"): a read proof when this client has a read identity, else a person session or no token
+    /// (a Public project).
+    pub fn events(&self, after: Option<&str>, wait: u64) -> Result<serde_json::Value> {
+        let wait = wait.min(25).to_string();
+        let mut query = vec![("wait", wait.as_str())];
+        if let Some(after) = after {
+            query.push(("after", after));
+        }
+        let response = if self.has_read_identity() && !self.is_public() {
+            self.proof_request(Method::GET, "events", &query, None, &[])?
+        } else {
+            self.send_query(Method::GET, "events", None, &query, None)?
+        };
+        self.json(response, 4 << 20).context("gateway events")
+    }
+
     pub fn prove_reader(&self) -> Result<()> {
         self.proof().map(|_| ())
     }
@@ -3010,6 +3027,21 @@ pub(super) mod tests {
             ["GET /v1/p/project/challenge -", "POST /v1/p/project/token -", "GET /v1/p/project/objects new.proof1"],
             "the proof is renewed before it goes out, so the gateway never sees an expired proof"
         );
+    }
+
+    #[test]
+    fn events_long_poll_with_the_read_proof_of_the_client() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, bearer| {
+            if request == "GET /v1/p/project/events" && bearer == "old.proof" {
+                ("200 OK", r#"{"project":"project","events":[],"cursor":"1.2.3"}"#.into())
+            } else {
+                ("404 Not Found", "{}".into())
+            }
+        });
+        let gateway = proof_client(&address, &identity, 600_000);
+        assert_eq!(gateway.events(Some("1.1.3"), 99).unwrap()["cursor"], "1.2.3");
+        assert_eq!(quit(&address, server), ["GET /v1/p/project/events old.proof"]);
     }
 
     #[test]
