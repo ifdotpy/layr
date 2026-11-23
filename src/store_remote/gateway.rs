@@ -1047,7 +1047,8 @@ impl Gateway {
         }
     }
 
-    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    #[cfg(test)]
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.get_limited(key, OBJECT_LIMIT)
     }
 

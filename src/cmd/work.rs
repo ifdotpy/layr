@@ -12,6 +12,7 @@ use crate::model::{Conflict, ConflictDetails, ConflictKind, Line, StateKind};
 use crate::radar::Overlap;
 use crate::repo::{conflict_open, skip_path, snap, Repo, Snap, Status, Temp};
 use crate::revs;
+use crate::store::{LineLeaseSet, LockedProject};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -416,40 +417,31 @@ fn untracked_list(st: &Status, mode: &str) -> Vec<String> {
 
 /// Lock the line and the project and save the working content (snapshot rule 2). For the commands
 /// whose records are written under the project lock they hold: stash, clean, rm and mv.
-pub fn begin_change<'p>(ctx: &Ctx, repo: &'p Repo<'p>, line: &Line) -> Result<(crate::store::LockedProject<'p>, Option<String>)> {
-    begin(ctx, repo, line, crate::repo::LineOp::Direct)
+pub fn begin_change<'p>(ctx: &Ctx, repo: &'p Repo<'p>, line: &Line) -> Result<(LockedProject<'p>, Option<String>)> {
+    let (line_lock, project_lock, w) = begin(ctx, repo, line, crate::repo::LineOp::Direct)?;
+    drop(line_lock);
+    Ok((project_lock, w))
 }
 
-/// `begin_change` for another kind of change.
-pub fn begin<'p>(
+fn begin<'p>(
     ctx: &Ctx,
     repo: &'p Repo<'p>,
     line: &Line,
     op: crate::repo::LineOp,
-) -> Result<(crate::store::LockedProject<'p>, Option<String>)> {
+) -> Result<(LineLeaseSet, LockedProject<'p>, Option<String>)> {
     repo.authorize_line(ctx, line, op)?;
     let line_lock = repo.line_lock(line)?;
     let line = repo.line(&line.id)?;
     repo.authorize_line(ctx, &line, op)?;
-    let (lock, w) = repo.save_working(ctx, &line, &line_lock, "before a layr command")?;
-    Ok((lock, w))
+    let (project_lock, w) = repo.save_working(ctx, &line, &line_lock, "before a layr command")?;
+    Ok((line_lock, project_lock, w))
 }
 
-/// `begin` for a command that writes the working folder or moves the head of the line. It holds the
-/// line lock for the whole command (the caller keeps the returned guard) and takes the project lock
-/// only for publication of the automatic save of the working folder.
-pub fn begin_line(
-    ctx: &Ctx,
-    repo: &Repo,
-    line: &Line,
-    op: crate::repo::LineOp,
-) -> Result<(crate::store::LineLeaseSet, Option<String>)> {
-    repo.authorize_line(ctx, line, op)?;
-    let line_lock = repo.line_lock(line)?;
-    let line = repo.line(&line.id)?;
-    repo.authorize_line(ctx, &line, op)?;
-    let (_commit, w) = repo.save_working(ctx, &line, &line_lock, "before a layr command")?;
-    drop(_commit);
+/// For commands that write the working folder or move the line head, hold the line lease for the
+/// whole command and the project lock only for publication of the automatic working snapshot.
+pub fn begin_line(ctx: &Ctx, repo: &Repo, line: &Line, op: crate::repo::LineOp) -> Result<(LineLeaseSet, Option<String>)> {
+    let (line_lock, project_lock, w) = begin(ctx, repo, line, op)?;
+    drop(project_lock);
     Ok((line_lock, w))
 }
 
