@@ -512,6 +512,8 @@ struct CatFile {
     blob_requests: usize,
     #[cfg(test)]
     decoded_blob_bytes: usize,
+    #[cfg(test)]
+    tree_requests: usize,
     child: std::process::Child,
     input: std::process::ChildStdin,
     output: std::io::BufReader<std::process::ChildStdout>,
@@ -530,13 +532,17 @@ impl CatFile {
             blob_requests: 0,
             #[cfg(test)]
             decoded_blob_bytes: 0,
+            #[cfg(test)]
+            tree_requests: 0,
         })
     }
 
     fn object(&mut self, oid: &str, kind: &str) -> Result<Vec<u8>> {
         #[cfg(test)]
-        if kind == "blob" {
-            self.blob_requests += 1;
+        match kind {
+            "blob" => self.blob_requests += 1,
+            "tree" => self.tree_requests += 1,
+            _ => {}
         }
         writeln!(self.input, "{oid}")?;
         self.input.flush()?;
@@ -765,16 +771,8 @@ fn materialize(
     source: Option<&Path>,
 ) -> Result<()> {
     let source = source.map(crate::tree::Tree::open).transpose()?;
-    let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit];
-    let owned: Vec<String>;
-    if let Some(p) = paths {
-        args.push("--");
-        owned = p.to_vec();
-        args.extend(owned.iter().map(|s| s.as_str()));
-    }
     // ls-tree with many paths: call in batches.
     let mut entries: Vec<(String, String, String)> = Vec::new();
-    let mut present = std::collections::HashSet::new();
     let batch = |ps: &[&str]| -> Result<Vec<(String, String, String)>> {
         let mut a = vec!["ls-tree", "-r", "-z", "--full-tree", commit];
         if !ps.is_empty() {
@@ -806,13 +804,10 @@ fn materialize(
             }
         }
     }
-    let _ = args;
-    for (_, _, p) in &entries {
-        present.insert(p.clone());
-    }
     if let Some(p) = paths {
+        let present: std::collections::HashSet<&str> = entries.iter().map(|(_, _, path)| path.as_str()).collect();
         for path in p {
-            if !present.contains(path) && fsutil::lmeta(dst, path).is_some() {
+            if !present.contains(path.as_str()) && fsutil::lmeta(dst, path).is_some() {
                 fsutil::remove_entry(dst, path)?;
             }
         }
@@ -1178,11 +1173,11 @@ fn commit_objects(
     parent: &str,
     changes: &Changes,
     cat: &mut CatFile,
-) -> Result<Option<(layr_objects::Store, layr_objects::StateRef)>> {
+) -> Result<Option<(std::sync::Arc<layr_objects::Store>, layr_objects::StateRef)>> {
     let store = match crate::objstore::verified(&repo.p, parent)? {
         Some((store, _)) => store,
         // The state of an earlier commit of the same plan: its objects are not in a record yet.
-        None if crate::objstore::exists(&repo.p) => crate::objstore::open(&repo.p)?,
+        None if crate::objstore::exists(&repo.p) => std::sync::Arc::new(crate::objstore::open(&repo.p)?),
         None => return Ok(None),
     };
     let Some(base) = store.state_ref(parent)? else { return Ok(None) };
@@ -2255,19 +2250,48 @@ fn object_of_once(repo: &Repo, state: &str, path: &str) -> Result<Option<String>
 /// The tree entry at `path` of `commit` (the root tree for ""), read through `cat`: only the trees
 /// on the path, one per component; each costs O(its entries). `None` when no entry is there.
 fn path_entry(cat: &mut CatFile, commit: &str, path: &str) -> Result<Option<TreeEntry>> {
-    let raw = cat.object(commit, "commit")?;
-    let mut found = TreeEntry { mode: "40000".into(), oid: tree_id(&raw)?.to_string() };
-    let path = path.trim_matches('/');
-    for component in path.split('/').filter(|_| !path.is_empty()) {
-        if !found.is_tree() {
+    let mut found = Some(root_entry(cat, commit)?);
+    for component in components(path) {
+        found = child_entry(cat, found, component)?;
+    }
+    Ok(found)
+}
+
+/// The entries at `path` of the trees of two commits (`old` None: an empty tree) when they differ, read down both
+/// together: None as soon as they hold the same folder above it.
+fn entry_pair(
+    cat: &mut CatFile,
+    old: Option<&str>,
+    new: &str,
+    path: &str,
+) -> Result<Option<(Option<TreeEntry>, Option<TreeEntry>)>> {
+    let mut pair = (old.map(|o| root_entry(cat, o)).transpose()?, Some(root_entry(cat, new)?));
+    for component in components(path) {
+        if pair.0 == pair.1 {
             return Ok(None);
         }
-        match tree_find(&cat.object(&found.oid, "tree")?, component.as_bytes())? {
-            Some(next) => found = next,
-            None => return Ok(None),
-        }
+        pair = (child_entry(cat, pair.0, component)?, child_entry(cat, pair.1, component)?);
     }
-    Ok(Some(found))
+    Ok((pair.0 != pair.1).then_some(pair))
+}
+
+/// The root folder of a commit, as a tree entry.
+fn root_entry(cat: &mut CatFile, commit: &str) -> Result<TreeEntry> {
+    Ok(TreeEntry { mode: "40000".into(), oid: tree_id(&cat.object(commit, "commit")?)?.to_string() })
+}
+
+/// The names of a path below the root ("" and "/" are the root).
+fn components(path: &str) -> impl Iterator<Item = &str> {
+    let path = path.trim_matches('/');
+    path.split('/').filter(move |_| !path.is_empty())
+}
+
+/// The entry `name` of the folder `entry`; None when it is no folder or has no such entry.
+fn child_entry(cat: &mut CatFile, entry: Option<TreeEntry>, name: &str) -> Result<Option<TreeEntry>> {
+    match entry {
+        Some(folder) if folder.is_tree() => tree_find(&cat.object(&folder.oid, "tree")?, name.as_bytes()),
+        _ => Ok(None),
+    }
 }
 
 /// The entry `name` of the raw Git tree `tree`, scanning up to it.
@@ -4216,21 +4240,38 @@ fn tree_deltas(cat: &mut CatFile, old: Option<&str>, new: Option<&str>, prefix: 
     let names: BTreeSet<&String> = before.keys().chain(now.keys()).collect();
     for name in names {
         let (o, e) = (before.get(name), now.get(name));
-        if o == e {
-            continue;
-        }
-        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-        let o_tree = o.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
-        let e_tree = e.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
-        if o_tree.is_some() || e_tree.is_some() {
-            tree_deltas(cat, o_tree, e_tree, &path, out)?;
-        }
-        let (old_side, new_side) = (file_side(o), file_side(e));
-        if old_side != new_side {
-            out.push(Delta { path, old: old_side, new: new_side });
+        if o != e {
+            entry_deltas(cat, o, e, if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") }, out)?;
         }
     }
     Ok(())
+}
+
+/// The files that differ between two different entries at `path` (None: no entry): below them when either is a
+/// folder, and the entry itself when either is a file.
+fn entry_deltas(
+    cat: &mut CatFile,
+    o: Option<&TreeEntry>,
+    e: Option<&TreeEntry>,
+    path: String,
+    out: &mut Vec<Delta>,
+) -> Result<()> {
+    let o_tree = o.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
+    let e_tree = e.filter(|x| x.is_tree()).map(|x| x.oid.as_str());
+    if o_tree.is_some() || e_tree.is_some() {
+        tree_deltas(cat, o_tree, e_tree, &path, out)?;
+    }
+    let (old_side, new_side) = (file_side(o), file_side(e));
+    if old_side != new_side {
+        out.push(Delta { path, old: old_side, new: new_side });
+    }
+    Ok(())
+}
+
+/// The path of `roots` that holds all the others, if one does.
+fn only_root(roots: &BTreeSet<String>) -> Option<&String> {
+    let mut outermost = roots.iter().filter(|path| !path.match_indices('/').any(|(at, _)| roots.contains(&path[..at])));
+    outermost.next().filter(|_| outermost.next().is_none())
 }
 
 /// The bytes of the changed files of one side, held in memory, by path.
@@ -4267,16 +4308,27 @@ fn git_meta(mode: &str, size: usize) -> crate::fsutil::Meta {
     }
 }
 
-/// Discover changed paths and typed tree entries without requesting any blobs.
-pub(crate) fn deltas_of(repo: &Repo, old: Option<&str>, new: &str) -> Result<Vec<Delta>> {
+/// Discover changed paths and typed tree entries without requesting any blobs. With `roots` (literal paths), the
+/// caller keeps the paths that `pathspec::matches` selects for them; one root (inside the others) is read alone,
+/// down to it. Several are read in one walk of the trees, which reads each folder once.
+pub(crate) fn deltas_of(repo: &Repo, old: Option<&str>, new: &str, roots: Option<&BTreeSet<String>>) -> Result<Vec<Delta>> {
     with_objects(repo, |cat| {
-        let new_tree = tree_id(&cat.object(new, "commit")?)?.to_string();
-        let old_tree = match old {
-            Some(o) => Some(tree_id(&cat.object(o, "commit")?)?.to_string()),
-            None => None,
-        };
         let mut deltas = Vec::new();
-        tree_deltas(cat, old_tree.as_deref(), Some(&new_tree), "", &mut deltas)?;
+        match roots.and_then(only_root) {
+            Some(path) => {
+                if let Some((before, now)) = entry_pair(cat, old, new, path)? {
+                    entry_deltas(cat, before.as_ref(), now.as_ref(), path.clone(), &mut deltas)?;
+                }
+            }
+            None => {
+                let new_tree = tree_id(&cat.object(new, "commit")?)?.to_string();
+                let old_tree = match old {
+                    Some(o) => Some(tree_id(&cat.object(o, "commit")?)?.to_string()),
+                    None => None,
+                };
+                tree_deltas(cat, old_tree.as_deref(), Some(&new_tree), "", &mut deltas)?;
+            }
+        }
         deltas.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(deltas)
     })

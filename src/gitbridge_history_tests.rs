@@ -168,7 +168,7 @@ impl Fixture {
 
     fn baseline(&self, specs: &[&str]) -> Result<Vec<u8>> {
         let repo = self.repo()?;
-        let deltas = deltas_of(&repo, Some(&self.parent), &self.commit)?;
+        let deltas = deltas_of(&repo, Some(&self.parent), &self.commit, None)?;
         let sides = sides_of(&repo, &deltas)?;
         let specs = specs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let changes = sides.changes.into_iter().filter(|c| crate::pathspec::matches(&specs, c.path())).collect::<Vec<_>>();
@@ -189,33 +189,10 @@ impl Fixture {
     fn object_history(&mut self) -> Result<()> {
         let repo = self.repo()?;
         let store = crate::objstore::open(&repo.p)?;
-        let source = self.root.join("source");
         let mut parent = None;
-        for (oid, id) in [(&self.parent, &self.base_state), (&self.commit, &self.state)] {
+        for oid in [&self.parent, &self.commit] {
             source_git(&self.root, &["checkout", "-q", oid])?;
-            let report = layr_objects::write_tree(
-                &store,
-                &source,
-                &layr_objects::WriteOptions {
-                    temperature: layr_objects::Temperature::Hot,
-                    previous: None,
-                    exclude: vec![b".git".to_vec()],
-                    similar: false,
-                },
-            )?;
-            let mut state = repo.state(id)?;
-            state.id = ids::new_id();
-            state.kind = StateKind::Commit;
-            state.parents = parent.into_iter().collect();
-            state.tree = Some(report.tree.unwrap().hex());
-            state.times = Some(report.times.unwrap().hex());
-            parent = Some(state.id.clone());
-            let mut record = crate::model::DraftRecord::new("save");
-            record.states.push(state.clone());
-            repo.p.lock_maintenance().unwrap().append(record, &self.ctx.actor())?;
-            // Mark content as locally readable without requiring native snapshots. state_src
-            // still selects the verified objects, as it does for a migrated state.
-            std::fs::create_dir_all(repo.p.state_path(&state.id))?;
+            parent = Some(self.save_objects(&repo, &store, parent)?);
         }
         let state = parent.unwrap();
         let base = repo.state(&state)?.parents[0].clone();
@@ -223,6 +200,67 @@ impl Fixture {
         self.state = state;
         self.base_state = base;
         Ok(())
+    }
+
+    /// Saves `count` more states over the fixture's state from the objects alone: each adds a line to `seed`.
+    fn extend_objects(&mut self, count: usize) -> Result<()> {
+        let repo = self.repo()?;
+        let store = crate::objstore::open(&repo.p)?;
+        let mut state = self.state.clone();
+        for n in 0..count {
+            writeln!(std::fs::OpenOptions::new().append(true).open(self.root.join("source/seed"))?, "saved {n}")?;
+            state = self.save_objects(&repo, &store, Some(state))?;
+        }
+        drop(repo);
+        self.state = state;
+        Ok(())
+    }
+
+    /// A new commit state over `parent` with the content of the source folder, as `layr migrate` leaves it: its tree
+    /// and times table in the object store.
+    fn save_objects(&self, repo: &Repo, store: &layr_objects::Store, parent: Option<String>) -> Result<String> {
+        let report = layr_objects::write_tree(
+            store,
+            &self.root.join("source"),
+            &layr_objects::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: vec![b".git".to_vec()],
+                similar: false,
+            },
+        )?;
+        let mut state = repo.state(&self.state)?;
+        state.id = ids::new_id();
+        state.kind = StateKind::Commit;
+        state.parents = parent.into_iter().collect();
+        state.tree = Some(report.tree.unwrap().hex());
+        state.times = Some(report.times.unwrap().hex());
+        let mut record = crate::model::DraftRecord::new("save");
+        record.states.push(state.clone());
+        repo.p.lock_maintenance().unwrap().append(record, &self.ctx.actor())?;
+        // Mark content as locally readable without requiring native snapshots. state_src
+        // still selects the verified objects, as it does for a migrated state.
+        std::fs::create_dir_all(repo.p.state_path(&state.id))?;
+        Ok(state.id)
+    }
+
+    /// The output of `command <args> <state> -- <paths>` and the object store opens of the command.
+    fn object_reads(
+        &self,
+        command: fn(&Ctx, &[String]) -> Result<i32>,
+        args: &[&str],
+        paths: &[&str],
+    ) -> Result<(String, usize)> {
+        self.output.0.borrow_mut().clear();
+        let mut args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        args.extend([self.state.clone(), "--".into()]);
+        args.extend(paths.iter().map(|p| p.to_string()));
+        let before = crate::objstore::OPENS.with(std::cell::Cell::get);
+        let result = command(&self.ctx, &args);
+        let opens = crate::objstore::OPENS.with(std::cell::Cell::get) - before;
+        crate::free::finish(&self.ctx);
+        result?;
+        Ok((String::from_utf8(self.output.0.borrow().clone())?, opens))
     }
 }
 
@@ -284,17 +322,17 @@ fn filtered_history_counts_blob_requests_and_bytes() -> Result<()> {
     let fixture = Fixture::new()?;
     forget_objects();
     let repo = fixture.repo()?;
-    let deltas = deltas_of(&repo, Some(&fixture.parent), &fixture.commit)?;
+    let deltas = deltas_of(&repo, Some(&fixture.parent), &fixture.commit, None)?;
     assert!(!deltas.is_empty());
     assert_eq!(metrics(), (0, 0), "tree delta discovery must not request blobs");
     fixture.command(false, &[], true)?;
     let all = metrics();
-    for log_command in [false, true] {
-        fixture.command(log_command, &["selected/001"], false)?;
-        assert_eq!(metrics(), (1, FILE_BYTES));
-    }
+    fixture.command(false, &["selected/001"], false)?;
+    assert_eq!(metrics(), (1, FILE_BYTES), "show reads the selected file");
+    fixture.command(true, &["selected/001"], false)?;
+    assert_eq!(metrics(), (0, 0), "log selects from Git trees alone");
     fixture.command(true, &["selected/001"], true)?;
-    assert_eq!(metrics(), (2, 2 * FILE_BYTES), "log -p validates during discovery and loads again for rendering");
+    assert_eq!(metrics(), (1, FILE_BYTES), "log -p loads the selected file for rendering only");
     fixture.command(false, &["absent"], true)?;
     assert_eq!(metrics(), (0, 0));
     fixture.command(false, &["seed"], true)?;
@@ -328,7 +366,8 @@ fn filtered_history_ignores_only_unselected_damaged_blobs() -> Result<()> {
         for log_command in [false, true] {
             fixture.command(log_command, &["selected/001"], true)?;
             assert!(fixture.command(log_command, &[&damaged_path], true).is_err());
-            assert!(fixture.command(log_command, &[&damaged_path], false).is_err());
+            // As `git log -- <path>`, a log without patches selects states from the trees and reads no file.
+            assert_eq!(fixture.command(log_command, &[&damaged_path], false).is_ok(), log_command);
             assert!(fixture.command(log_command, &[], true).is_err());
         }
         std::fs::write(&damaged, &original)?;
@@ -400,6 +439,10 @@ fn blame_of_imported_history_starts_a_fixed_number_of_git_commands() -> Result<(
     assert!(link.trim_end().ends_with(") 001"), "{link}");
     assert!(fixture.blame(&[], "selected").is_err());
     assert!(fixture.blame(&[], "absent").is_err());
+    // Git's porcelain, file name and whitespace or move options are not implemented: no silent default output.
+    for unknown in ["--porcelain", "-l", "-w", "-M", "-C"] {
+        assert!(fixture.blame(&[unknown], "seed").is_err(), "blame {unknown}");
+    }
     Ok(())
 }
 
@@ -542,5 +585,97 @@ fn object_of_names_the_object_git_names_and_reads_it() -> Result<()> {
     // The object of the path is read too: a missing blob is an error, not an ID.
     std::fs::remove_file(fixture.object("selected/002")?)?;
     assert!(object_of(&repo, &fixture.state, "selected/002").is_err());
+    Ok(())
+}
+
+#[test]
+fn object_history_opens_the_object_store_once_whatever_its_length() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.object_history()?;
+    let blame = |fixture: &Fixture| fixture.object_reads(crate::cmd::history::blame, &["-s"], &["seed"]);
+    let path_log = |fixture: &Fixture| fixture.object_reads(log, &["--format=%s"], &["seed"]);
+    let (short_blame, short_blame_opens) = blame(&fixture)?;
+    let (short_log, short_log_opens) = path_log(&fixture)?;
+    assert_eq!(short_log.lines().count(), 2, "{short_log}");
+    const EXTRA: usize = 12;
+    fixture.extend_objects(EXTRA)?;
+    let (long_blame, long_blame_opens) = blame(&fixture)?;
+    let (long_log, long_log_opens) = path_log(&fixture)?;
+    assert_eq!(long_blame.lines().count(), short_blame.lines().count() + EXTRA, "{long_blame}");
+    assert_eq!(long_log.lines().count(), 2 + EXTRA, "{long_log}");
+    eprintln!("store opens: blame {short_blame_opens} -> {long_blame_opens}, log {short_log_opens} -> {long_log_opens}");
+    assert_eq!((short_blame_opens, long_blame_opens), (1, 1), "blame: one store open for the whole walk");
+    assert_eq!((short_log_opens, long_log_opens), (1, 1), "log: one store open for the whole walk");
+    // The handle lives only while a scope shares it: then pruning can take the store.
+    let repo = fixture.repo()?;
+    let prunable = || layr_objects::Store::try_open_for_prune(&crate::objstore::dir(&repo.p), layr_objects::Keying::Plain);
+    assert!(prunable()?.is_some(), "no command keeps the shared handle");
+    let unscoped = crate::objstore::shared(&repo.p)?;
+    assert!(!std::sync::Arc::ptr_eq(&unscoped, &crate::objstore::shared(&repo.p)?), "no sharing outside a scope");
+    drop(unscoped);
+    {
+        let _outer = crate::objstore::share(&repo.p);
+        let first = crate::objstore::shared(&repo.p)?;
+        {
+            let _inner = crate::objstore::share(&repo.p);
+            assert!(std::sync::Arc::ptr_eq(&first, &crate::objstore::shared(&repo.p)?));
+        }
+        drop(first);
+        assert!(prunable()?.is_none(), "the outer scope still holds the handle");
+    }
+    assert!(prunable()?.is_some(), "the last scope lets the handle go");
+    Ok(())
+}
+
+#[test]
+fn imported_path_log_reads_the_trees_on_the_selected_path_and_no_file() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    const EXTRA: usize = 10;
+    fixture.extend(EXTRA)?;
+    let path_log = |paths: &[&str]| -> Result<(usize, usize, usize)> {
+        forget_objects();
+        let (text, _) = fixture.object_reads(log, &["--format=%s"], paths)?;
+        let trees = OBJECTS.with(|slot| slot.borrow().as_ref().map(|(_, cat)| cat.tree_requests)).context("no object reader")?;
+        Ok((text.lines().count(), metrics().0, trees))
+    };
+    // seed changes in both fixture commits and in every even extension; 2 + EXTRA states in all.
+    let states = 2 + EXTRA;
+    let (selected, blobs, trees) = path_log(&["seed"])?;
+    assert_eq!((selected, blobs), (2 + EXTRA / 2, 0));
+    assert!(trees <= 2 * (states - 1) + 1, "{trees} trees: at most the two root trees of each pair");
+    // Several roots: one walk of the trees, which reads each changed folder once (no root per path).
+    let (_, blobs, siblings) = path_log(&["seed", "moved-out"])?;
+    let (_, _, whole) = path_log(&["se[e]d"])?;
+    assert_eq!(blobs, 0);
+    assert!(siblings <= whole, "{siblings} trees, {whole} for a walk of the whole trees");
+    let (selected, blobs, trees) = path_log(&[&format!("other/{:03}", FILE_COUNT - 1)])?;
+    assert_eq!((selected, blobs), (1 + EXTRA / 2, 0));
+    // The roots of each pair, and other on both sides where it changed.
+    assert!(trees <= 2 * (states - 1) + 1 + 2 * selected, "{trees} trees");
+    assert_eq!(path_log(&["absent"])?.0, 0);
+    Ok(())
+}
+
+#[test]
+fn only_root_holds_every_other_root() {
+    let roots = |paths: &[&str]| paths.iter().map(|s| s.to_string()).collect::<BTreeSet<String>>();
+    assert_eq!(only_root(&roots(&["a", "a/b", "a/b/c"])).map(String::as_str), Some("a"));
+    assert_eq!(only_root(&roots(&["a/b"])).map(String::as_str), Some("a/b"));
+    for siblings in [&["a", "a-b"][..], &["a", "ab"], &["a-b", "a/b"], &["a/b", "a/c"]] {
+        assert_eq!(only_root(&roots(siblings)), None, "{siblings:?}");
+    }
+}
+
+#[test]
+fn a_shared_object_store_finds_roots_packed_after_it_opened() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.object_history()?;
+    let repo = fixture.repo()?;
+    let _objects = crate::objstore::share(&repo.p);
+    assert!(crate::objstore::verified(&repo.p, &fixture.base_state)?.is_some());
+    // Another handle (a fetch, maintenance) packs the loose objects: the shared handle has not listed that pack.
+    let report = crate::objstore::open(&repo.p)?.pack()?;
+    assert_eq!(report.packs, 1);
+    assert!(crate::objstore::verified(&repo.p, &fixture.state)?.is_some(), "a miss lists the packs again");
     Ok(())
 }

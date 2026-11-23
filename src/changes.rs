@@ -123,6 +123,41 @@ pub fn file_changes_selected(
     file_changes_of(parent, child, selected_candidates(parent, child, selection)?)
 }
 
+/// `file_changes_selected` when confirming its candidates reads at most `budget` bytes of the contents of files on
+/// disk; None, before any content is read, when it could read more (the lookup of the selected paths reads their
+/// metadata). Only comparisons of two files on disk are charged, at their worst case: both read whole. A file
+/// compared with one in the object store is hashed whole (not charged): the whole comparison does the same, as it has
+/// no filesystem hints for an object side. A whole comparison with change hints from the filesystem (a btrfs send)
+/// skips an unchanged file on disk without reading it.
+pub fn file_changes_selected_within(
+    parent: &(impl Src + ?Sized),
+    child: &(impl Src + ?Sized),
+    selection: &Selection,
+    budget: u64,
+) -> Result<Option<Vec<EntryChange>>> {
+    let candidates = selected_candidates(parent, child, selection)?;
+    let native = parent.objects().is_none() && child.objects().is_none();
+    let reads = candidates.iter().filter(|c| native && reads_both(c)).fold(0u64, |sum, c| {
+        let size = c.old().map_or(0, |m| m.size);
+        sum.saturating_add(size.saturating_mul(2))
+    });
+    if reads > budget {
+        return Ok(None);
+    }
+    file_changes_of(parent, child, candidates).map(Some)
+}
+
+/// True when confirming `c` reads both files whole (`really_changed`): two regular files of one size and one
+/// executable bit, with no evidence of their contents.
+fn reads_both(c: &EntryChange) -> bool {
+    let (Some(o), Some(n)) = (c.old(), c.new()) else { return false };
+    o.is_file()
+        && n.is_file()
+        && o.size == n.size
+        && o.executable() == n.executable()
+        && matches!(c.data(), DataEvidence::Unknown)
+}
+
 /// The candidates of a `Selection`: one walk covers every selected subtree, an entry that is a
 /// folder on one side only included; the other entries are read alone. Each entry is visited
 /// once: O(s log s) for the s entries covered, whatever the size of the trees.

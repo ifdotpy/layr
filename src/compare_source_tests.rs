@@ -499,3 +499,42 @@ fn a_selection_visits_each_entry_once_and_ends_at_symlinks() -> Result<()> {
     assert!(counts.metadata.values().all(|count| *count <= 2), "{counts:?}");
     Ok(())
 }
+
+#[test]
+fn a_selected_comparison_over_its_read_budget_reads_no_content() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    const SIZE: usize = 400 << 10;
+    let fixture = Fixture::new()?;
+    let (parent, child) = (fixture.root.join("parent"), fixture.root.join("child"));
+    for (root, extra) in [(&parent, b"old"), (&child, b"new")] {
+        std::fs::create_dir_all(root)?;
+        for name in ["a", "b", "mode"] {
+            std::fs::write(root.join(name), vec![7u8; SIZE])?;
+        }
+        std::fs::write(root.join("small"), extra)?;
+        std::fs::write(root.join("grown"), [vec![7u8; SIZE], extra.to_vec()].concat())?;
+        std::os::unix::fs::symlink(std::str::from_utf8(extra)?, root.join("link"))?;
+    }
+    std::fs::write(child.join("grown"), vec![7u8; SIZE + 4])?;
+    std::fs::set_permissions(child.join("mode"), std::fs::Permissions::from_mode(0o755))?;
+    let source = FakeSource::new(&child);
+    let select =
+        |paths: &[&str]| Selection { subtrees: paths.iter().map(|p| p.to_string()).collect(), entries: Default::default() };
+    let opens = || source.counts.lock().map(|counts| counts.opens).map_err(|_| anyhow::anyhow!("counts poisoned"));
+    let within = |paths: &[&str], budget: u64| file_changes_selected_within(&parent, &source, &select(paths), budget);
+    let both = 2 * SIZE as u64;
+    // Equal files of one size and mode are read on both sides; the reads of all selected files add up.
+    assert!(within(&["a"], both - 1)?.is_none());
+    assert!(within(&["a", "b"], 2 * both - 1)?.is_none(), "each fits, both do not");
+    assert_eq!(opens()?, 0, "no content is read over the budget");
+    assert_eq!(within(&["a"], both)?.map(|c| c.len()), Some(0), "the budget is inclusive");
+    assert!(opens()? > 0, "within the budget the bytes decide");
+    // Another size, executable bit or type decides without reading the files: nothing to charge.
+    let decided = within(&["grown", "mode", "link", "small"], 6)?.unwrap_or_default();
+    assert_eq!(decided.iter().map(|c| c.path().as_str()).collect::<Vec<_>>(), ["grown", "link", "mode", "small"]);
+    // A comparison with an object side is not charged: it hashes the file on disk, as the whole comparison does.
+    std::fs::write(fixture.native.join("large"), vec![7u8; SIZE])?;
+    let objects = object_source(fixture.snapshot()?);
+    assert_eq!(file_changes_selected_within(&objects, &fixture.native, &select(&["large"]), 0)?.map(|c| c.len()), Some(0));
+    Ok(())
+}

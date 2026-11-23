@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub struct ObjectTree {
-    pub store: Store,
+    pub store: Arc<Store>,
     pub refs: StateRef,
     cache: PathBuf,
     materialized: Mutex<BTreeMap<String, PathBuf>>,
@@ -182,7 +182,8 @@ impl ObjectTree {
         Ok(())
     }
 
-    pub fn new(store: Store, refs: StateRef, parent: &Path) -> Result<Arc<Self>> {
+    pub fn new(store: impl Into<Arc<Store>>, refs: StateRef, parent: &Path) -> Result<Arc<Self>> {
+        let store = store.into();
         std::fs::create_dir_all(parent)?;
         let cache = parent.join(crate::store::temp_name());
         let mut links = BTreeMap::new();

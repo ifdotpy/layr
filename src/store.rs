@@ -320,10 +320,14 @@ pub(crate) struct Lock {
     _lines: Vec<std::rc::Rc<LineLock>>,
 }
 
-/// A handle never keeps its own flock alive. Nested helpers can retain an existing lease,
-/// and the final token releases the flock. The weak reference is local to this exact handle.
+/// The leases of one project handle. A handle never keeps its own flock alive. Nested helpers can retain an existing
+/// lease, and the final token releases the flock. The weak reference is local to this exact handle. The object store
+/// handle that its reads share (`objstore::share`) holds a shared prune lease until that scope ends.
 #[derive(Default)]
-pub(crate) struct ProjectLease(std::cell::RefCell<std::rc::Weak<Lock>>);
+pub(crate) struct ProjectLease {
+    lock: std::cell::RefCell<std::rc::Weak<Lock>>,
+    pub(crate) objects: crate::objstore::Shared,
+}
 
 /// Exclusive access to this project. Publication is available only through this token.
 #[must_use]
@@ -1371,7 +1375,7 @@ impl<'a> Project<'a> {
 
     /// Borrow the live lease of this handle, or acquire one for a standalone helper.
     pub fn lock_or_borrow(&self) -> Result<LockedProject<'_>> {
-        if let Some(lock) = self.lease.0.borrow().upgrade() {
+        if let Some(lock) = self.lease.lock.borrow().upgrade() {
             return Ok(LockedProject { project: self, _lock: lock });
         }
         self.lock_maintenance()
@@ -1390,13 +1394,13 @@ impl<'a> Project<'a> {
 
     pub(crate) fn borrow_reserved(&self, lock: &std::rc::Rc<Lock>) -> LockedProject<'_> {
         assert!(lock.protects(self));
-        *self.lease.0.borrow_mut() = std::rc::Rc::downgrade(lock);
+        *self.lease.lock.borrow_mut() = std::rc::Rc::downgrade(lock);
         LockedProject { project: self, _lock: lock.clone() }
     }
 
     pub(crate) fn locked_token(&self, lock: Lock) -> LockedProject<'_> {
         let lock = std::rc::Rc::new(lock);
-        *self.lease.0.borrow_mut() = std::rc::Rc::downgrade(&lock);
+        *self.lease.lock.borrow_mut() = std::rc::Rc::downgrade(&lock);
         LockedProject { project: self, _lock: lock }
     }
 
@@ -1464,7 +1468,7 @@ impl<'a> Project<'a> {
                 let lease = std::rc::Rc::new(lease);
                 let (project, committed) = stale.rebuild(&lease, |db, tx, action| {
                     let p = make(db);
-                    *p.lease.0.borrow_mut() = std::rc::Rc::downgrade(&lease);
+                    *p.lease.lock.borrow_mut() = std::rc::Rc::downgrade(&lease);
                     if action == RebuildAction::Replay {
                         let terms = match &parent {
                             Some(parent) => parent.trust_terms(&[])?,
