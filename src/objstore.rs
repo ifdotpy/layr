@@ -7,6 +7,7 @@ use crate::store::Project;
 use anyhow::{Context, Result};
 use layr_objects::{Id, Keying, Node, StateRef, Store};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 mod maintenance;
 pub(crate) use maintenance::maintenance_lock;
@@ -42,18 +43,67 @@ pub fn open_existing(p: &Project) -> Result<Store> {
     Store::open_existing(&dir(p), Keying::Plain)
 }
 
+/// The object store handle that the reads of a project handle share within `share` (`ProjectLease::objects`).
+#[derive(Default)]
+pub struct Shared {
+    scopes: std::cell::Cell<usize>,
+    store: std::cell::RefCell<Option<Arc<Store>>>,
+}
+
+/// The object store of `p`: within `share`, one handle that the first call opens and the later ones and the trees
+/// that they read share; else a new one. An open lists and opens every pack and reads the dictionary.
+pub fn shared(p: &Project) -> Result<Arc<Store>> {
+    let objects = &p.lease.objects;
+    if let Some(store) = objects.store.borrow().as_ref() {
+        return Ok(store.clone());
+    }
+    let store = Arc::new(open(p)?);
+    if objects.scopes.get() > 0 {
+        *objects.store.borrow_mut() = Some(store.clone());
+    }
+    Ok(store)
+}
+
+/// Reads of `p` share one object store handle (`shared`) until the guard goes: a history reads hundreds of states.
+/// The handle holds a shared prune lease, so a command that lives on (a worker, a watcher) or prunes the store
+/// itself reads without one.
+pub fn share<'p>(p: &'p Project<'_>) -> SharedReads<'p> {
+    let objects = &p.lease.objects;
+    objects.scopes.set(objects.scopes.get() + 1);
+    SharedReads(objects)
+}
+
+/// The guard of `share`: the last one lets the handle go.
+pub struct SharedReads<'p>(&'p Shared);
+
+impl Drop for SharedReads<'_> {
+    fn drop(&mut self) {
+        let objects = self.0;
+        objects.scopes.set(objects.scopes.get() - 1);
+        if objects.scopes.get() == 0 {
+            objects.store.borrow_mut().take();
+        }
+    }
+}
+
 /// The tree and times table that the record of `state` names, when the local object store holds
 /// both. None for a state that `layr migrate` did not record, or whose objects are elsewhere (a
 /// record from another machine).
-pub fn verified(p: &Project, state: &str) -> Result<Option<(Store, StateRef)>> {
+pub fn verified(p: &Project, state: &str) -> Result<Option<(Arc<Store>, StateRef)>> {
     if !exists(p) {
         return Ok(None);
     }
     let Some(r) = recorded_refs(p, state)? else {
         return Ok(None);
     };
-    let store = open(p)?;
-    Ok(holds(&store, &r).then_some((store, r)))
+    let store = shared(p)?;
+    // A shared handle listed the packs when it opened: a miss lists them again, as a new open did,
+    // for a pack that a repack or a fetch published since.
+    let held = holds(&store, &r) || {
+        store.refresh_packs()?;
+        holds(&store, &r)
+    };
+    Ok(held.then_some((store, r)))
 }
 
 /// The tree and times table that the record of `state` names, when `objects` holds both.

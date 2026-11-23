@@ -113,7 +113,7 @@ impl Repo<'_> {
 
     /// The object store and tree of `start` when the state has no snapshot here and `layr migrate`
     /// recorded its tree (docs/objects.md, section 13).
-    fn objects_start(&self, start: &str) -> Result<Option<(layr_objects::Store, layr_objects::StateRef)>> {
+    fn objects_start(&self, start: &str) -> Result<Option<(std::sync::Arc<layr_objects::Store>, layr_objects::StateRef)>> {
         if self.p.has_state(start) {
             return Ok(None);
         }

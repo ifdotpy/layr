@@ -261,6 +261,7 @@ fn revs_to_pin(repo: &Repo, line: Option<&Line>, names: &[String]) -> Vec<String
 pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&diff_spec().flag("-z").flag("--exclude-standard"), args)?;
     let h = here(ctx)?;
+    let _objects = crate::objstore::share(&h.repo.p);
     let repo = &h.repo;
     let line = h.line.clone();
     let (revs_v, paths) = split_revs(repo, line.as_ref(), &path_base(ctx, &h), &a)?;
@@ -411,6 +412,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
     // Automatic states keep ignored files; `--exclude-standard` leaves out a file that the ignore
     // rules of its own side ignore (the new side, or the old one for a deletion).
     let exclude_standard = a.has("--exclude-standard");
+    let roots = literal_roots(&specs);
     let compute = |old: &Snap, new: &Snap| -> Result<Vec<FileDiff>> {
         let (old, new) = if reverse { (new, old) } else { (old, new) };
         let rules = exclude_standard.then(|| (crate::ignore_rules::Rules::of(old), crate::ignore_rules::Rules::of(new)));
@@ -427,7 +429,7 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
             },
             None => false,
         };
-        let mut list: Vec<EntryChange> = changes::file_changes(old, new)?
+        let mut list: Vec<EntryChange> = selected_file_changes(old, new, roots.as_ref())?
             .into_iter()
             .filter(|c| {
                 !skip_path(c.path())
@@ -473,6 +475,27 @@ pub fn diff(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Ok(1);
     }
     Ok(0)
+}
+
+/// The bytes that a comparison of selected files may read before the whole comparison, whose filesystem change hints
+/// skip unchanged files unread, is used instead (`changes::file_changes_selected_within`). Above it a literal diff
+/// is the whole comparison, as before: without hints it reads, and can fail on, files outside the selection.
+const SELECTED_READ_BUDGET: u64 = 1 << 20;
+
+/// `changes::file_changes` for the paths that `roots` (literal paths, `literal_roots`) select, from a comparison of
+/// those paths alone when it finds only modifications. An added or removed file can be the end of a move from or to
+/// a path outside them, a named path can fail where the whole trees do not (a name too long), and large files are
+/// read whole where filesystem hints would skip them: then the whole trees are compared, for the same output.
+fn selected_file_changes(old: &Snap, new: &Snap, roots: Option<&BTreeSet<String>>) -> Result<Vec<EntryChange>> {
+    if let Some(roots) = roots {
+        let selection = changes::Selection { subtrees: roots.clone(), entries: BTreeSet::new() };
+        if let Ok(Some(selected)) = changes::file_changes_selected_within(old, new, &selection, SELECTED_READ_BUDGET) {
+            if selected.iter().all(|c| c.old().is_some() && c.new().is_some() && c.old_path().is_none()) {
+                return Ok(selected);
+            }
+        }
+    }
+    changes::file_changes(old, new)
 }
 
 // ----- formatting of states -----
@@ -730,10 +753,16 @@ impl diff::Contents for Entries {
     }
 }
 
-/// The sides of a state against its first parent, when the state is an imported state and its parent
-/// (if any) is an imported state: select typed tree deltas before loading blobs. The trees on disk
-/// are not needed, so a present state builds nothing either.
-fn git_sides(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<Option<crate::gitbridge::Sides>> {
+/// The literal paths of `specs`, looked up directly. None for no spec, the root or a wildcard: full matching.
+fn literal_roots(specs: &[String]) -> Option<BTreeSet<String>> {
+    (!specs.is_empty() && !specs.iter().any(|s| s.is_empty() || s.contains(['*', '?', '['])))
+        .then(|| specs.iter().cloned().collect())
+}
+
+/// The typed tree deltas of a state against its first parent that `specs` select, when the state is an imported
+/// state and its parent (if any) is an imported state. They read Git trees only (below literal paths, only theirs)
+/// and no blobs: the trees on disk are not needed, so a present state builds nothing either.
+fn git_deltas(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<Option<Vec<crate::gitbridge::Delta>>> {
     let Some(new) = crate::gitbridge::imported_commit(repo, &s.id)? else { return Ok(None) };
     let old = match s.parents.first() {
         None => None,
@@ -742,13 +771,20 @@ fn git_sides(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<Option<crate
             None => return Ok(None),
         },
     };
+    // Git tree names that are not UTF-8 match their lossy form (U+FFFD) only through full matching.
+    let roots = literal_roots(specs).filter(|roots| !roots.iter().any(|r| r.contains(char::REPLACEMENT_CHARACTER)));
     // Without the Git objects, the trees are read below (a store remote may hold them).
-    Ok(crate::gitbridge::deltas_of(repo, old.as_deref(), &new)
-        .and_then(|mut deltas| {
+    Ok(crate::gitbridge::deltas_of(repo, old.as_deref(), &new, roots.as_ref())
+        .map(|mut deltas| {
             deltas.retain(|d| matches(specs, &d.path));
-            crate::gitbridge::sides_of(repo, &deltas)
+            deltas
         })
         .ok())
+}
+
+/// The sides of the selected changes of an imported state (`git_deltas`), with the bytes of their files.
+fn git_sides(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<Option<crate::gitbridge::Sides>> {
+    Ok(git_deltas(repo, s, specs)?.and_then(|deltas| crate::gitbridge::sides_of(repo, &deltas).ok()))
 }
 
 /// The changes of a state against its first parent, and the two sides.
@@ -778,8 +814,9 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
 /// endpoints. Pairing separate adds/deletes as renames cannot change that membership.
 fn state_touches(repo: &Repo, s: &StateRec, specs: &[String], selected: Option<&BTreeSet<String>>) -> Result<bool> {
     repo.source_state(&s.id)?;
-    if let Some(sides) = git_sides(repo, s, specs)? {
-        return Ok(sides.changes.iter().any(|c| !skip_path(c.path())));
+    // Each delta is a change (`gitbridge::sides_of`): membership reads no file.
+    if let Some(deltas) = git_deltas(repo, s, specs)? {
+        return Ok(deltas.iter().any(|d| !skip_path(&d.path)));
     }
     // A record may outlive its tree. Keep walking ancestors, but do not restore remote trees
     // or invent changes against an empty parent when either side is unavailable locally.
@@ -916,6 +953,7 @@ fn show_spec() -> Spec {
 pub fn show(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let a = parse(&show_spec(), args)?;
     let h = here(ctx)?;
+    let _objects = crate::objstore::share(&h.repo.p);
     let repo = &h.repo;
     let line = h.line.clone();
     let mut revs_v: Vec<String> = a.pos.clone();
@@ -1094,6 +1132,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     }
     let a = parse(&log_spec(), args)?;
     let h = here(ctx)?;
+    let _objects = crate::objstore::share(&h.repo.p);
     let repo = &h.repo;
     let line = h.line.clone();
     // `layr --line a log b`: two lines for one log. An overlay read sets its own line.
@@ -1111,8 +1150,7 @@ pub fn log(ctx: &Ctx, args: &[String]) -> Result<i32> {
     repo.hold(pin_revs(repo, line.as_ref(), &revs_v)?);
     let specs = h.specs(&paths)?;
     // Literal roots can be looked up directly. Wildcards and the root keep full matching.
-    let selected = (!specs.iter().any(|s| s.is_empty() || s.contains(['*', '?', '['])))
-        .then(|| specs.iter().cloned().collect::<BTreeSet<_>>());
+    let selected = literal_roots(&specs);
     let mut include: Vec<String> = Vec::new();
     let mut exclude: BTreeSet<String> = BTreeSet::new();
     let mut add_excl = |id: &str| -> Result<()> {
@@ -1441,18 +1479,10 @@ fn reach_back(versions: &mut [(Option<StateRec>, Vec<u8>)], state: StateRec) {
 }
 
 pub fn blame(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new()
-        .paths()
-        .value("-L")
-        .flag("-s")
-        .flag("-e|--show-email")
-        .flag("-l")
-        .flag("--porcelain")
-        .flag("-w")
-        .flag("-M")
-        .flag("-C");
+    let spec = Spec::new().paths().value("-L").flag("-s").flag("-e|--show-email");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
+    let _objects = crate::objstore::share(&h.repo.p);
     let repo = &h.repo;
     let line = h.line.clone();
     let (rev, path) = match (a.pos.len(), a.paths.len()) {

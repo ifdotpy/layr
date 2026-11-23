@@ -453,8 +453,9 @@ pub(crate) fn lmeta_checked(root: &(impl Src + ?Sized), rel: &str) -> Result<Opt
 }
 
 /// Metadata of the entry at `path`, which is `rel` below some root, only when the volume
-/// stores exactly that name. On a volume that ignores case, `readme` also finds `README`;
-/// for Layr these are two paths.
+/// stores exactly that name. On a volume that ignores case, `readme` also finds `README`; APFS
+/// also finds a name in another Unicode normalisation (NFD `café` for NFC, even `;` for U+037E)
+/// when it is case sensitive. For Layr these are two paths.
 pub fn exact_metadata(path: &Path, rel: &str) -> Option<fs::Metadata> {
     exact_metadata_checked(path, rel).ok().flatten()
 }
@@ -468,7 +469,7 @@ pub(crate) fn exact_metadata_checked(path: &Path, rel: &str) -> std::io::Result<
         Err(error) => return Err(error),
     };
     #[cfg(target_os = "macos")]
-    if !rel.is_empty() && !crate::sys::case_sensitive_dev(metadata.dev(), path) && !stored_exactly(path, rel, &metadata)? {
+    if !rel.is_empty() && !stored_exactly(path, rel, &metadata)? {
         return Ok(None);
     }
     #[cfg(not(target_os = "macos"))]

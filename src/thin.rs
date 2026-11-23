@@ -359,8 +359,9 @@ impl Layered {
                 return Ok(None);
             };
             match fs::symlink_metadata(&p) {
-                // On a volume that ignores case, `readme` also finds `README`: another path.
-                Ok(_) if crate::fsutil::exact_metadata(&p, rel).is_some() => return Ok(Some(Found::Path(p))),
+                // On a volume that ignores case, `readme` also finds `README`: another path. A failed check of the
+                // stored name is no absence: a lower layer must not show through.
+                Ok(_) if crate::fsutil::exact_metadata_checked(&p, rel)?.is_some() => return Ok(Some(Found::Path(p))),
                 Ok(_) => continue,
                 Err(e) if not_found(&e) => continue,
                 Err(e) => return Err(e.into()),
@@ -1094,7 +1095,8 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
             open_parent(&stage, p)?;
             crate::fs::remove(&at)?;
         }
-        let old = below.find(p).ok().flatten().map(fs::symlink_metadata).transpose()?;
+        // A lookup that fails decides no removal mark: the command fails instead.
+        let old = below.find(p)?.map(fs::symlink_metadata).transpose()?;
         let (Some(m), Some(from)) = (new, from) else {
             if old.is_some() {
                 removed.insert(p.clone());
@@ -1132,8 +1134,14 @@ pub fn stage_entries(index: &Layered, src: &Path, paths: &BTreeSet<String>, own:
             bail!("cannot snapshot special file {}", from.display());
         }
     }
-    // Only paths that the base has need a removal mark.
-    removed.retain(|r| below.find(r).ok().flatten().is_some());
+    // Only paths that the base has need a removal mark. A failed lookup fails the command before the marks change.
+    let mut kept = BTreeSet::new();
+    for r in removed {
+        if below.find(&r)?.is_some() {
+            kept.insert(r);
+        }
+    }
+    removed = kept;
     set_removed(&stage, &removed)?;
     let now = Layered::over(&stage, below.clone())?;
     // Folders that lost their last entry leave, the deepest first.
