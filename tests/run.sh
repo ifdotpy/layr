@@ -113,6 +113,16 @@ if [ "$jobs_n" -gt 1 ]; then
     for t in "${files[@]}"; do
         if grep -qx '# serial' "tests/$t.sh"; then serial+=("$t"); else parallel+=("$t"); fi
     done
+    # The longest first (tests/durations.txt; a test that is not there counts as 10 s): in list order, the two
+    # slowest macOS tests (226 and 181 s) started near the end, and the step took 684 s for 4042 s of tests on
+    # 8 jobs (2026-11-22). Equal times keep the list order.
+    if [ "${#parallel[@]}" -gt 1 ]; then
+        parallel=($(for i in "${!parallel[@]}"; do
+            t=${parallel[$i]}
+            s=$(awk -v t="$t" '$2 == t { print $1; exit }' tests/durations.txt 2> /dev/null)
+            echo "${s:-10} $i $t"
+        done | sort -k1,1rn -k2,2n | awk '{ print $3 }'))
+    fi
     files=("${parallel[@]}" "${serial[@]}")
 fi
 next=0

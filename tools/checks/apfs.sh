@@ -86,8 +86,10 @@ tests=(bash tests/run.sh)
 export LAYR_TEST_TIMES=1
 if /opt/homebrew/bin/bash -c '((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3)))' 2>/dev/null; then
     tests=(/opt/homebrew/bin/bash tests/run.sh)
+    # One test per core (at most 16): the tests wait on processes and the disk as much as they compute. On the
+    # M3 Pro runner (12 cores) the shell steps took 589 s for 2766 s of tests on 6 jobs (2026-11-22).
     cpus=$(sysctl -n hw.ncpu)
-    export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$(( cpus / 2 < 8 ? (cpus / 2 < 1 ? 1 : cpus / 2) : 8 ))}
+    export LAYR_TEST_JOBS=${LAYR_TEST_JOBS:-$(( cpus < 16 ? (cpus < 1 ? 1 : cpus) : 16 ))}
 fi
 step "shell tests (macos-plain)" "${tests[@]}" --tag macos-plain
 step "shell tests (macos)" env LAYR_TEST_DIRECT_MAIN=1 "${tests[@]}" --tag macos
