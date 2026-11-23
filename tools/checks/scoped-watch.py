@@ -15,6 +15,11 @@ layr-cloud). When it is set, the loop adds the Rust toolchain a state pins and t
 Cargo.lock to the read-only check seed before the check, with the code of the AWS job. Without
 them each state that pinned a newer Rust failed its unit check in seconds (2026-11-15).
 
+LAYR_CHECK_PREPARE names the seed command of the project (the `prepare` of its Layr Cloud job config, for
+project layr-cloud `bash tools/checks/prepare-linux.sh`). It runs as root with network in the head of main
+that the merge machine LAYR_MERGE_MACHINE moves, once for each new head, as on the AWS check job. Without it
+a change that moved a git pin of layr-cloud failed every check offline in seconds (2026-11-23).
+
 No timer: when no check is pending, the loop waits until the project changes in Layr Cloud (`layr wait`,
 layr 0.52 and later), then reads the new heads. After each check it pushes the result at once. A layr
 without `layr wait` sleeps IDLE seconds instead.
@@ -25,6 +30,7 @@ import importlib.util
 import json
 import os
 import platform
+import shlex
 import subprocess
 import sys
 import time
@@ -75,6 +81,8 @@ class Runner:
         self.env = {'PATH': PATH, 'LAYR_ROOT': ROOT,
                     'LAYR_GATEWAY_TOKEN_FILE': os.environ['LAYR_GATEWAY_TOKEN_FILE']}
         self.seed = self.seeder(os.environ.get('LAYR_CHECK_SEED_JOB'))
+        self.prepare_command = shlex.split(os.environ.get('LAYR_CHECK_PREPARE', ''))
+        self.merge_machine = os.environ.get('LAYR_MERGE_MACHINE', '')
         self.failed = {}
         self.cache_at = 0
         self.can_wait = None
@@ -98,6 +106,30 @@ class Runner:
             return result
         seeded = set()
         return lambda state: ci_job.seed_changes(job_layr, [state], seeded)
+
+    def prepare(self):
+        """The seed command of the project, as root with network, in the merge machine's head of main. This
+        store's own main never moves (fetch --heads records the heads of the other machines). It runs once for
+        each head: a failed run is logged and waits for the next head, like the AWS job."""
+        if not self.prepare_command:
+            return
+        rev = f'main@{self.merge_machine}' if self.merge_machine else 'main'
+        head = self.layr('--line', 'main', 'rev-parse', rev).stdout.strip()
+        mark = os.path.join(WAIT_DIR, f'{self.project}-prepared')
+        done = f"{shlex.join(self.prepare_command)} {head}"
+        try:
+            with open(mark) as f:
+                if not head or f.read() == done:
+                    return
+        except OSError:
+            pass
+        started = time.time()
+        result = self.layr('--line', 'main', 'try', head, '--', *self.prepare_command, timeout=3600)
+        log(step='prepare', state=head, exit=result.returncode, seconds=round(time.time() - started),
+            detail=result.stderr.strip()[-300:] if result.returncode else '')
+        os.makedirs(WAIT_DIR, exist_ok=True)
+        with open(mark, 'w') as f:
+            f.write(done)
 
     def next_check(self):
         pending = self.layr('checks', 'pending', '--platform', self.platform, '--json')
@@ -182,6 +214,7 @@ class Runner:
             if not self.bring(item['state']):
                 continue
             self.fetch_cache()
+            self.prepare()
             try:
                 self.seed(item['state'])
             except Exception as error:
