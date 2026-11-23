@@ -73,23 +73,33 @@ impl PreparedSave {
 
 struct FinalIndex {
     path: Option<PathBuf>,
-    entries: Entries,
+    fence: Option<Fence>,
 }
 impl FinalIndex {
     fn read(repo: &Repo, line: &Line) -> Result<Self> {
         let path = repo.current_stage(line)?;
-        let entries = match &path {
-            Some(path) => entries(path, Boundary::Final)?,
-            None => Entries::new(),
-        };
-        Ok(Self { path, entries })
+        let fence = path.as_deref().map(|path| Fence::read(path, Boundary::Final, |_| Ok(()))).transpose()?;
+        Ok(Self { path, fence })
+    }
+
+    /// Stale when the line has another staging folder or its entries changed. The current folder
+    /// is walked even when it is another one, so its operational errors still fail first.
+    fn verify(&mut self, repo: &Repo, line: &Line) -> Result<()> {
+        let current = repo.current_stage(line)?;
+        match (&mut self.fence, &current) {
+            (Some(fence), Some(path)) => fence.verify(path, |_| Ok(()))?,
+            (None, Some(path)) => walk_entries(path, Boundary::Final, |_| Ok(()), |_, _| ())?,
+            (_, None) => {}
+        }
+        ensure!(current == self.path, StalePreparation);
+        Ok(())
     }
 }
 
 enum Validation {
     Captured,
     Changed,
-    Stable(Entries, Boundary),
+    Stable(Fence),
 }
 
 enum Capture {
@@ -277,7 +287,7 @@ fn folder_id(path: &Path) -> Option<(u64, u64)> {
 
 // No file data, content comparison or hashing in publication. Nanosecond
 // ctime catches same-size writes even when a writer restores mtime. Atime is deliberately absent.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Entry {
     dev: u64,
     ino: u64,
@@ -288,7 +298,7 @@ struct Entry {
     // and changing directory metadata belong to a separately managed tree.
     content: Option<ContentStamp>,
 }
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct ContentStamp {
     size: u64,
     links: u64,
@@ -320,28 +330,77 @@ fn scan_io<T>(result: std::result::Result<T, impl Into<anyhow::Error>>) -> Resul
     })
 }
 
-type Entries = HashMap<PathBuf, Entry>;
-fn entries(root: &Path, boundary: Boundary) -> Result<Entries> {
-    scan_entries(root, boundary, |_| Ok(()))
+/// The metadata of every entry below a capture root, recorded by the first walk. Later walks
+/// compare each visited entry with it instead of building another map of the whole tree.
+struct Fence {
+    // The number of the last walk that visited the entry: a path visited twice is stale.
+    entries: HashMap<PathBuf, (Entry, u32)>,
+    boundary: Boundary,
+    walks: u32,
+}
+impl Fence {
+    fn read(root: &Path, boundary: Boundary, before_entry: impl FnMut(&Path) -> Result<()>) -> Result<Self> {
+        let mut entries = HashMap::new();
+        walk_entries(root, boundary, before_entry, |rel, entry| {
+            entries.insert(rel.to_path_buf(), (entry, 0));
+        })?;
+        #[cfg(test)]
+        RECORDED.with(|n| n.set(n.get() + entries.len()));
+        Ok(Self { entries, boundary, walks: 0 })
+    }
+
+    /// Stale unless this walk of `root` visits each recorded entry once, unchanged, and nothing else.
+    /// A difference does not end the walk: an operational error later in the tree still fails, as
+    /// with a map of the whole walk. O(entries), no new map.
+    fn verify(&mut self, root: &Path, before_entry: impl FnMut(&Path) -> Result<()>) -> Result<()> {
+        self.walks += 1;
+        let (walk, mut visited, mut differs) = (self.walks, 0, false);
+        #[cfg(test)]
+        VERIFIED.with(|n| n.set(n.get() + 1));
+        walk_entries(root, self.boundary, before_entry, |rel, entry| {
+            if first_match(&mut self.entries, rel, &entry, walk) {
+                visited += 1;
+            } else {
+                differs = true;
+            }
+        })?;
+        ensure!(!differs && visited == self.entries.len(), StalePreparation);
+        Ok(())
+    }
+}
+
+/// Whether `rel` was recorded with `entry` and this is its first visit in `walk`, which it marks.
+fn first_match(entries: &mut HashMap<PathBuf, (Entry, u32)>, rel: &Path, entry: &Entry, walk: u32) -> bool {
+    match entries.get_mut(rel) {
+        Some((expected, seen)) if expected == entry && *seen != walk => {
+            *seen = walk;
+            true
+        }
+        _ => false,
+    }
+}
+#[cfg(test)]
+thread_local! {
+    /// Entries recorded in fence maps by this thread.
+    static RECORDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Verification walks of fences by this thread.
+    static VERIFIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // Test barriers run only in the two preparation scans, never during publication.
-fn preparation_entries(root: &Path, boundary: Boundary, phase: &str) -> Result<Validation> {
+fn pause_at(phase: &str) -> impl FnMut(&Path) -> Result<()> + '_ {
     let pause = std::env::var_os("LAYR_TEST_SAVE_SCAN_ENTRY").map(PathBuf::from);
-    validation_scan(
-        scan_entries(root, boundary, |rel| {
-            if pause.as_deref() == Some(rel) {
-                barrier(phase)?;
-            }
-            Ok(())
-        }),
-        boundary,
-    )
+    move |rel| {
+        if pause.as_deref() == Some(rel) {
+            barrier(phase)?;
+        }
+        Ok(())
+    }
 }
 
-fn validation_scan(scan: Result<Entries>, boundary: Boundary) -> Result<Validation> {
+fn validation_scan(scan: Result<Fence>) -> Result<Validation> {
     match scan {
-        Ok(entries) => Ok(Validation::Stable(entries, boundary)),
+        Ok(fence) => Ok(Validation::Stable(fence)),
         // A scan race invalidates the content fence, but must not discard an unsettled
         // capture before the last foreground attempt can accept it. Other errors fail.
         Err(error) if error.is::<StalePreparation>() => Ok(Validation::Changed),
@@ -349,8 +408,12 @@ fn validation_scan(scan: Result<Entries>, boundary: Boundary) -> Result<Validati
     }
 }
 
-fn scan_entries(root: &Path, boundary: Boundary, mut before_entry: impl FnMut(&Path) -> Result<()>) -> Result<Entries> {
-    let mut out = HashMap::new();
+fn walk_entries(
+    root: &Path,
+    boundary: Boundary,
+    mut before_entry: impl FnMut(&Path) -> Result<()>,
+    mut visit: impl FnMut(&Path, Entry),
+) -> Result<()> {
     let mut roots = None;
     let mut stack = vec![(PathBuf::new(), None)];
     while let Some((rel, expected_type)) = stack.pop() {
@@ -368,8 +431,8 @@ fn scan_entries(root: &Path, boundary: Boundary, mut before_entry: impl FnMut(&P
         } else {
             false
         };
-        out.insert(
-            rel.clone(),
+        visit(
+            &rel,
             Entry {
                 dev: m.dev(),
                 ino: m.ino(),
@@ -399,7 +462,7 @@ fn scan_entries(root: &Path, boundary: Boundary, mut before_entry: impl FnMut(&P
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Test barriers are outside the project lock, and cost one env lookup when unset.
@@ -529,7 +592,7 @@ impl Repo<'_> {
         // saves may retain a running capture and try newer content on the next tick.
         let boundary = if final_delete { Boundary::Final } else { Boundary::Source };
         let before = if (final_delete || !running) && root.exists() {
-            preparation_entries(&root, boundary, "scan_before")?
+            validation_scan(Fence::read(&root, boundary, pause_at("scan_before")))?
         } else {
             Validation::Captured
         };
@@ -620,14 +683,9 @@ impl Repo<'_> {
         barrier("cache_parts")?;
         let staged = if final_delete { self.prepare_final_stage(ctx, line)? } else { None };
         let validation = match before {
-            Validation::Stable(before, boundary) => {
-                // A writer during capture invalidates a foreground preparation even if
-                // it stops before publication. Retry outside the project lock.
-                match preparation_entries(&root, boundary, "scan_after")? {
-                    Validation::Stable(after, _) if before == after => Validation::Stable(after, boundary),
-                    _ => Validation::Changed,
-                }
-            }
+            // A writer during capture invalidates a foreground preparation even if
+            // it stops before publication. Retry outside the project lock.
+            Validation::Stable(mut fence) => validation_scan(fence.verify(&root, pause_at("scan_after")).map(|()| fence))?,
             validation => validation,
         };
         super::clear_regenerable_memo();
@@ -770,7 +828,7 @@ impl Repo<'_> {
         self.working(line)
     }
 
-    pub fn publish_save(&self, ctx: &Ctx, lock: &LockedProject<'_>, prepared: PreparedSave) -> Result<PublishOutcome> {
+    pub fn publish_save(&self, ctx: &Ctx, lock: &LockedProject<'_>, mut prepared: PreparedSave) -> Result<PublishOutcome> {
         ensure!(lock.check(&self.p).is_ok(), "save publication requires this project's real lock");
         #[cfg(feature = "overlayfs")]
         let Some(_backend) = crate::overlayfs::try_publication(&self.p.dir)?
@@ -798,21 +856,19 @@ impl Repo<'_> {
         if matches!(prepared.validation, Validation::Changed) {
             return Ok(PublishOutcome::Stale);
         }
-        if let Validation::Stable(expected, boundary) = &prepared.validation {
-            match entries(&prepared.capture_root, *boundary) {
-                Ok(current) if current == *expected => {}
-                Ok(_) => return Ok(PublishOutcome::Stale),
-                Err(error) if error.is::<StalePreparation>() => return Ok(PublishOutcome::Stale),
-                Err(error) => return Err(error),
+        let validated = (|| -> Result<()> {
+            if let Validation::Stable(fence) = &mut prepared.validation {
+                fence.verify(&prepared.capture_root, |_| Ok(()))?;
             }
-        }
-        if let Some(expected) = &prepared.final_index {
-            match FinalIndex::read(self, &line) {
-                Ok(current) if current.path == expected.path && current.entries == expected.entries => {}
-                Ok(_) => return Ok(PublishOutcome::Stale),
-                Err(error) if error.is::<StalePreparation>() => return Ok(PublishOutcome::Stale),
-                Err(error) => return Err(error),
+            if let Some(index) = &mut prepared.final_index {
+                index.verify(self, &line)?;
             }
+            Ok(())
+        })();
+        match validated {
+            Ok(()) => {}
+            Err(error) if error.is::<StalePreparation>() => return Ok(PublishOutcome::Stale),
+            Err(error) => return Err(error),
         }
         let _trace = crate::trace::span("publish prepared save");
         // Acquire every overlay lock non-blocking before publishing anything. No blocking overlay
@@ -1230,6 +1286,113 @@ mod tests {
         SaveMode::Automatic { message: "test".into(), running: false, force: false }
     }
 
+    fn fence(root: &Path, boundary: Boundary) -> Result<Fence> {
+        Fence::read(root, boundary, |_| Ok(()))
+    }
+
+    /// True when another walk of `root` matches `fence`; operational errors fail.
+    fn unchanged(fence: &mut Fence, root: &Path) -> Result<bool> {
+        match fence.verify(root, |_| Ok(())) {
+            Ok(()) => Ok(true),
+            Err(error) if error.is::<StalePreparation>() => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[test]
+    fn fence_walks_require_each_recorded_entry_once_and_unchanged() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-save-fence-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("dir"))?;
+        std::fs::write(root.join("dir/file"), b"recorded")?;
+        let result = (|| -> Result<()> {
+            let mut recorded = fence(&root, Boundary::Final)?;
+            assert_eq!(recorded.entries.len(), 3);
+            assert!(unchanged(&mut recorded, &root)?);
+            assert!(unchanged(&mut recorded, &root)?, "every walk starts with unvisited entries");
+            // An entry no walk can reach.
+            recorded.entries.insert(PathBuf::from("missing"), (recorded.entries[Path::new("dir")].0.clone(), 0));
+            assert!(!unchanged(&mut recorded, &root)?);
+            let mut recorded = fence(&root, Boundary::Final)?;
+            std::fs::write(root.join("new"), b"not recorded")?;
+            assert!(!unchanged(&mut recorded, &root)?);
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        result
+    }
+
+    #[test]
+    fn a_fence_entry_matches_once_per_walk() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("layr-save-fence-once-{}", crate::ids::new_id()));
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("file"), b"recorded")?;
+        let result = (|| -> Result<()> {
+            let mut recorded = fence(&root, Boundary::Final)?.entries;
+            let rel = Path::new("file");
+            let entry = recorded[rel].0.clone();
+            assert!(first_match(&mut recorded, rel, &entry, 1));
+            assert!(!first_match(&mut recorded, rel, &entry, 1), "a second visit in one walk");
+            assert!(first_match(&mut recorded, rel, &entry, 2));
+            assert!(!first_match(&mut recorded, Path::new("other"), &entry, 3), "an unrecorded path");
+            let changed = Entry { mode: entry.mode ^ 0o100, ..entry };
+            assert!(!first_match(&mut recorded, rel, &changed, 3), "a changed entry");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        result
+    }
+
+    #[test]
+    fn fence_verification_reports_an_operational_error_after_a_difference() -> Result<()> {
+        if crate::test_runs_as_root() {
+            return Ok(());
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("layr-save-fence-error-{}", crate::ids::new_id()));
+        std::fs::create_dir_all(root.join("locked"))?;
+        let result = (|| -> Result<()> {
+            let mut recorded = fence(&root, Boundary::Final)?;
+            // The root is walked first: it differs before the walk reaches the unreadable folder.
+            std::fs::write(root.join("new"), b"not recorded")?;
+            std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000))?;
+            let Err(error) = recorded.verify(&root, |_| Ok(())) else { bail!("an unreadable folder must fail") };
+            assert!(!error.is::<StalePreparation>(), "{error:#}");
+            Ok(())
+        })();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o700))?;
+        std::fs::remove_dir_all(&root)?;
+        result
+    }
+
+    // Native subvolume lines only: on OverlayFS the first publication of this fixture's mounted
+    // line is stale (CI overlayfs-ext4/xfs, as root). The fence tests above cover every backend.
+    #[cfg(not(feature = "overlayfs"))]
+    #[test]
+    fn final_deletion_records_the_working_tree_once() -> Result<()> {
+        fixture(|ctx, repo, line| {
+            let folder = repo.working(line);
+            std::fs::create_dir_all(folder.parent().ok_or_else(|| anyhow::anyhow!("no lines folder"))?)?;
+            storage::create(&folder)?;
+            std::fs::create_dir(folder.join("many"))?;
+            for n in 0..200 {
+                std::fs::write(folder.join(format!("many/{n}")), n.to_string())?;
+            }
+            RECORDED.with(|n| n.set(0));
+            VERIFIED.with(|n| n.set(0));
+            let guard = repo.line_lock(line)?;
+            let mut prepared = repo.prepare_save(ctx, line, &guard, SaveMode::FinalDeletion)?;
+            // Publication validates before it publishes; this fixture has no native capture to publish.
+            prepared.capture = Capture::Unchanged(prepared.base.clone());
+            let lock = guard.lock(&repo.p)?;
+            assert!(matches!(repo.publish_save(ctx, &lock, prepared)?, PublishOutcome::Unchanged(_)));
+            // Three walks of the working tree: one map of the working tree (and of the small staging index), not one per walk.
+            let recorded = RECORDED.with(std::cell::Cell::get);
+            assert!((200..400).contains(&recorded), "{recorded} entries recorded");
+            assert_eq!(VERIFIED.with(std::cell::Cell::get), 2, "after capture and under the project lock");
+            Ok(())
+        })
+    }
+
     #[test]
     fn prepared_comparison_reads_private_objects_without_publishing_a_native_tree() -> Result<()> {
         fixture(|ctx, repo, line| {
@@ -1599,20 +1762,21 @@ mod tests {
         std::fs::write(root.join("target-sibling/source"), b"unregistered source folder")?;
         std::fs::write(cache.join("old"), b"already saved cache")?;
         let result = (|| -> Result<()> {
-            let source = entries(&root, Boundary::Source)?;
-            let final_state = entries(&root, Boundary::Final)?;
+            let mut source = fence(&root, Boundary::Source)?;
+            let mut final_state = fence(&root, Boundary::Final)?;
             std::fs::remove_file(cache.join("old"))?;
             std::fs::create_dir(cache.join("new"))?;
             std::fs::write(cache.join("new/object"), b"new compiler output")?;
-            assert!(source == entries(&root, Boundary::Source)?);
-            assert!(final_state != entries(&root, Boundary::Final)?);
+            assert!(unchanged(&mut source, &root)?);
+            assert!(!unchanged(&mut final_state, &root)?);
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&cache)?.mode();
             std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(mode ^ 0o100))?;
-            assert!(source != entries(&root, Boundary::Source)?, "cache permissions still belong to the source boundary");
+            assert!(!unchanged(&mut source, &root)?, "cache permissions still belong to the source boundary");
             std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(mode))?;
+            assert!(unchanged(&mut source, &root)?, "the restored mode matches again");
             std::fs::write(root.join("target-sibling/source"), b"changed unregistered source")?;
-            assert!(source != entries(&root, Boundary::Source)?, "an unregistered sibling is source content");
+            assert!(!unchanged(&mut source, &root)?, "an unregistered sibling is source content");
             Ok(())
         })();
         storage::remove(&root)?;
@@ -1631,7 +1795,7 @@ mod tests {
                 } else {
                     std::fs::write(&victim, b"removed after enumeration")?;
                 }
-                let result = scan_entries(&root, boundary, |rel| {
+                let result = Fence::read(&root, boundary, |rel| {
                     if rel == Path::new("victim") {
                         if directory {
                             std::fs::remove_dir(&victim)?;
@@ -1644,7 +1808,7 @@ mod tests {
                 });
                 let error = result.err().expect("scan race must be stale");
                 assert!(error.is::<StalePreparation>());
-                assert!(matches!(validation_scan(Err(error), boundary)?, Validation::Changed));
+                assert!(matches!(validation_scan(Err(error))?, Validation::Changed));
                 std::fs::remove_dir_all(root)?;
             }
         }
@@ -1655,7 +1819,7 @@ mod tests {
     fn metadata_scan_preserves_permission_and_io_errors() {
         for errno in [libc::EACCES, libc::EPERM, libc::EIO] {
             let error = scan_io::<()>(Err(std::io::Error::from_raw_os_error(errno))).unwrap_err();
-            let error = validation_scan(Err(error), Boundary::Source).err().expect("operational error must fail");
+            let error = validation_scan(Err(error)).err().expect("operational error must fail");
             assert!(!error.is::<StalePreparation>());
             assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(), Some(errno));
         }
@@ -1673,10 +1837,10 @@ mod tests {
         std::fs::write(&file, b"before")?;
         let time = 1_700_000_000_000_000_000;
         layr_objects::times::set(&file, time)?;
-        let before = entries(&root, Boundary::Final)?;
+        let mut before = fence(&root, Boundary::Final)?;
         std::fs::write(&file, b"after!")?;
         layr_objects::times::set(&file, time)?;
-        assert!(before != entries(&root, Boundary::Final)?);
+        assert!(!unchanged(&mut before, &root)?);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
