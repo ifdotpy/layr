@@ -1898,8 +1898,8 @@ impl Inner {
         ))
     }
 
-    /// `write_objects` that leaves the view as it is: the blobs of changed files go to the store
-    /// and into the trees, but the nodes keep their content (upper file, patches). A blob that no
+    /// Like `save` without the state: the blobs of changed files go to the store and into the
+    /// trees, but the nodes keep their content (upper file, patches). A blob that no
     /// state names can go at the next `gc`; the view must never read from one.
     fn snapshot_objects(&mut self) -> Result<(StateRef, usize)> {
         let mut todo = Vec::new();
@@ -2010,25 +2010,6 @@ impl Inner {
         let times = self.store.put_times(&Times { own, records })?;
         dirs.insert(ino, (tree, times));
         Ok((tree, times))
-    }
-
-    /// Write the blobs of changed files and the trees and times of changed folders.
-    #[allow(dead_code)]
-    fn write_objects(&mut self) -> Result<(StateRef, usize)> {
-        let patched = self.store_patched()?;
-        let mut files = Vec::new();
-        self.collect_upper(ROOT, &mut files);
-        let store = &self.store;
-        let stored: Vec<(u64, Result<(Id, u64)>)> =
-            files.par_iter().map(|(ino, path, base)| (*ino, store.put_file(path, Temperature::Hot, *base))).collect();
-        for (ino, r) in stored {
-            let (blob, size) = r?;
-            let n = &mut self.nodes[ino as usize];
-            n.blob = Some(blob);
-            n.size = size;
-        }
-        let (tree, times) = self.build_dir(ROOT)?;
-        Ok((StateRef { tree, times }, files.len() + patched))
     }
 
     /// Save every change of the view as the state `name`; the view then rests on it.

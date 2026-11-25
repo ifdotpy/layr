@@ -69,25 +69,6 @@ pub fn missing_trees(store: &Store, tree: &Id) -> Result<Vec<Id>> {
     Ok(missing)
 }
 
-/// The times tables reached by a folder times table, root first.
-pub fn reachable_times(store: &Store, root: &Id) -> Result<Vec<Id>> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    let mut stack = vec![*root];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        result.push(id);
-        for record in store.get_times(&id)?.records.into_iter().rev() {
-            if let crate::times::Record::Folder(child) = record {
-                stack.push(child);
-            }
-        }
-    }
-    Ok(result)
-}
-
 /// Missing folder times tables, stopping at a table the store does not have yet.
 pub fn missing_times(store: &Store, root: &Id) -> Result<Vec<Id>> {
     let mut seen = HashSet::new();

@@ -419,13 +419,6 @@ pub fn pending_paths(root: &Path) -> Vec<PathBuf> {
 
 /// All changes of a virtual line are included in its next save.
 pub fn status(repo: &Repo, line: &Line, view: &View) -> Result<crate::repo::Status> {
-    // A LayrFS line has no conflicts in its view yet (no merge into it).
-    if view.is_layrfs() {
-        let mut keep = Vec::new();
-        let (head, working, list) = diff_input(repo, line, view, &mut keep)?;
-        let staged = crate::changes::with_renames(&head, &crate::repo::snap(&working), list);
-        return Ok(crate::repo::Status { staged, ..Default::default() });
-    }
     let mut keep = Vec::new();
     let (head, working, list) = diff_input(repo, line, view, &mut keep)?;
     let staged = crate::changes::with_renames(&head, &working, list);
@@ -441,12 +434,9 @@ pub fn status(repo: &Repo, line: &Line, view: &View) -> Result<crate::repo::Stat
 pub fn diff_input(
     repo: &Repo,
     line: &Line,
-    view: &View,
+    _view: &View,
     keep: &mut Vec<crate::repo::Temp>,
 ) -> Result<(crate::repo::Snap, PathBuf, Vec<crate::changes::EntryChange>)> {
-    if view.is_layrfs() {
-        return lfs::diff_input(repo, line);
-    }
     ensure_no_pending_move(repo, line)?;
     let head = repo.state_src(&line.head)?;
     let scan = repo.scan(line)?;
@@ -479,9 +469,6 @@ mod lfs {
         Err(off())
     }
     pub fn show(_: &Ctx, _: &Repo, _: &Line, _: &View, _: bool, _: bool) -> Result<i32> {
-        Err(off())
-    }
-    pub fn diff_input(_: &Repo, _: &Line) -> Result<(crate::repo::Snap, PathBuf, Vec<crate::changes::EntryChange>)> {
         Err(off())
     }
 }
@@ -694,14 +681,9 @@ mod lfs {
         Ok(line)
     }
 
-    /// The content of the view as objects (a snapshot), the head, and the file changes between
-    /// them without new ignored files. The path is the folder where the view is mounted.
-    pub fn diff_input(repo: &Repo, line: &Line) -> Result<(crate::repo::Snap, PathBuf, Vec<crate::changes::EntryChange>)> {
-        let (head, working, list, _) = changes(repo, line)?;
-        Ok((head, working, list))
-    }
-
-    /// `diff_input`, and the topmost new paths that the ignore rules leave out of a save.
+    /// Compares a snapshot of the view with the head. Returns the head, the folder where the view
+    /// is mounted, the file changes without new ignored files, and the topmost new paths that the
+    /// ignore rules leave out of a save.
     fn changes(repo: &Repo, line: &Line) -> Result<(crate::repo::Snap, PathBuf, Vec<crate::changes::EntryChange>, BTreeSet<Vec<u8>>)> {
         let _t = crate::trace::span("layrfs snapshot");
         ensure_mounted(repo, line)?;

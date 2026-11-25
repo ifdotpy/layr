@@ -198,19 +198,6 @@ impl Profile {
         matches!(self.kind, Kind::Sso(_))
     }
 
-    /// Whether the profile has keys, or an SSO token that is valid or can be renewed. It makes
-    /// no AWS call, so the role may still refuse.
-    pub fn signed_in(&self) -> bool {
-        match &self.kind {
-            Kind::Keys(_) => true,
-            Kind::Sso(sso) => sso.cached().is_some_and(|cached| {
-                let time = |name: &str| cached[name].as_str().and_then(parse_time);
-                time("expiresAt").is_some_and(|t| t > now() + MARGIN)
-                    || (cached["refreshToken"].is_string() && time("registrationExpiresAt").is_some_and(|t| t > now()))
-            }),
-        }
-    }
-
     /// Credentials for AWS calls; SignInNeeded when the SSO login has ended.
     pub fn credentials(&self, http: &reqwest::blocking::Client) -> Result<Credentials> {
         match &self.kind {
@@ -278,6 +265,7 @@ impl Sso {
         Ok(home(&self.env)?.join(".aws/sso/cache").join(format!("{}.json", hex::encode(GitCompatible::digest(&self.cache_key)))))
     }
 
+    #[cfg(test)]
     fn cached(&self) -> Option<Value> {
         serde_json::from_str(&std::fs::read_to_string(self.cache_path().ok()?).ok()?).ok()
     }
