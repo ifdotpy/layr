@@ -16,6 +16,11 @@ QUEUED_STATE=$(printf '%s' "$ADDED" | python3 -c 'import json,sys; print(json.lo
 l line new -q "$QUEUED_STATE" main
 echo two > two.txt; l add two.txt; l save -qm two
 cd ../main
+# A queue that needs approvals (Layr Cloud) waits for one; list names the pending entry without it on stderr.
+has 'list notes a pending entry without an approval' "has no approval of its state; a queue that needs one waits: layr approve" "$(l queue list 2>&1 >/dev/null)"
+eq 'the note stays off stdout' 0 "$(l queue list 2>/dev/null | grep -c approve)"
+l approve "$ONE" >/dev/null
+eq 'an approved entry has no note' '' "$(l queue list 2>&1 >/dev/null)"
 ok 'the exact queued state merges' l queue run --into main
 eq 'a line name cannot redirect the exact queued state' "$ONE" "$(l rev-parse head)"
 eq 'a later source commit stays out' no "$(test -e two.txt && echo yes || echo no)"

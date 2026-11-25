@@ -307,8 +307,19 @@ pub fn queue(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if a.has("--json") {
                 outln!(ctx, "{}", entries_json(repo, &entries)?);
             } else {
-                for entry in entries {
-                    print_entry(ctx, &entry);
+                for entry in &entries {
+                    print_entry(ctx, entry);
+                }
+                // A queue that needs a maintainer approval (Layr Cloud makes a candidate only for an approved
+                // state) shows the wait only in its own log; an entry waited 5 hours for it (2026-11-23).
+                for entry in entries.iter().filter(|e| e.status == "pending") {
+                    if repo.p.db.attestations(&entry.state, Some("approval"))?.is_empty() {
+                        eprintln!(
+                            "note: entry {} has no approval of its state; a queue that needs one waits: layr approve {}",
+                            entry.id,
+                            ids::short(&entry.state)
+                        );
+                    }
                 }
             }
             Ok(0)
