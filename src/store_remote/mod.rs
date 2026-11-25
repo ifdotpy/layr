@@ -847,6 +847,7 @@ impl Store {
     }
 
     fn connect_transport(&mut self, ctx: &Ctx) -> Result<()> {
+        const EPOCHS_REFUSED: &str = "does not open projects with access epochs";
         self.backend = self.backend.root().clone();
         self.epoch = None;
         self.epoch_public = false;
@@ -861,7 +862,13 @@ impl Store {
         let mut legacy_probe = false;
         if let Backend::Api(api) = &mut self.backend {
             api.connect(ctx, &self.project, public_only)?;
-            let info = api.project_info()?;
+            // The server reader of Layr Cloud 0.2.0 refuses a project with access epochs (HTTP 400). Its data is
+            // on the gateway routes, as for an older server: after a rotation on 2026-11-24 every new clone of
+            // project layr failed here, CI jobs too.
+            let info = match api.project_info() {
+                Err(error) if format!("{error:#}").contains(EPOCHS_REFUSED) => None,
+                info => info?,
+            };
             let may_probe = self.pin.is_none() && self.mode.is_none();
             let legacy = may_probe
                 && match info {
