@@ -844,9 +844,14 @@ impl Gateway {
     }
 
     fn proof(&self) -> Result<String> {
+        self.proof_reused().map(|(token, _)| token)
+    }
+
+    /// The read proof, and true when it came from the cache of this client (an earlier request used it).
+    fn proof_reused(&self) -> Result<(String, bool)> {
         let mut cached = self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))?;
         if let Some((token, _)) = cached.as_ref().filter(|(_, expires)| *expires > crate::ids::now_ms() + PROOF_RENEW_MS) {
-            return Ok(token.clone());
+            return Ok((token.clone(), true));
         }
         let identity = self
             .identity
@@ -884,7 +889,7 @@ impl Gateway {
             bail!("invalid gateway read token");
         }
         *cached = Some((token.token.clone(), token.expires));
-        Ok(token.token)
+        Ok((token.token, false))
     }
 
     fn read_request(&self, action: &str, query: Option<(&str, &str)>) -> Result<Response> {
@@ -897,8 +902,13 @@ impl Gateway {
 
     /// Sends each request that carries a read proof (reads, listings, slot writes). A 401 means that the gateway
     /// refused the proof: a restart discarded its in-memory HMAC key, or the proof expired (clock skew). The client
-    /// then exchanges one new proof and sends the request once again. A second 401 is an error. Other answers, a 404
-    /// too, go to the caller at once.
+    /// then exchanges one new proof and sends the request once again. A second 401 is an error.
+    ///
+    /// The gateway answers 401 only to a caller with a grant. A caller with only a read proof gets 404 "no such
+    /// project" for a proof that the gateway no longer knows, so a proof from the cache that gets this 404 is renewed
+    /// the same way. A gateway restart (each deploy, about 8 a day) otherwise failed every long-running `layr wait` of
+    /// the Mac agents with "gateway events: gateway: HTTP 404" until their next fallback pass (2026-11-25). Other
+    /// answers, other 404s too, go to the caller at once.
     fn proof_request(
         &self,
         method: Method,
@@ -914,19 +924,26 @@ impl Gateway {
         if cdn {
             headers.push((CDN_CAPABILITY, "1"));
         }
-        let token = self.proof().with_context(|| format!("gateway {method} {action}"))?;
+        let (token, reused) = self.proof_reused().with_context(|| format!("gateway {method} {action}"))?;
         let response = self.send_query_headers(method.clone(), action, Some(&token), query, data.clone(), &headers)?;
-        if response.status().as_u16() != 401 {
+        let response = match response.status().as_u16() {
+            401 => {
+                let _ = self.bytes(response, 1 << 20);
+                None
+            }
+            404 if reused => self.unless_unknown_proof(response)?,
+            _ => Some(response),
+        };
+        if let Some(response) = response {
             return self.follow_cdn(response, method, action, &token, query, data);
         }
-        let _ = self.bytes(response, 1 << 20);
         {
             let mut cached = self.read.lock().map_err(|_| anyhow!("gateway read token lock failed"))?;
             if cached.as_ref().is_some_and(|(current, _)| current == &token) {
                 *cached = None;
             }
         }
-        let token = self.proof().with_context(|| format!("gateway {method} {action}: renew the read proof after HTTP 401"))?;
+        let token = self.proof().with_context(|| format!("gateway {method} {action}: renew the read proof after a refusal"))?;
         let response = self.send_query_headers(method.clone(), action, Some(&token), query, data.clone(), &headers)?;
         if response.status().as_u16() != 401 {
             return self.follow_cdn(response, method, action, &token, query, data);
@@ -940,6 +957,21 @@ impl Gateway {
             .into());
         }
         Ok(response)
+    }
+
+    /// None for the gateway's 404 "no such project" (the answer to a proof it does not know), else the same answer
+    /// with its body read into memory: a missing object or listing keeps its 404 for the caller.
+    fn unless_unknown_proof(&self, response: Response) -> Result<Option<Response>> {
+        let (status, version, headers) = (response.status(), response.version(), response.headers().clone());
+        let body = self.bytes(response, 1 << 20)?;
+        if is_missing_project(&String::from_utf8_lossy(&body)) {
+            return Ok(None);
+        }
+        let mut same = http::Response::new(body);
+        *same.status_mut() = status;
+        *same.version_mut() = version;
+        *same.headers_mut() = headers;
+        Ok(Some(Response::from(same)))
     }
 
     /// A gateway answer with a signed CDN URL (`application/vnd.layr.cdn+json`): the object comes from that URL,
@@ -3280,15 +3312,57 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_404_with_a_read_proof_is_not_sent_again() {
+    fn a_404_no_such_project_renews_a_reused_proof_once() {
         let identity = keys::generate_identity();
-        let (address, server) =
-            proof_gateway(keys::recipient_of(&identity).unwrap(), |_, _| ("404 Not Found", "no such project".into()));
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |_, _| {
+            ("404 Not Found", r#"{"error":"no such project"}"#.into())
+        });
         let gateway = proof_client(&address, &identity, 300_000);
         let error = format!("{:#}", gateway.get("states/ab").unwrap_err());
         let log = quit(&address, server);
         assert!(error.contains("no such project"), "{error}");
-        assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof cdn"], "a 404 does not renew the proof or send again");
+        assert_eq!(
+            log,
+            [
+                "GET /v1/p/project/objects/states/ab old.proof cdn",
+                "GET /v1/p/project/challenge -",
+                "POST /v1/p/project/token -",
+                "GET /v1/p/project/objects/states/ab new.proof1 cdn"
+            ],
+            "a 404 on a new proof is the answer: no second renewal"
+        );
+    }
+
+    #[test]
+    fn a_gateway_restart_does_not_fail_a_wait_with_a_reused_proof() {
+        // The gateway keeps its proof key in memory: after a restart it answers a proof-only caller 404 "no such
+        // project" (a caller with a grant gets 401). `layr wait` of the Mac agents failed at each deploy.
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |request, bearer| {
+            assert_eq!(request, "GET /v1/p/project/events");
+            if bearer == "new.proof1" {
+                ("200 OK", r#"{"events":[],"cursor":"1.1.4"}"#.into())
+            } else {
+                ("404 Not Found", r#"{"error":"no such project"}"#.into())
+            }
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        let events = gateway.events(Some("1.1.3"), 1).unwrap();
+        assert_eq!(events["cursor"], "1.1.4");
+        let log = quit(&address, server);
+        assert_eq!(log.len(), 4, "one renewal: {log:?}");
+    }
+
+    #[test]
+    fn a_404_for_a_missing_object_keeps_the_reused_proof() {
+        let identity = keys::generate_identity();
+        let (address, server) = proof_gateway(keys::recipient_of(&identity).unwrap(), |_, _| {
+            ("404 Not Found", r#"{"error":"no such object"}"#.into())
+        });
+        let gateway = proof_client(&address, &identity, 300_000);
+        assert!(gateway.get("states/ab").unwrap().is_none(), "the caller still sees a missing object");
+        let log = quit(&address, server);
+        assert_eq!(log, ["GET /v1/p/project/objects/states/ab old.proof cdn"], "a missing object does not renew the proof");
     }
 
     pub(crate) struct FileTransport {
@@ -3420,6 +3494,8 @@ pub(super) mod tests {
         ) -> (Gateway, TestEndpoint, std::thread::JoinHandle<Vec<(String, serde_json::Value)>>) {
             use std::io::{Read, Write};
             let (listener, endpoint) = test_listener();
+            let identity = keys::generate_identity();
+            let recipient = keys::recipient_of(&identity).unwrap();
             let server = std::thread::spawn(move || {
                 let mut requests = Vec::new();
                 loop {
@@ -3438,7 +3514,17 @@ pub(super) mod tests {
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).unwrap();
                     let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-                    let (status, reply) = answer(&request, &value, &body);
+                    // A renewal of the read proof, as in `proof_gateway`.
+                    let (status, reply) = if request.starts_with("get /v1/p/project/challenge") {
+                        let sealed = keys::encrypt(&recipient, b"challenge.proof").unwrap();
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(sealed);
+                        (200, serde_json::to_vec(&serde_json::json!({"challenge": encoded})).unwrap())
+                    } else if request.starts_with("post /v1/p/project/token") {
+                        let expires = crate::ids::now_ms() + 600_000;
+                        (200, serde_json::to_vec(&serde_json::json!({"token": "new.proof", "expires": expires})).unwrap())
+                    } else {
+                        answer(&request, &value, &body)
+                    };
                     requests.push((request, value));
                     write!(
                         stream,
@@ -3449,7 +3535,6 @@ pub(super) mod tests {
                     stream.write_all(&reply).unwrap();
                 }
             });
-            let identity = keys::generate_identity();
             (proof_client(&endpoint, &identity, 300_000), endpoint, server)
         }
 
@@ -3718,7 +3803,8 @@ pub(super) mod tests {
                 let log = stop_transport(&endpoint, server);
                 result.unwrap();
                 assert_eq!(item, Some(expected));
-                assert_eq!(log.len(), 2 + usize::from(cdn) + usize::from(cdn && !missing));
+                // A missing project renews the reused proof once on the GET: a challenge, a token and the GET again.
+                assert_eq!(log.len(), 2 + usize::from(cdn) + usize::from(cdn && !missing) + 3 * usize::from(missing));
             }
         }
 

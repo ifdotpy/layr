@@ -1901,6 +1901,7 @@ dependencies = [
  "grep-searcher",
  "hex",
  "hmac",
+ "http",
  "ignore",
  "layr-adapter",
  "layr-api",
