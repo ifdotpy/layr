@@ -37,11 +37,16 @@ class RunnerTests(unittest.TestCase):
             with self.subTest(jobs=jobs):
                 result = self.run_fixture({"t01": "echo '1 passed, 0 failed'\nexit 9\n"}, jobs)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn("exit 9", result.stdout)
+                self.assertIn("FAIL t01: exit 9", result.stdout.splitlines())
 
     def test_summary_must_end_with_zero_failures(self):
         result = self.run_fixture({"t01": "echo '1 passed, 0 failed but incomplete'\n"})
         self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_success_without_timings(self):
+        result = self.run_fixture({"t01": "echo '1 passed, 0 failed'\n"})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "1 passed, 0 failed\n")
 
     def test_success_with_timings(self):
         for jobs in JOB_COUNTS:
@@ -62,8 +67,9 @@ class RunnerTests(unittest.TestCase):
             "t03": "# serial\ntest ! -e active || exit 8\necho 'serial: 1 passed, 0 failed'\n",
         }, "2")
         self.assertEqual(result.returncode, 0, result.stdout)
-        lines = result.stdout.splitlines()
-        self.assertEqual([line.split(':')[0] for line in lines], ["first", "second", "serial"])
+        self.assertEqual(result.stdout.splitlines(), [
+            "first: 1 passed, 0 failed", "second: 1 passed, 0 failed", "serial: 1 passed, 0 failed",
+        ])
 
     def test_invalid_job_counts_fail(self):
         for jobs in ("0", "-1", "abc", "1+1"):

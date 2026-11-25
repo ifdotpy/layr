@@ -38,6 +38,10 @@ cd $P/main
 # Native-only states use export without importing objects or changing the working content.
 first=$(l rev-parse head)
 no "a legacy init makes no object store" test -e "$O"
+out=$(l objects stat --json 2>&1); rc=$?
+eq "stat fails when the object store is absent" 1 "$rc"
+has "stat identifies the absent store" "no object store" "$out"
+no "stat leaves the object store absent" test -e "$O"
 no "an unknown tree without an object store is refused" l objects checkout "$(printf 'ab%.0s' $(seq 32))" "$T/native-unknown-tree"
 ok "checkout of a native state by full id" l objects checkout "$first" "$T/native"
 eq "native checkout file content" "$(cat notes.txt)" "$(cat "$T/native/notes.txt" 2>/dev/null)"
@@ -76,8 +80,14 @@ no "native checkout refuses a file destination" l objects checkout head "$T/nati
 eq "native checkout leaves a file destination intact" keep-file "$(cat "$T/native-file")"
 no "native checkouts still make no object store" test -e "$O"
 # An initialized object store can also lack a mapping for this native state.
-l objects stat --json >/dev/null
+ok "repack creates an empty object store" l objects repack --json
 before=$(l objects stat --json)
+# Stores from before prune leases have no lock file. A stale writer can leave temporary files.
+rm "$O/prune.lock"
+printf partial > "$O/tmp/999999999-0"
+eq "stat can read an empty store without a prune lease" "$before" "$(l objects stat --json)"
+no "stat creates no prune lease" test -e "$O/prune.lock"
+ok "stat leaves orphan temporary files alone" test -f "$O/tmp/999999999-0"
 ok "native checkout with an existing object store" l objects checkout head "$T/native-existing-store"
 eq "native checkout does not import objects or mappings" "$before" "$(l objects stat --json)"
 eq "native checkout leaves the line clean" "" "$(l status --short)"

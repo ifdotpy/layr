@@ -169,7 +169,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # Only to give a read 404 back to its caller after the client looked at its body (store_remote/gateway.rs).
 http = "1"
 serde_yaml = "0.9"
-layr-hashers = { path = "crates/layr-hashers" }
+layr-hashers = { path = "crates/layr-hashers", default-features = false, features = ["git", "fast-crypto", "maps-fx"] }
 similar = "2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 tar = "0.4"

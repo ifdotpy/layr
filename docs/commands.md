@@ -63,6 +63,11 @@ snapshot fallback. APFS supplies change counters and clone identities. Set
 - `-h` and `--help` after `--` are no request for help. Also not as the value of a text option
   such as `-m`, `--message` or `--note`. `grep` keeps `-h` for its own use: use `layr grep --help`.
 
+`layr grep -C N` (also `--context=N`) includes up to N lines before and after each match.
+`grep -A`/`-B`, `line list --contains`/`--format`, and
+`merge-base --all`/`--fork-point` now return an unknown-option error. Earlier releases
+accepted these options without applying them.
+
 `init` and `daemon` refuse a store in the root subvolume, because a system snapshot rollback would empty it. `--allow-root-snapshots` or `LAYR_ALLOW_ROOT_SNAPSHOTS=1` overrides the check. See [Btrfs root snapshots](btrfs-root-snapshots.md).
 
 A project made from a git checkout keeps its states as objects (store v2, [objects](objects.md)): `init --from-git` runs `layr migrate --delete-old` for its first states; a running user daemon does not block this first migration. `--snapshots` keeps snapshot storage (v1). `init` makes store v2 only with `--objects`.

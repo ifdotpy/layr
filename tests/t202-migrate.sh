@@ -213,7 +213,18 @@ no "the run marker is gone" test -e $LAYR_ROOT/projects/p/meta/migrate/running
 printf '{"ids":"sha256","v":1}\n' > "$LAYR_ROOT/projects/p/meta/objects/config.json"
 out=$(l migrate --dry-run 2>&1)
 eq "dry run preserves the experimental object marker" 1 "$(json_field v "$(cat "$LAYR_ROOT/projects/p/meta/objects/config.json")")"
-l objects stat --json >/dev/null
+# Stat must leave project cleanup queued as well as avoid upgrading the format itself.
+meta=$LAYR_ROOT/projects/p/meta
+mkdir -p "$meta/object-native"
+pending=$meta/object-native/$(uuid_of "$tagged")
+orphan=$meta/work/stat-test.999999999
+touch "$pending" "$orphan"
+ok "stat reads the experimental object store" l objects stat --json
+eq "stat preserves the experimental object marker" 1 "$(json_field v "$(cat "$meta/objects/config.json")")"
+ok "stat leaves native snapshot retirement queued" test -f "$pending"
+ok "stat leaves abandoned project work alone" test -f "$orphan"
+rm "$pending" "$orphan"
+l objects repack --json >/dev/null
 eq "normal open upgrades the experimental marker to v2" 2 "$(json_field v "$(cat "$LAYR_ROOT/projects/p/meta/objects/config.json")")"
 
 eq "line heads keep their state ids" "$heads_before" "$(DB "SELECT name||' '||head FROM lines WHERE deleted=0 ORDER BY name")"

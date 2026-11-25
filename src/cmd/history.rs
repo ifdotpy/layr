@@ -10,7 +10,7 @@ use crate::ids;
 use crate::model::{Line, StateKind, StateRec};
 use crate::repo::{skip_path, snap, Repo, Snap, Temp};
 use crate::revs;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
@@ -1449,7 +1449,7 @@ pub fn rev_parse(ctx: &Ctx, args: &[String]) -> Result<i32> {
 }
 
 pub fn merge_base(ctx: &Ctx, args: &[String]) -> Result<i32> {
-    let spec = Spec::new().flag("--is-ancestor").flag("-a|--all").flag("--fork-point");
+    let spec = Spec::new().flag("--is-ancestor");
     let a = parse(&spec, args)?;
     let h = here(ctx)?;
     let line = h.line.clone();
@@ -1701,11 +1701,11 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--cached")
         .flag("-z|--null")
         .value("-e")
-        .value("-A|--after-context")
-        .value("-B|--before-context")
         .value("-C|--context")
         .value("-m|--max-count");
     let a = parse(&spec, args)?;
+    let context: usize =
+        a.get("-C").map(|n| n.parse().context("grep --context needs a nonnegative integer")).transpose()?.unwrap_or(0);
     let h = here(ctx)?;
     let repo = &h.repo;
     let line = h.line.clone();
@@ -1818,6 +1818,7 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
         })?;
     }
     let sep = if a.has("-z") { "\0" } else { ":" };
+    let mut printed_context = false;
     // Files of a git state come in batches of blobs, not one process per file.
     let listed = files.clone();
     let mut cache: HashMap<String, Vec<u8>> = HashMap::new();
@@ -1867,7 +1868,7 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
             if re.is_match(l) != a.has("-v") {
                 count += 1;
                 if count <= maxc {
-                    out_lines.push((i + 1, String::from_utf8_lossy(l).into_owned()));
+                    out_lines.push((i, l));
                 }
             }
         }
@@ -1894,12 +1895,29 @@ pub fn grep(ctx: &Ctx, args: &[String]) -> Result<i32> {
         } else if a.has("-c") {
             outln!(ctx, "{shown}{sep}{count}");
         } else {
-            for (n, l) in out_lines {
-                let name = if a.has("-h") { String::new() } else { format!("{shown}{sep}") };
+            let show_line = |i: usize, bytes: &[u8], matched| {
+                let line_sep = if matched || a.has("-z") { sep } else { "-" };
+                let (name, name_sep) = if a.has("-h") { ("", "") } else { (shown.as_str(), line_sep) };
+                let l = String::from_utf8_lossy(bytes);
                 if a.has("-n") {
-                    outln!(ctx, "{name}{n}{sep}{l}");
+                    outln!(ctx, "{name}{name_sep}{}{line_sep}{l}", i + 1);
                 } else {
-                    outln!(ctx, "{name}{l}");
+                    outln!(ctx, "{name}{name_sep}{l}");
+                }
+            };
+            if context == 0 {
+                for (i, l) in out_lines {
+                    show_line(i, l, true);
+                }
+            } else {
+                let mut next = None;
+                for (i, l, matched) in grep_context(&data, out_lines.into_iter().map(|(i, _)| i), context) {
+                    if printed_context && next != Some(i) {
+                        outln!(ctx, "--");
+                    }
+                    show_line(i, l, matched);
+                    printed_context = true;
+                    next = Some(i + 1);
                 }
             }
         }
@@ -2001,6 +2019,24 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ));
     }
     Ok(0)
+}
+
+/// Include lines within `context` of the selected matches, in order and without duplicates.
+fn grep_context(
+    data: &[u8],
+    selected: impl Iterator<Item = usize>,
+    context: usize,
+) -> impl Iterator<Item = (usize, &[u8], bool)> {
+    let mut selected = selected.peekable();
+    let mut after_end = 0;
+    grep_lines(data).filter_map(move |(i, line)| {
+        let matched = selected.next_if_eq(&i).is_some();
+        if matched {
+            after_end = i.saturating_add(context).saturating_add(1);
+        }
+        let before = selected.peek().is_some_and(|next| next - i <= context);
+        (i < after_end || before).then_some((i, line, matched))
+    })
 }
 
 /// Preserve grep's empty-file segment while omitting a final empty newline segment.

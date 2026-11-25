@@ -19,6 +19,10 @@ const USAGE: &str = "usage: layr objects import <rev> [--cold] [--full] [--paren
        layr objects checkout <tree or rev> <folder>
 Experimental: a content-addressed store of trees, blobs, deltas and chunks (docs/objects.md).";
 
+pub(super) fn is_stat(argv: &[String]) -> bool {
+    matches!(argv, [command, subcommand, ..] if command == "objects" && subcommand == "stat")
+}
+
 pub fn objects(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let (sub, rest) = match args.split_first() {
         Some((sub, rest)) => (sub.as_str(), rest),
@@ -306,9 +310,17 @@ fn stat(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if !a.pos.is_empty() {
         return Err(exit(128, USAGE));
     }
-    let h = here(ctx)?;
-    h.repo.can_read(ctx)?;
-    let s = open(&h)?.stat()?;
+    let loc = ctx.locate()?;
+    let project = crate::store::Project::open_records(&ctx.store, &loc.project)?;
+    let repo = crate::repo::Repo::from_project(ctx, project)?;
+    if let Some(line) = &loc.line {
+        repo.line(line)?;
+    }
+    let root = crate::objstore::dir(&repo.p);
+    if !root.join("config.json").try_exists()? {
+        return Err(exit(1, format!("no object store at {}", root.display())));
+    }
+    let s = Store::stat_existing(&root, layr_objects::Keying::Plain)?;
     if a.has("--json") {
         outln!(
             ctx,

@@ -64,10 +64,13 @@ cache. A moved link keeps its tree.
 - A program that had its current folder or an open file in a mount that went away (a crash, not
   an upgrade) gets errors from it: start the program again, or `cd` into the folder again.
 
+`layr line show <line> --none` hides a fast line. On Linux, the service remounts it at a hidden
+path and keeps its changes in the journal. On macOS, the service unmounts it and retains
+the upper folder with its changes. Run the command from outside the line.
+
 ## Limits
 
 - No nested mounts or btrfs subvolumes and no APFS layers inside the folder (caches use links).
-- `layr line show --none` (no folder) is for virtual lines only.
 - macOS: FSKit has no `clonefile` inside the mount (tools/layrfs/README.md, Known limits).
 - macOS: FSKit does not mount on a disk image volume ("Unable to invoke task"), so a store on
   such a volume has no fast lines. The system volume works. Other external volumes: not tested.

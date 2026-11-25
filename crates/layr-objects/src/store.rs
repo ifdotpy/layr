@@ -269,7 +269,8 @@ pub struct Store {
     root: PathBuf,
     // Shared for this handle's lifetime: imports and their temporary wire objects remain
     // protected until their consumer finishes. Pruning opens an exclusive lease instead.
-    prune_lease: File,
+    // A read-only stat can inspect a store that predates leases.
+    prune_lease: Option<File>,
     keying: Keying,
     pub options: Options,
     pub added: Added,
@@ -311,6 +312,8 @@ fn upgrade_config(root: &Path, config: &str) -> Result<()> {
     result
 }
 
+const PRUNE_LOCK: &str = "prune.lock";
+
 impl Store {
     /// Open the store at `root`, made if absent. The id hash of an existing store must match.
     pub fn open(root: &Path, keying: Keying) -> Result<Store> {
@@ -344,14 +347,36 @@ impl Store {
         remove_orphans(&root.join("tmp"));
         let lease = Self::prune_lease(root)?;
         rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockShared)?;
-        Self::load(root, keying, lease)
+        Self::load(root, keying, Some(lease))
     }
 
     /// Open an existing store without initialization, cleanup, or a config upgrade.
     pub fn open_existing(root: &Path, keying: Keying) -> Result<Store> {
-        let lease = Self::prune_lease(root)?;
+        Self::open_existing_shared(root, keying, Self::prune_lease(root)?)
+    }
+
+    /// Count an existing store without initializing any files, even if it predates prune leases.
+    pub fn stat_existing(root: &Path, keying: Keying) -> Result<Stat> {
+        let path = root.join(PRUNE_LOCK);
+        let open_lease = || match File::open(&path) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+        let lease = if let Some(lease) = open_lease()? {
+            lease
+        } else {
+            let stat = Self::open_leased(root, keying.clone(), None).and_then(|store| store.stat());
+            // Maintenance may create the first lease and prune during the scan.
+            let Some(lease) = open_lease()? else { return stat };
+            lease
+        };
+        Self::open_existing_shared(root, keying, lease)?.stat()
+    }
+
+    fn open_existing_shared(root: &Path, keying: Keying, lease: File) -> Result<Store> {
         rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockShared)?;
-        Self::open_leased(root, keying, lease)
+        Self::open_leased(root, keying, Some(lease))
     }
 
     /// `open_existing` without the shared prune lease for the handle's lifetime: a long-lived
@@ -359,7 +384,7 @@ impl Store {
     /// between them. It reads only objects of states that the project keeps.
     pub fn open_existing_unleased(root: &Path, keying: Keying) -> Result<Store> {
         let lease = Self::prune_lease(root)?;
-        Self::open_leased(root, keying, lease)
+        Self::open_leased(root, keying, Some(lease))
     }
 
     /// A shared prune lease until the returned file is dropped (`open_existing_unleased`).
@@ -369,7 +394,7 @@ impl Store {
         Ok(lease)
     }
 
-    fn open_leased(root: &Path, keying: Keying, lease: File) -> Result<Store> {
+    fn open_leased(root: &Path, keying: Keying, lease: Option<File>) -> Result<Store> {
         let config = fs::read_to_string(root.join("config.json"))?;
         let current = format!("{{\"ids\":\"{}\",\"v\":{FORMAT_VERSION}}}\n", keying.name());
         let legacy = format!("{{\"ids\":\"{}\",\"v\":1}}\n", keying.name());
@@ -382,7 +407,7 @@ impl Store {
         Self::load(root, keying, lease)
     }
 
-    fn load(root: &Path, keying: Keying, prune_lease: File) -> Result<Store> {
+    fn load(root: &Path, keying: Keying, prune_lease: Option<File>) -> Result<Store> {
         let store = Store {
             root: root.to_path_buf(),
             prune_lease,
@@ -492,7 +517,10 @@ impl Store {
                     let data = match File::open(&data_path) {
                         Ok(f) => f,
                         // A reblock removes the index first, then the data.
-                        Err(e) if e.kind() == io::ErrorKind::NotFound && !self.root.join("packs").join(format!("{name}.idx")).exists() => {
+                        Err(e)
+                            if e.kind() == io::ErrorKind::NotFound
+                                && !self.root.join("packs").join(format!("{name}.idx")).exists() =>
+                        {
                             continue
                         }
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -1921,9 +1949,8 @@ mod tests {
         // A blob that another index names (the git ids of a project) stays without a state.
         write("c", &[("git", b"read by git only")], None);
         let git = Keying::Plain.id(Kind::Blob, b"read by git only");
-        let plan = store
-            .plan_maintenance_keeping(&["a".to_string()].into(), &[git].into(), &[], MaintenanceLimit::UNLIMITED)
-            .unwrap();
+        let plan =
+            store.plan_maintenance_keeping(&["a".to_string()].into(), &[git].into(), &[], MaintenanceLimit::UNLIMITED).unwrap();
         store.prune_planned(&plan).unwrap();
         assert_eq!(plan.prune.states, 1, "the record of c goes");
         assert_eq!(store.read_blob(&git).unwrap(), b"read by git only", "the named blob stays");

@@ -100,7 +100,7 @@ enum PackingScope {
 
 impl Store {
     pub(super) fn prune_lease(root: &Path) -> Result<File> {
-        let path = root.join("prune.lock");
+        let path = root.join(PRUNE_LOCK);
         match File::open(&path) {
             Ok(file) => Ok(file),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -120,7 +120,7 @@ impl Store {
     pub fn try_open_for_prune(root: &Path, keying: Keying) -> Result<Option<Store>> {
         let lease = Self::prune_lease(root)?;
         match rustix::fs::flock(&lease, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => Ok(Some(Self::open_leased(root, keying, lease)?)),
+            Ok(()) => Ok(Some(Self::open_leased(root, keying, Some(lease))?)),
             Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -129,7 +129,8 @@ impl Store {
     /// Readers/writers can resume before the caller releases its project lock. The shared
     /// lease continues to protect the repack's inputs against another pruning process.
     pub fn finish_prune(&self) -> Result<()> {
-        rustix::fs::flock(&self.prune_lease, rustix::fs::FlockOperation::LockShared)?;
+        let lease = self.prune_lease.as_ref().context("the store has no prune lease")?;
+        rustix::fs::flock(lease, rustix::fs::FlockOperation::LockShared)?;
         Ok(())
     }
 

@@ -10,11 +10,12 @@ git asks the view's change list through its fsmonitor hook. Then only content se
 slower than on Btrfs (3.6 times on the Linux kernel), and first writes of many small files
 (about 0.6 ms more per file). Builds are not slower when `target/` stays a native folder.
 
-The view is `layr fs view` in a layr built with the cargo feature `layrfs-fuse` (Linux). It is
-not connected to `layr line new` yet. `tools/layrfs-fuse` holds the benchmark scripts and their
-helpers.
+These measurements use the standalone `layr fs view` prototype in a Layr build with the
+Linux Cargo feature `layrfs-fuse`. The prototype used one server process per line and ran
+through the scripts in `tools/layrfs-fuse`. For the current service and `layr line new --fast`,
+see [Fast lines](fast-lines.md).
 
-## Design
+## Prototype design
 
 One server process per line, run by the service user `layr` (not root):
 

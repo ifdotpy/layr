@@ -366,8 +366,6 @@ fn line_command(ctx: &Ctx, args: &[String], sub: &str) -> Result<i32> {
         .flag("--fast")
         .flag("--classic")
         .flag("--json")
-        .optional("--format")
-        .value("--contains")
         .flag("-q|--quiet");
     let mut a = parse(&spec, args)?;
     let delete = a.has("-d") || a.has("-D");

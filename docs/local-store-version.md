@@ -62,7 +62,7 @@ A malformed or unreadable marker returns status 128.
 An unmarked root reports the marker write that the next open makes:
 
 ```json
-{"metadataOnly":true,"fromFormat":0,"toFormat":1}
+{"metadataOnly":true,"fromFormat":0,"toFormat":2}
 ```
 
 An `upgradable` root reports `{"metadataOnly":true,"fromFormat":1,"toFormat":2}`.

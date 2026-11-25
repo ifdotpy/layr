@@ -233,8 +233,8 @@ pub fn run_as(argv: Vec<String>, caller: Caller, cwd: PathBuf, env: HashMap<Stri
             }
         }
     };
-    // The free step: after the commit and the store lock (docs/ownership.md).
-    {
+    // The free step runs after releasing the store lock. Object stats leave maintenance queued.
+    if !super::objects::is_stat(&argv) {
         let _t = crate::trace::span("free finish");
         crate::free::finish(&ctx);
     }

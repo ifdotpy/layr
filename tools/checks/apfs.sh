@@ -15,6 +15,7 @@ assert p.get("FilesystemType")=="apfs" and p.get("MountPoint")==sys.argv[1], p
 ' "$volume"
     test -w "$volume"
 done
+LAYR_TEST_BASH=/bin/bash python3 tools/checks/test_run.py
 python3 tests/test_run_harness.py
 cargo build --locked --offline
 # The sandbox refuses setuid ps, which the reused-pid tests need, and a nested sandbox-exec. It also refuses

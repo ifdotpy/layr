@@ -442,6 +442,8 @@ layr objects checkout <tree or rev> <folder>
 - `verify` imports, checks out the tree with its times into the project's work folder, compares
   every entry, byte and time with the state, and removes the copy. Exit 1 on a difference.
 - `repack` evicts hot blobs outside the hot set and packs loose objects.
+- `stat` reports the size and contents of an existing store without changing it. A project
+  without an object store reports `no object store` and exits with status 1.
 - `checkout` makes a folder with the times of the state. It needs the `export` right and the
   secret check of `layr export`. On a root service every write of the checkout runs with the
   caller's file identity (`privs::CallerFs`: file system uid, gid and groups, one step at a time on
