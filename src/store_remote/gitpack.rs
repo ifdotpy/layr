@@ -33,8 +33,26 @@ struct CommitList {
     commits: Vec<String>,
 }
 
-fn decode(identity: &str, body: &[u8]) -> Result<CommitList> {
-    let list: CommitList = serde_json::from_slice(&keys::decrypt(identity, body)?).context("invalid Git pack commit list")?;
+/// `git/` objects stay in the root namespace through key epochs, so a pack written before the last rotation is
+/// encrypted to an older epoch: try the current identity, then the older ones. A rotation on 2026-11-24 made
+/// every fetch of project layr fail with "No matching keys found".
+fn decrypt(backend: &Backend, identity: &str, body: &[u8]) -> Result<Vec<u8>> {
+    let first = match keys::decrypt(identity, body) {
+        Ok(plain) => return Ok(plain),
+        Err(e) => e,
+    };
+    if let Backend::Epoch(epoch) = backend {
+        for (_, old) in epoch.history.iter().rev() {
+            if let Ok(plain) = keys::decrypt(old, body) {
+                return Ok(plain);
+            }
+        }
+    }
+    Err(first)
+}
+
+fn decode(backend: &Backend, identity: &str, body: &[u8]) -> Result<CommitList> {
+    let list: CommitList = serde_json::from_slice(&decrypt(backend, identity, body)?).context("invalid Git pack commit list")?;
     if list.format != 1 {
         bail!("unsupported Git pack format {}", list.format);
     }
@@ -55,7 +73,7 @@ fn visit_lists(backend: &Backend, identity: &str, mut visit: impl FnMut(&str, Co
     let mut consume = |name: &str, body: ObjectRead| {
         let stem = name.strip_suffix(COMMITS).context("invalid Git pack commit list name")?;
         let body = body?.with_context(|| format!("{name} disappeared"))?;
-        visit(stem, decode(identity, &body)?)
+        visit(stem, decode(backend, identity, &body)?)
     };
     let manifests = listing.into_iter().filter(|object| is_commit_list(&object.key));
     let Some(ceiling) = backend.read_limit().map(|limit| limit as u64) else {
@@ -180,7 +198,7 @@ pub(super) fn fetch(store: &Store, local: &Replica<'_>, identity: &str) -> Resul
         }
         let pack_key = format!("{stem}{PACK}");
         let body = store.backend.get(&pack_key)?.with_context(|| format!("store remote lacks {pack_key}"))?;
-        let pack = keys::decrypt(identity, &body)?;
+        let pack = decrypt(&store.backend, identity, &body)?;
         let name = stem.strip_prefix("git/").unwrap_or(stem);
         if hex::encode(ContentAddress::digest(&pack)) != name {
             bail!("Git pack {pack_key} does not match its name");
