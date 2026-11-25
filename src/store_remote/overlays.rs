@@ -433,232 +433,250 @@ pub(super) fn push(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report
         // and the sweep run under the lock of the remote folder, so `line new` and `save --overlays` do not wait.
         // A key change deletes the old epoch: the kept caches come here first, before the lock (`restore_kept`).
         let regenerable = repo.regenerable_overlay(&name)?;
-        let manager = match authorities.get(&name) {
-            Some(authority) => authority.machines.contains(&store.machine),
-            None => crate::overlay_managers::of(repo, &name)?.machines.contains(&store.machine),
-        };
-        let kept_old = match remote.get(&name) {
-            Some(old)
-                if regenerable
-                    && manager
-                    && rotates(&orepo, previous_key(repo, &orepo, Some(old), &descriptor.recipient, &trusted)?.as_ref())? =>
-            {
-                Some(restore_kept(store, repo, &orepo, &name, old)?)
-            }
-            _ => None,
-        };
-        let lock = orepo.p.lock_maintenance()?;
-        let hidden = repo.need_overlay(&name)?.hidden;
-        if !authorities.contains_key(&name) {
-            authorities.insert(name.clone(), crate::overlay_managers::of(repo, &name)?);
-        }
-        let authority = authorities.get(&name).context("overlay has no creator authority")?;
-        let overlay_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
-        authority.validate(&overlay_lines, &orepo.p.id, &trusted)?;
-        let readers = key_readers(&orepo);
-        let previous = previous_key(repo, &orepo, remote.get(&name), &descriptor.recipient, &trusted)?;
-        let revocation = orepo.p.db.overlay_config("overlay.revocation")?.and_then(|value| value.as_str().map(str::to_owned));
-        let access_mode = super::epochs::overlay_mode(&orepo)?;
-        if hidden && access_mode != layr_store::epochs::Mode::Private {
-            bail!("hidden overlays must remain private");
-        }
-        let rotate = previous.as_ref().is_none_or(|old| rotation_due(&old.key, &readers, revocation.as_deref(), access_mode));
-        let reader_change = previous.as_ref().is_none_or(|old| old.key.readers != readers);
-        if (rotate || reader_change) && !authority.machines.contains(&store.machine) {
-            report
-                .omitted
-                .push(format!("overlay {name}: key change requires a key manager; signer {} is not a manager", store.machine));
-            continue;
-        }
-        // A key change starts an epoch that has only the states present here, and the push deletes the trees of the
-        // older epoch: each kept cache of the old epoch must be here now (`restore_kept` before the lock). gc can evict
-        // one meanwhile, and the key can change after the check: the push stops then, and the key stays.
-        if rotate && regenerable && manager && remote.contains_key(&name) {
-            let Some(kept_old) = &kept_old else {
-                bail!("overlay {name}: the key changed while the push ran; run the push again");
+        // A cache is regenerable: a failure of its push (a key change whose kept states the store cannot give, a
+        // refused upload) must not fail the push of the project and of the other overlays. The project records went
+        // before (`writer::push`), but the CI jobs stopped at the exit code: their check results waited, the merge job
+        // merged nothing, and a runner reformatted its disk after three such runs (2026-11-25). A key change publishes its
+        // key last, so a reader that left gets no new key, and the next push tries the overlay again.
+        let mut one = || -> Result<()> {
+            let manager = match authorities.get(&name) {
+                Some(authority) => authority.machines.contains(&store.machine),
+                None => crate::overlay_managers::of(repo, &name)?.machines.contains(&store.machine),
             };
-            if let Some(gone) = kept_old.iter().find(|id| !orepo.p.has_state(id)) {
-                bail!(
-                    "overlay {name}: kept cache state {} went from this machine before the key change; run the push again",
-                    crate::ids::short(gone)
-                );
-            }
-        }
-        let published = if rotate {
-            let identity = keys::generate_identity();
-            let epoch = crate::ids::new_id();
-            let path = local_key(store, &orepo.p.id, &epoch);
-            std::fs::create_dir_all(path.parent().context("overlay key parent")?)?;
-            crate::fsutil::atomic_write(&path, &keys::machine_slot(&identity, &store.key.verifying_key())?, 0o600)?;
-            let key = Key {
-                hidden,
-                access_mode,
-                overlay: orepo.p.id.clone(),
-                name: name.clone(),
-                epoch,
-                parent: repo.p.id.clone(),
-                store: descriptor.recipient.clone(),
-                recipient: keys::recipient_of(&identity)?,
-                readers: readers.clone(),
-                revocation,
+            let kept_old = match remote.get(&name) {
+                Some(old)
+                    if regenerable
+                        && manager
+                        && rotates(&orepo, previous_key(repo, &orepo, Some(old), &descriptor.recipient, &trusted)?.as_ref())? =>
+                {
+                    Some(restore_kept(store, repo, &orepo, &name, old)?)
+                }
+                _ => None,
             };
-            let mut record = crate::model::DraftRecord::new("overlay.key");
-            record.data = serde_json::to_value(&key)?;
-            let record = lock.append(record, &ctx.actor())?;
-            let line = orepo.p.db.record_line(&record.machine, record.seq)?.context("overlay key record missing")?;
-            Published { key, record, line }
-        } else {
-            let mut published = previous.context("overlay has no key record")?;
-            // Adding a reader does not change the recipient, but its signed reader set must travel.
-            if published.key.readers != readers || published.key.hidden != hidden || published.key.access_mode != access_mode {
-                published.key.readers = readers.clone();
-                published.key.hidden = hidden;
-                published.key.access_mode = access_mode;
-                let mut record = crate::model::DraftRecord::new("overlay.key");
-                record.data = serde_json::to_value(&published.key)?;
-                published.record = lock.append(record, &ctx.actor())?;
-                published.line = orepo
-                    .p
-                    .db
-                    .record_line(&published.record.machine, published.record.seq)?
-                    .context("overlay key record missing")?;
+            let lock = orepo.p.lock_maintenance()?;
+            let hidden = repo.need_overlay(&name)?.hidden;
+            if !authorities.contains_key(&name) {
+                authorities.insert(name.clone(), crate::overlay_managers::of(repo, &name)?);
             }
-            published
-        };
-        drop(lock);
-        let identity = layer_identity(store, &orepo.p.id, &published)?;
-        let scoped = layer(store, &published, identity.clone(), repo.chunked_overlay(&name)?)?;
-        if let Some(identity) = &identity {
-            // A slot never changes within an epoch, and a conditional write of one that is there still costs a
-            // request: one listing finds the slots that exist, and only the missing ones are written. A listing
-            // that fails writes them all, as before.
-            let present: BTreeSet<String> =
-                scoped.backend.list("slots/").map(|objects| objects.into_iter().map(|o| o.key).collect()).unwrap_or_default();
-            let put_slot = |key: String, body: &dyn Fn() -> Result<Vec<u8>>| -> Result<()> {
-                if !present.contains(&key) {
-                    scoped.backend.put_new(&key, body()?)?;
-                }
-                Ok(())
-            };
-            for principal in readers.keys() {
-                if let Some(machine) = principal.strip_prefix("machine:") {
-                    if let Some(public) = trusted.get(machine) {
-                        put_slot(format!("slots/machine-{machine}.age"), &|| keys::machine_slot(identity, public))?;
-                    }
-                } else if let Some((login, recipient)) = principal.strip_prefix("person:").and_then(|s| s.split_once('=')) {
-                    put_slot(format!("slots/{}", layr_store::person::slot_name(login, recipient)?), &|| {
-                        keys::seal_slot(identity, recipient)
-                    })?;
-                }
+            let authority = authorities.get(&name).context("overlay has no creator authority")?;
+            let overlay_lines: Vec<_> = orepo.p.export_jsonl()?.lines().map(str::to_owned).collect();
+            authority.validate(&overlay_lines, &orepo.p.id, &trusted)?;
+            let readers = key_readers(&orepo);
+            let previous = previous_key(repo, &orepo, remote.get(&name), &descriptor.recipient, &trusted)?;
+            let revocation = orepo.p.db.overlay_config("overlay.revocation")?.and_then(|value| value.as_str().map(str::to_owned));
+            let access_mode = super::epochs::overlay_mode(&orepo)?;
+            if hidden && access_mode != layr_store::epochs::Mode::Private {
+                bail!("hidden overlays must remain private");
             }
-            if let Some(recipient) = &paper_recipient {
-                put_slot("slots/paper.age".into(), &|| keys::seal_slot(identity, recipient))?;
-            } else if !repo.shares_with_machines(&name)? {
-                // An overlay that the trusted machines share is regenerable: the paper key need not open it.
-                report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
+            let rotate = previous.as_ref().is_none_or(|old| rotation_due(&old.key, &readers, revocation.as_deref(), access_mode));
+            let reader_change = previous.as_ref().is_none_or(|old| old.key.readers != readers);
+            if (rotate || reader_change) && !authority.machines.contains(&store.machine) {
+                report.omitted.push(format!(
+                    "overlay {name}: key change requires a key manager; signer {} is not a manager",
+                    store.machine
+                ));
+                return Ok(());
             }
-        }
-        let push_lock = writer::push_folder_lock(&scoped)?;
-        // Test only (tests/t190-overlay-push-lock.sh): a slow upload of the overlay.
-        if let Some(ms) = std::env::var("LAYR_TEST_OVERLAY_PUSH_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-        }
-        let selected = layer_selection(repo, &orepo, opts)?;
-        let pushed = writer::push_locked(&scoped, ctx, &orepo, &selected)?;
-        let moved = pushed.records > 0 || pushed.states > 0;
-        merge(report, pushed, &name, "push");
-        // The push record names the epoch and the store, so eviction counts a copy only where readers find it.
-        if let Some((_, transfer)) = report.overlay_transfers.last_mut().filter(|(n, _)| *n == name) {
-            transfer.epoch = Some(published.key.epoch.clone());
-            transfer.store = Some(descriptor.recipient.clone());
-        }
-        // The push makes the old caches of the overlay dead on the remote too: delete them now.
-        // The sweep never fails the push: what it cannot delete now waits for a later pass. A pass reads every kept
-        // tree from the remote, so a push that sent nothing skips it while the kept set is the one of the last pass of
-        // this machine and that pass is younger than the chunk grace (`sweep_due`).
-        if moved && std::env::var_os("LAYR_TRACE").is_some() {
-            eprintln!("trace sweep of {name} is due: the push sent records or states");
-        }
-        if !opts.no_cache_sweep && repo.limited_history(&name)? && (moved || sweep_due(repo, &name, &scoped)?) {
-            match sweep_layer(repo, &name, &orepo, &scoped, false) {
-                Ok(swept) => {
-                    if swept.refused.is_none() {
-                        note_sweep(repo, &name, &scoped);
-                    }
-                    if !swept.trees.is_empty() || !swept.packs.is_empty() {
-                        eprintln!(
-                            "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes), {} dead chunk(s) in {} pack object(s) ({} bytes) in the remote",
-                            swept.trees.len(),
-                            swept.parts.len(),
-                            swept.bytes,
-                            swept.chunks,
-                            swept.packs.len(),
-                            swept.chunk_bytes
-                        );
-                    }
-                    if let Some(refused) = &swept.refused {
-                        eprintln!("warning: overlay {name}: the remote refused a delete of a dead cache state ({refused}); the rest stays for a later pass");
-                    }
-                }
-                Err(e) => eprintln!(
-                    "warning: overlay {name}: the sweep of dead cache states stopped ({e:#}); it runs again at the next push"
-                ),
-            }
-        }
-        drop(push_lock);
-        if let Some(identity) = &identity {
-            if access_mode == layr_store::epochs::Mode::Service {
-                let recipient =
-                    store.service_recipient(repo)?.context("service overlay requires a configured service recipient")?;
-                scoped.backend.put_new("slots/service.age", keys::seal_slot(identity, &recipient)?)?;
-            }
-            if access_mode == layr_store::epochs::Mode::Public {
-                let descriptor = scoped.descriptor()?;
-                let manifest = if let Some(bytes) = scoped.backend.get("public.json")? {
-                    layr_store::public::Manifest::parse(&bytes, &descriptor)?
-                } else {
-                    let manifest = layr_store::public::Manifest::new(
-                        &descriptor,
-                        keys::generate_identity(),
-                        store.machine.clone(),
-                        &store.key,
-                    )?;
-                    scoped.backend.put_new("public.json", serde_json::to_vec(&manifest)?)?;
-                    manifest
+            // A key change starts an epoch that has only the states present here, and the push deletes the trees of the
+            // older epoch: each kept cache of the old epoch must be here now (`restore_kept` before the lock). gc can evict
+            // one meanwhile, and the key can change after the check: the push stops then, and the key stays.
+            if rotate && regenerable && manager && remote.contains_key(&name) {
+                let Some(kept_old) = &kept_old else {
+                    bail!("overlay {name}: the key changed while the push ran; run the push again");
                 };
-                scoped
-                    .backend
-                    .put_new("slots/public.age", keys::seal_slot(identity, &keys::recipient_of(&manifest.identity)?)?)?;
+                if let Some(gone) = kept_old.iter().find(|id| !orepo.p.has_state(id)) {
+                    bail!(
+                        "overlay {name}: kept cache state {} went from this machine before the key change; run the push again",
+                        crate::ids::short(gone)
+                    );
+                }
             }
-        }
-        // Publish the key after its epoch is complete. It contains the exact signed record, never an identity.
-        let body = if hidden {
-            keys::encrypt(&published.key.recipient, published.line.as_bytes())?
-        } else {
-            published.line.as_bytes().to_vec()
-        };
-        store.backend.put_new(&published.object(), body)?;
-        // The key of this epoch is published: the caches of the older epochs have no reader now.
-        if repo.regenerable_overlay(&name)? {
-            // The sweep never fails the push: what it cannot delete now waits for a later pass.
-            match sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false) {
-                Ok(swept) => {
-                    if !swept.trees.is_empty() || !swept.parts.is_empty() || !swept.packs.is_empty() {
-                        eprintln!(
-                            "layr: overlay {name}: deleted {} cache state(s), {} part(s) and {} chunk object(s) of older key epochs in the remote",
-                            swept.trees.len(),
-                            swept.parts.len(),
-                            swept.packs.len()
-                        );
+            let published = if rotate {
+                let identity = keys::generate_identity();
+                let epoch = crate::ids::new_id();
+                let path = local_key(store, &orepo.p.id, &epoch);
+                std::fs::create_dir_all(path.parent().context("overlay key parent")?)?;
+                crate::fsutil::atomic_write(&path, &keys::machine_slot(&identity, &store.key.verifying_key())?, 0o600)?;
+                let key = Key {
+                    hidden,
+                    access_mode,
+                    overlay: orepo.p.id.clone(),
+                    name: name.clone(),
+                    epoch,
+                    parent: repo.p.id.clone(),
+                    store: descriptor.recipient.clone(),
+                    recipient: keys::recipient_of(&identity)?,
+                    readers: readers.clone(),
+                    revocation,
+                };
+                let mut record = crate::model::DraftRecord::new("overlay.key");
+                record.data = serde_json::to_value(&key)?;
+                let record = lock.append(record, &ctx.actor())?;
+                let line = orepo.p.db.record_line(&record.machine, record.seq)?.context("overlay key record missing")?;
+                Published { key, record, line }
+            } else {
+                let mut published = previous.context("overlay has no key record")?;
+                // Adding a reader does not change the recipient, but its signed reader set must travel.
+                if published.key.readers != readers || published.key.hidden != hidden || published.key.access_mode != access_mode
+                {
+                    published.key.readers = readers.clone();
+                    published.key.hidden = hidden;
+                    published.key.access_mode = access_mode;
+                    let mut record = crate::model::DraftRecord::new("overlay.key");
+                    record.data = serde_json::to_value(&published.key)?;
+                    published.record = lock.append(record, &ctx.actor())?;
+                    published.line = orepo
+                        .p
+                        .db
+                        .record_line(&published.record.machine, published.record.seq)?
+                        .context("overlay key record missing")?;
+                }
+                published
+            };
+            drop(lock);
+            let identity = layer_identity(store, &orepo.p.id, &published)?;
+            let scoped = layer(store, &published, identity.clone(), repo.chunked_overlay(&name)?)?;
+            if let Some(identity) = &identity {
+                // A slot never changes within an epoch, and a conditional write of one that is there still costs a
+                // request: one listing finds the slots that exist, and only the missing ones are written. A listing
+                // that fails writes them all, as before.
+                let present: BTreeSet<String> =
+                    scoped.backend.list("slots/").map(|objects| objects.into_iter().map(|o| o.key).collect()).unwrap_or_default();
+                let put_slot = |key: String, body: &dyn Fn() -> Result<Vec<u8>>| -> Result<()> {
+                    if !present.contains(&key) {
+                        scoped.backend.put_new(&key, body()?)?;
                     }
-                    if let Some(refused) = &swept.refused {
-                        eprintln!("warning: overlay {name}: the remote refused a delete of the older key epochs ({refused}); the rest stays for a later pass");
+                    Ok(())
+                };
+                for principal in readers.keys() {
+                    if let Some(machine) = principal.strip_prefix("machine:") {
+                        if let Some(public) = trusted.get(machine) {
+                            put_slot(format!("slots/machine-{machine}.age"), &|| keys::machine_slot(identity, public))?;
+                        }
+                    } else if let Some((login, recipient)) = principal.strip_prefix("person:").and_then(|s| s.split_once('=')) {
+                        put_slot(format!("slots/{}", layr_store::person::slot_name(login, recipient)?), &|| {
+                            keys::seal_slot(identity, recipient)
+                        })?;
                     }
                 }
-                Err(e) => eprintln!(
-                    "warning: overlay {name}: the sweep of the older key epochs stopped ({e:#}); it runs again at the next push"
-                ),
+                if let Some(recipient) = &paper_recipient {
+                    put_slot("slots/paper.age".into(), &|| keys::seal_slot(identity, recipient))?;
+                } else if !repo.shares_with_machines(&name)? {
+                    // An overlay that the trusted machines share is regenerable: the paper key need not open it.
+                    report.omitted.push(format!("overlay {name}: no paper slot; run once with LAYR_PAPER_KEY_FILE to add it"));
+                }
             }
+            let push_lock = writer::push_folder_lock(&scoped)?;
+            // Test only (tests/t190-overlay-push-lock.sh): a slow upload of the overlay.
+            if let Some(ms) = std::env::var("LAYR_TEST_OVERLAY_PUSH_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            let selected = layer_selection(repo, &orepo, opts)?;
+            let pushed = writer::push_locked(&scoped, ctx, &orepo, &selected)?;
+            let moved = pushed.records > 0 || pushed.states > 0;
+            merge(report, pushed, &name, "push");
+            // The push record names the epoch and the store, so eviction counts a copy only where readers find it.
+            if let Some((_, transfer)) = report.overlay_transfers.last_mut().filter(|(n, _)| *n == name) {
+                transfer.epoch = Some(published.key.epoch.clone());
+                transfer.store = Some(descriptor.recipient.clone());
+            }
+            // The push makes the old caches of the overlay dead on the remote too: delete them now.
+            // The sweep never fails the push: what it cannot delete now waits for a later pass. A pass reads every kept
+            // tree from the remote, so a push that sent nothing skips it while the kept set is the one of the last pass of
+            // this machine and that pass is younger than the chunk grace (`sweep_due`).
+            if moved && std::env::var_os("LAYR_TRACE").is_some() {
+                eprintln!("trace sweep of {name} is due: the push sent records or states");
+            }
+            if !opts.no_cache_sweep && repo.limited_history(&name)? && (moved || sweep_due(repo, &name, &scoped)?) {
+                match sweep_layer(repo, &name, &orepo, &scoped, false) {
+                    Ok(swept) => {
+                        if swept.refused.is_none() {
+                            note_sweep(repo, &name, &scoped);
+                        }
+                        if !swept.trees.is_empty() || !swept.packs.is_empty() {
+                            eprintln!(
+                                "layr: overlay {name}: deleted {} dead cache state(s) and {} part(s) ({} bytes), {} dead chunk(s) in {} pack object(s) ({} bytes) in the remote",
+                                swept.trees.len(),
+                                swept.parts.len(),
+                                swept.bytes,
+                                swept.chunks,
+                                swept.packs.len(),
+                                swept.chunk_bytes
+                            );
+                        }
+                        if let Some(refused) = &swept.refused {
+                            eprintln!("warning: overlay {name}: the remote refused a delete of a dead cache state ({refused}); the rest stays for a later pass");
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "warning: overlay {name}: the sweep of dead cache states stopped ({e:#}); it runs again at the next push"
+                    ),
+                }
+            }
+            drop(push_lock);
+            if let Some(identity) = &identity {
+                if access_mode == layr_store::epochs::Mode::Service {
+                    let recipient =
+                        store.service_recipient(repo)?.context("service overlay requires a configured service recipient")?;
+                    scoped.backend.put_new("slots/service.age", keys::seal_slot(identity, &recipient)?)?;
+                }
+                if access_mode == layr_store::epochs::Mode::Public {
+                    let descriptor = scoped.descriptor()?;
+                    let manifest = if let Some(bytes) = scoped.backend.get("public.json")? {
+                        layr_store::public::Manifest::parse(&bytes, &descriptor)?
+                    } else {
+                        let manifest = layr_store::public::Manifest::new(
+                            &descriptor,
+                            keys::generate_identity(),
+                            store.machine.clone(),
+                            &store.key,
+                        )?;
+                        scoped.backend.put_new("public.json", serde_json::to_vec(&manifest)?)?;
+                        manifest
+                    };
+                    scoped
+                        .backend
+                        .put_new("slots/public.age", keys::seal_slot(identity, &keys::recipient_of(&manifest.identity)?)?)?;
+                }
+            }
+            // Publish the key after its epoch is complete. It contains the exact signed record, never an identity.
+            let body = if hidden {
+                keys::encrypt(&published.key.recipient, published.line.as_bytes())?
+            } else {
+                published.line.as_bytes().to_vec()
+            };
+            store.backend.put_new(&published.object(), body)?;
+            // The key of this epoch is published: the caches of the older epochs have no reader now.
+            if repo.regenerable_overlay(&name)? {
+                // The sweep never fails the push: what it cannot delete now waits for a later pass.
+                match sweep_old_epochs(store, &orepo.p.id, &published.key.epoch, &listed, false) {
+                    Ok(swept) => {
+                        if !swept.trees.is_empty() || !swept.parts.is_empty() || !swept.packs.is_empty() {
+                            eprintln!(
+                                "layr: overlay {name}: deleted {} cache state(s), {} part(s) and {} chunk object(s) of older key epochs in the remote",
+                                swept.trees.len(),
+                                swept.parts.len(),
+                                swept.packs.len()
+                            );
+                        }
+                        if let Some(refused) = &swept.refused {
+                            eprintln!("warning: overlay {name}: the remote refused a delete of the older key epochs ({refused}); the rest stays for a later pass");
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "warning: overlay {name}: the sweep of the older key epochs stopped ({e:#}); it runs again at the next push"
+                    ),
+                }
+            }
+            Ok(())
+        };
+        match one() {
+            Ok(()) => {}
+            Err(e) if regenerable => {
+                eprintln!("warning: overlay {name}: the push of this cache stopped ({e:#}); the rest of the push goes on, and the next push tries it again");
+                report.omitted.push(format!("overlay {name}: the push stopped: {e:#}"));
+            }
+            Err(e) => return Err(e),
         }
     }
     Ok(())

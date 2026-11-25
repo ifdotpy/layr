@@ -164,4 +164,22 @@ has "B's push changes the key and deletes the old epoch" "of older key epochs" "
 cd "$P/main" || exit 1
 l gc --repair -q >/dev/null 2>&1
 eq "a cache pushed to the epoch that B deleted stays here" 1 "$(present "$c6")"
+
+# A key change whose kept cache the store cannot give any more (its data went from the store) stops the push of that
+# cache only: the push of the project goes on and exits 0, and the key stays (2026-11-25: a CI runner pushed no check
+# result for hours, because a chunk of its target cache was not in the store).
+cd "$P/main" || exit 1
+l gc --repair -q >/dev/null 2>&1
+find "$T/archive/overlays" -path '*/epochs/*' -type f ! -name '*.tree.age' ! -path '*/slots/*' ! -path '*/keys/*' -delete
+l overlay readers "$TG" "machine:$aid" >/dev/null 2>&1
+before=$(epochs)
+echo s9 > s9.txt; l add s9.txt >/dev/null; l save -qm s9
+s9=$(l rev-parse head)
+out=$(l push cloud 2>&1); code=$?
+eq "a push whose cache key change fails exits 0" 0 "$code"
+has "it says that the push of the cache stopped" "the push of this cache stopped" "$out"
+eq "the key stays: no new epoch" "$before" "$(epochs)"
+cd "$B/bl" || exit 1
+bl fetch origin -q >/dev/null 2>&1
+ok "the project state of the push reached the store" bl log -n1 "$s9"
 finish
