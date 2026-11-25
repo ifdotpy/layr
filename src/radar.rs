@@ -1461,6 +1461,15 @@ mod tests {
         }
         let _nested = Nested(nested.clone());
         std::fs::write(nested.join(".gitignore"), "a\n")?;
+        // As in the test above: on btrfs the first read after a write moves the access time, and its
+        // inode item can reach the tree between the two scans (integration on 5d1bf07, 2026-11-23).
+        // Access times ahead of the other times stay on read; the commit puts them in the tree first.
+        let ahead = std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now() + std::time::Duration::from_secs(3600));
+        for path in [&live, &nested] {
+            std::fs::File::open(path)?.set_times(ahead)?;
+        }
+        #[cfg(target_os = "linux")]
+        rustix::fs::syncfs(std::fs::File::open(&live)?)?;
         let ours = || -> Result<Ours> {
             let started = crate::status_cache::clock()? + 2;
             Ok(Ours::new(&live, None, "work".into(), started))

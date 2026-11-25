@@ -937,7 +937,7 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
         _ => {
             return Err(exit(
                 128,
-                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer|merge] [--overlays <a,b>] [--name <machine name>] | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
+                "usage: layr remote add <name> <url> [--mode secret|private|public] [--paper-key-tty | --paper-key-out <path>] | list | self | login <name> | remove <name> | trust <name> <machine> [--public-key <ed25519>] [--expires <time|30m>] [--role reader|writer|merge] [--overlays <a,b>] [--name <machine name>] (any of --expires, --role, --overlays, --name makes a limited trust, role reader by default; a limited machine never becomes full) | untrust <name> <machine> | trust-store <name> --recipient <age1…> | grant <name> --person <login> --recipient <age1…> [--invite-out <path>]",
             ))
         }
     }
@@ -1522,7 +1522,9 @@ mod tests {
 }
 
 /// The limits of `remote trust` (docs/ci-trust.md): `--expires <RFC 3339 time or duration>`, `--role reader|writer|merge`
-/// (reader by default) and `--overlays <name>,<name>`. None without any of them: a full trust without an end.
+/// (reader by default), `--overlays <name>,<name>` and `--name <machine name>`. None without any of them: a full trust
+/// without an end. A name alone makes a reader trust too, and a machine that a full machine limited once never
+/// becomes full (layr_store::trust).
 fn trust_limits(repo: &crate::repo::Repo, a: &crate::args::Parsed, machine: &str) -> Result<Option<serde_json::Value>> {
     if !["--expires", "--role", "--overlays", "--name"].iter().any(|f| a.get(f).is_some()) {
         if repo.p.trust_terms(&[])?.brokers.contains_key(&repo.p.store.machine.id) {

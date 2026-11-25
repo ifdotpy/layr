@@ -11,9 +11,12 @@ is the layr side.
 All of them run without a prompt; `--json` prints one object.
 
 - `layr remote trust <remote> <machine> --public-key <hex> --expires <RFC 3339 time or duration>
-  [--role reader|writer|merge] [--overlays <name>,<name>] [--json]`. Without any of these flags the trust
-  is full and has no end, as before. With one of them the default role is `reader`; `--overlays`
-  names the cache overlays the machine reads (and, as a writer, writes); without it, all of them.
+  [--role reader|writer|merge] [--overlays <name>,<name>] [--name <machine name>] [--json]`. Without any
+  of these flags the trust is full and has no end, as before. With one of them, `--name` too, the
+  default role is `reader`; `--overlays` names the cache overlays the machine reads (and, as a writer,
+  writes); without it, all of them. A later trust of the same machine adds its limits and the narrowest
+  win (rule 5), so a limited machine never becomes full: to get a full machine, trust a new machine with
+  none of these flags and untrust the old one.
 - `layr access grant machine:<broker> trust --max-hours <n> --role reader|writer
   --overlays <name>,<name> [--name-prefix <prefix>] [--json]` lets the broker trust other machines
   within these limits. `layr access revoke machine:<broker> trust` ends it. The broker must be a

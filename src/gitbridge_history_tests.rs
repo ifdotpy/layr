@@ -609,7 +609,18 @@ fn object_history_opens_the_object_store_once_whatever_its_length() -> Result<()
     // The handle lives only while a scope shares it: then pruning can take the store.
     let repo = fixture.repo()?;
     let prunable = || layr_objects::Store::try_open_for_prune(&crate::objstore::dir(&repo.p), layr_objects::Keying::Plain);
-    assert!(prunable()?.is_some(), "no command keeps the shared handle");
+    // A child that another test forks shares the lease descriptor until its exec closes it: the lease
+    // can stay taken for a moment after the handle goes (apfs on 0bdacb5, 2026-11-24). Ask again.
+    let released = || -> Result<bool> {
+        for _ in 0..200 {
+            if prunable()?.is_some() {
+                return Ok(true);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(false)
+    };
+    assert!(released()?, "no command keeps the shared handle");
     let unscoped = crate::objstore::shared(&repo.p)?;
     assert!(!std::sync::Arc::ptr_eq(&unscoped, &crate::objstore::shared(&repo.p)?), "no sharing outside a scope");
     drop(unscoped);
@@ -623,7 +634,7 @@ fn object_history_opens_the_object_store_once_whatever_its_length() -> Result<()
         drop(first);
         assert!(prunable()?.is_none(), "the outer scope still holds the handle");
     }
-    assert!(prunable()?.is_some(), "the last scope lets the handle go");
+    assert!(released()?, "the last scope lets the handle go");
     Ok(())
 }
 
