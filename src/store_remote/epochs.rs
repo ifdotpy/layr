@@ -7,6 +7,7 @@ use crate::{ctx::Ctx, model::Record, oplog, repo::Repo};
 use anyhow::{bail, Context, Result};
 use layr_store::epochs::{Key, Mode};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(serde::Serialize)]
 pub struct ModeChange {
@@ -73,13 +74,68 @@ pub(super) fn resolve(
     open: impl FnMut(&Backend, &Descriptor) -> Result<(String, bool)>,
 ) -> Result<Option<(Backend, Current, bool)>> {
     let chain = publications(root, descriptor)?;
-    resolve_chain(root, descriptor, chain, open)
+    resolve_chain(root, descriptor, chain, open, None)
 }
+
+/// The file beside the store's other local state that names the last epoch check that passed (`Memo`).
+const EPOCH_MEMO: &str = "verified-epoch";
+const EPOCH_MEMO_HEADER: &str = "layr verified epoch 1";
+
+/// The last passed check of the current epoch against both record logs, under a MAC with this machine's key.
+/// Its stamp names the signed epoch chain and every record segment of the root and current epoch (name, time,
+/// size): segments are only added, so a new record, trust or untrust changes the stamp and the check runs again.
+/// Without the memo each connect read both logs whole: a fetch with nothing new sent 40 batch requests and read
+/// 19 more segments (layr, 2026-11-24), and the jobs of one machine connect many times an hour.
+struct Memo<'a> {
+    path: PathBuf,
+    key: &'a ed25519_dalek::SigningKey,
+}
+
+impl Memo<'_> {
+    fn stamp(root: &Backend, scoped: &Backend, chain: &[Published]) -> Result<String> {
+        use layr_hashers::Digest;
+        let mut digest = layr_hashers::ContentAddress::new();
+        for p in chain {
+            digest.update(p.line.trim_end().as_bytes());
+            digest.update(b"\n");
+        }
+        for (name, backend) in [("root", root), ("current", scoped)] {
+            digest.update(format!("{name}\n").as_bytes());
+            for object in backend.list("records/")? {
+                digest.update(format!("{} {} {:?}\n", object.key, object.modified, object.size).as_bytes());
+            }
+        }
+        Ok(hex::encode(digest.finalize()))
+    }
+
+    fn mac(&self, stamp: &str) -> Result<String> {
+        use hmac::Mac;
+        let mut mac = layr_store::keys::domain_mac(&self.key.to_bytes(), EPOCH_MEMO_HEADER)?;
+        mac.update(stamp.as_bytes());
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    }
+
+    fn holds(&self, stamp: &str) -> bool {
+        let text = std::fs::read_to_string(&self.path).unwrap_or_default();
+        text.split_once('\n').is_some_and(|(tag, body)| body == stamp && self.mac(stamp).is_ok_and(|mac| mac == tag))
+    }
+
+    fn save(&self, stamp: &str) {
+        let written = self
+            .mac(stamp)
+            .and_then(|tag| crate::fsutil::atomic_write(&self.path, format!("{tag}\n{stamp}").as_bytes(), 0o600));
+        if let Err(e) = written {
+            eprintln!("warning: {}: {e:#}", self.path.display());
+        }
+    }
+}
+
 fn resolve_chain(
     root: &Backend,
     descriptor: &Descriptor,
     chain: Vec<Published>,
     mut open: impl FnMut(&Backend, &Descriptor) -> Result<(String, bool)>,
+    memo: Option<Memo>,
 ) -> Result<Option<(Backend, Current, bool)>> {
     root.set_epoch(chain.last().map(|p| p.key.epoch.as_str()))?;
     let Some(latest) = chain.last() else { return Ok(None) };
@@ -117,10 +173,33 @@ fn resolve_chain(
     for (backend, _) in &history {
         backend.unlock_reader(&identity)?;
     }
+    let stamp = memo.as_ref().map(|_| Memo::stamp(root, &scoped, &chain)).transpose()?;
+    let checked = memo.as_ref().zip(stamp.as_deref()).is_some_and(|(memo, stamp)| memo.holds(stamp));
+    if !checked {
+        check_logs(root, root_identity, &scoped, &identity, descriptor, &chain, latest)?;
+        if let Some((memo, stamp)) = memo.as_ref().zip(stamp.as_deref()) {
+            memo.save(stamp);
+        }
+    }
+    let backend = Backend::Epoch(Box::new(EpochBackend { root: root.clone(), current: scoped, history }));
+    Ok(Some((backend, Current { key: latest.key.clone(), identity }, public)))
+}
+
+/// The current epoch keeps the whole root log and its root writers, its chain is signed by trusted writers and is in
+/// its encrypted history, and its reader set is the one its key names. Reads both logs whole.
+fn check_logs(
+    root: &Backend,
+    root_identity: &str,
+    scoped: &Backend,
+    identity: &str,
+    descriptor: &Descriptor,
+    chain: &[Published],
+    latest: &Published,
+) -> Result<()> {
     let original = reader::records(root, root_identity, &descriptor.project)?;
     let root_writers = layr_store::public::trusted_writers_checked(&descriptor.project, &original.lines)?;
     root.unlock_reader(&identity)?;
-    let current = reader::records(&scoped, &identity, &descriptor.project)?;
+    let current = reader::records(scoped, identity, &descriptor.project)?;
     if current.lines.is_empty() || !current.gaps.is_empty() {
         bail!("rotation in progress: current epoch record history is incomplete; retry after the writer resumes");
     }
@@ -132,7 +211,7 @@ fn resolve_chain(
     if root_writers.iter().any(|(id, key)| trusted.get(id) != Some(key)) {
         bail!("project epoch changes root writer identity");
     }
-    for p in &chain {
+    for p in chain {
         let signer = trusted.get(&p.record.machine).context("project epoch signer is not a trusted writer")?;
         oplog::verify_line(&p.line, signer)?;
         if !current.lines.contains(&p.line) {
@@ -150,8 +229,7 @@ fn resolve_chain(
     if layr_store::epochs::readers_hash(&readers)? != latest.key.readers_hash {
         bail!("project epoch reader hash differs");
     }
-    let backend = Backend::Epoch(Box::new(EpochBackend { root: root.clone(), current: scoped, history }));
-    Ok(Some((backend, Current { key: latest.key.clone(), identity }, public)))
+    Ok(())
 }
 
 fn opener(store: &Store, backend: &Backend, descriptor: &Descriptor) -> Result<(String, bool)> {
@@ -211,7 +289,13 @@ fn connect_before_pending(store: &mut Store, pending: Option<&Published>) -> Res
             bail!("project epoch changed while a rotation was pending");
         }
     }
-    if let Some((backend, current, public)) = resolve_chain(&store.backend, &root, chain, |b, d| opener(store, b, d))? {
+    if let Some((backend, current, public)) = resolve_chain(
+        &store.backend,
+        &root,
+        chain,
+        |b, d| opener(store, b, d),
+        Some(Memo { path: store.dir.join(EPOCH_MEMO), key: &store.key }),
+    )? {
         store.backend = backend;
         store.epoch = Some(current);
         store.epoch_public = public;

@@ -99,5 +99,15 @@ no "the untrusted machine has no slot" grep -q "machine-$w_id" <<<"$(epoch_slots
 has "a trusted machine keeps its slot" "machine-$r_id" "$(epoch_slots)"
 no "a second untrust of an unknown machine fails" l remote untrust cloud 01a1aaaa-0000-7000-8000-000000000000
 
+# A connect checks the epoch against both record logs once: a later fetch with no new segment reads neither log
+# again (each fetch of project layr read both logs whole, 2026-11-24). A memo that is not this machine's is ignored.
+reads() { LAYR_TRACE=1 l fetch cloud 2>&1 | grep -c "store records read"; }
+first=$(reads)
+memo=$(find "$LAYR_ROOT" -name verified-epoch | head -1)
+has "the epoch check leaves its memo" "verified-epoch" "$memo"
+eq "a fetch with no new segment reads neither epoch log again" "$((first - 2))" "$(reads)"
+printf '00\n%s' "$(tail -n1 "$memo")" > "$memo"
+eq "a memo with a wrong MAC makes the full check" "$first" "$(reads)"
+
 garbage_check
 finish
