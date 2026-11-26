@@ -3,6 +3,11 @@
 // Unsafe code is allowed only in `sys` (system calls without safe wrappers).
 #![deny(unsafe_code)]
 
+// Binary unit tests use the counting allocator in store_remote::writer.
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl", not(test)))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod busy;
 mod pools;
 #[macro_use]

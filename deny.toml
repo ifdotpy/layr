@@ -21,7 +21,7 @@ ignore = [
 [licenses]
 # octets uses BSD-2-Clause, a permissive license compatible with Layr's MIT license.
 allow = [
-  "MIT",
+  "MIT", # Includes mimalloc and its bundled C implementation for x86_64 Linux musl.
   "Apache-2.0",
   "BSD-3-Clause",
   "BSD-2-Clause",

@@ -1,0 +1,4 @@
+[env]
+# Keep automatic arena reservation and commit pages on demand. This reduces
+# kernel CPU on allocation-heavy commands in the x86_64 musl release.
+CFLAGS_x86_64_unknown_linux_musl = "-DMI_DEFAULT_ARENA_EAGER_COMMIT=0"
