@@ -37,8 +37,8 @@ multiple-versions = "deny"
 wildcards = "deny"
 # Unpublished workspace crates use local paths without registry versions.
 allow-wildcard-paths = true
-# Layr uses rustix for Unix system calls.
-deny = [{ name = "nix" }]
+# Layr uses rustix for Unix system calls. Only vendored fuser may depend on nix.
+deny = [{ name = "nix", wrappers = ["fuser"] }]
 # These old versions are required by upstream dependencies; keep new duplicates visible.
 skip = [
   # Existing transitive duplicates; newly introduced versions remain denied.

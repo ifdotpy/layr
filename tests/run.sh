@@ -117,11 +117,14 @@ if [ "$jobs_n" -gt 1 ]; then
     # slowest macOS tests (226 and 181 s) started near the end, and the step took 684 s for 4042 s of tests on
     # 8 jobs (2026-11-22). Equal times keep the list order.
     if [ "${#parallel[@]}" -gt 1 ]; then
-        parallel=($(for i in "${!parallel[@]}"; do
-            t=${parallel[$i]}
-            s=$(awk -v t="$t" '$2 == t { print $1; exit }' tests/durations.txt 2> /dev/null)
-            echo "${s:-10} $i $t"
-        done | sort -k1,1rn -k2,2n | awk '{ print $3 }'))
+        parallel=($(printf '%s\n' "${parallel[@]}" | awk -v durations=tests/durations.txt '
+            BEGIN {
+                while ((getline < durations) > 0)
+                    if (!($2 in seconds)) seconds[$2] = $1
+                close(durations)
+            }
+            { print ($0 in seconds ? seconds[$0] : 10), NR, $0 }
+        ' | sort -k1,1rn -k2,2n | awk '{ print $3 }'))
     fi
     files=("${parallel[@]}" "${serial[@]}")
 fi

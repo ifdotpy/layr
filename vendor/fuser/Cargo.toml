@@ -133,6 +133,8 @@ features = [
 
 [dependencies.num_enum]
 version = "0.7.5"
+# The derive can use the original crate name without parsing Cargo.toml.
+default-features = false
 
 [dependencies.page_size]
 version = "0.6.0"
