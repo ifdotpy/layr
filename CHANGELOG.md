@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.56.0](https://github.com/ifdotpy/layr/compare/v0.55.2...v0.56.0) (2026-11-26)
+
+
+### Features
+
+* **queue:** name a pending entry without an approval of its state in queue list
+
+
+### Bug Fixes
+
+* **cli:** Reject ignored options and keep objects stat read-only
+* **push:** a failed cache overlay push no longer fails the push
+* **remote:** renew a reused read proof after the gateway's 404 "no such project"
+* **tests:** settle two racy tests; say that --name limits a trust
+* **remote:** take the gateway routes when the Cloud server reader refuses access epochs
+* **remote:** read Git packs of earlier key epochs after a rotation
+
+
+### Performance Improvements
+
+* **free:** Skip native retirement when markers prove there is nothing to do
+* **fs:** Reflink a shrinking replacement after truncation
+* **linux:** Use mimalloc with lazy commit on x86_64 musl
+* **history:** Read only the selected Git file in mixed history
+* **remote:** check the key epoch against the record logs once
+
+
+## [0.55.2](https://github.com/ifdotpy/layr/compare/v0.55.1...v0.55.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **layrfs:** read the entitlements of the extension before testing them
+
 ## [0.55.2](https://github.com/ifdotpy/layr/compare/v0.55.1...v0.55.2) (2026-11-23)
 
 
