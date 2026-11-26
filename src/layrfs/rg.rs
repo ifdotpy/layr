@@ -6,11 +6,14 @@
 use super::index::{self, Kind, Tree};
 use grep_printer::{StandardBuilder, SummaryBuilder, SummaryKind};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, SearcherBuilder};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
 use rayon::prelude::*;
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+const SEARCH_BATCH_FILES: usize = 16_384;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Case {
@@ -406,21 +409,39 @@ impl Search {
     /// Search the listed files; the exit code of rg.
     pub fn run(self, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         let Search { o, matcher, files, with_filename } = self;
-        let results: Vec<(Vec<u8>, bool, Option<String>)> = files
-            .par_iter()
-            .map(|(abs, shown, explicit)| search_one(&o, &matcher, abs, shown, *explicit, with_filename))
+        let mut builder = SearcherBuilder::new();
+        builder
+            .line_number(o.line_number)
+            .invert_match(o.invert)
+            .after_context(if o.mode == Mode::Lines { o.after } else { 0 })
+            .before_context(if o.mode == Mode::Lines { o.before } else { 0 })
+            .max_matches(o.max_count);
+        // Collect per-file results in bounded batches. Keep only output and diagnostics
+        // until the scan finishes, as a redirection target can itself be a searched file.
+        let results = files.chunks(SEARCH_BATCH_FILES).flat_map(|batch| {
+            let files_per_job = (batch.len() / rayon::current_num_threads() / 4).max(1);
+            batch
+                .par_iter()
+                .with_min_len(files_per_job)
+                .map_init(|| builder.build(), |searcher, file| search_one(searcher, &builder, &o, &matcher, file, with_filename))
+                .collect::<Vec<_>>()
+        });
+        let (mut matched, mut failed) = (false, false);
+        let output: Vec<_> = results
+            .filter_map(|(bytes, m, error)| {
+                matched |= m;
+                failed |= error.is_some();
+                let error = if o.no_messages { None } else { error };
+                (!bytes.is_empty() || error.is_some()).then_some((bytes, error))
+            })
             .collect();
-        let (mut matched, mut failed, mut printed) = (false, false, false);
         let separate = o.mode == Mode::Lines && (o.after > 0 || o.before > 0);
-        for (bytes, m, e) in results {
-            matched |= m;
+        let mut printed = false;
+        for (bytes, e) in output {
             if let Some(e) = e {
-                failed = true;
-                if !o.no_messages {
-                    let _ = writeln!(err, "rg: {e}");
-                }
+                let _ = writeln!(err, "rg: {e}");
             }
-            if o.quiet || bytes.is_empty() {
+            if bytes.is_empty() {
                 continue;
             }
             if separate && printed {
@@ -467,35 +488,31 @@ fn build_matcher(o: &Opts) -> Result<RegexMatcher, String> {
 }
 
 fn search_one(
+    searcher: &mut Searcher,
+    builder: &SearcherBuilder,
     o: &Opts,
     matcher: &RegexMatcher,
-    abs: &Path,
-    shown: &Path,
-    explicit: bool,
+    (abs, shown, explicit): &(PathBuf, PathBuf, bool),
     with_filename: bool,
 ) -> (Vec<u8>, bool, Option<String>) {
-    let mut searcher = SearcherBuilder::new()
-        .line_number(o.line_number)
-        .invert_match(o.invert)
-        .after_context(if o.mode == Mode::Lines { o.after } else { 0 })
-        .before_context(if o.mode == Mode::Lines { o.before } else { 0 })
-        .max_matches(o.max_count)
-        .binary_detection(if explicit { BinaryDetection::convert(0) } else { BinaryDetection::quit(0) })
-        .build();
-    let shown_path = shown;
     // A walked file removed after the index listed it is skipped, as rg's own walk would not
     // have found it; an explicit path still reports the error.
     let error =
-        |e: std::io::Error| (explicit || e.kind() != std::io::ErrorKind::NotFound).then(|| format!("{}: {e}", shown.display()));
-    match o.mode {
+        |e: std::io::Error| (*explicit || e.kind() != std::io::ErrorKind::NotFound).then(|| format!("{}: {e}", shown.display()));
+    let mut input = match File::open(abs) {
+        Ok(file) => file.take(u64::MAX),
+        Err(e) => return (Vec::new(), false, error(e)),
+    };
+    searcher.set_binary_detection(if *explicit { BinaryDetection::convert(0) } else { BinaryDetection::quit(0) });
+    let (bytes, matched, result) = match o.mode {
         Mode::Lines => {
             let mut printer =
                 StandardBuilder::new().path(with_filename).only_matching(o.only_matching).build_no_color(Vec::new());
-            let mut sink = printer.sink_with_path(matcher, shown_path);
-            let r = searcher.search_path(matcher, abs, &mut sink);
+            let mut sink = printer.sink_with_path(matcher, shown);
+            let r = searcher.search_reader(matcher, &mut input, &mut sink);
             let m = sink.has_match();
             drop(sink);
-            (printer.into_inner().into_inner(), m, r.err().and_then(error))
+            (printer.into_inner().into_inner(), m, r)
         }
         _ => {
             let kind = match o.mode {
@@ -505,14 +522,22 @@ fn search_one(
                 _ => SummaryKind::PathWithoutMatch,
             };
             let mut printer = SummaryBuilder::new().kind(kind).path(with_filename).build_no_color(Vec::new());
-            let mut sink = printer.sink_with_path(matcher, shown_path);
-            let r = searcher.search_path(matcher, abs, &mut sink);
+            let mut sink = printer.sink_with_path(matcher, shown);
+            let r = searcher.search_reader(matcher, &mut input, &mut sink);
             let m = sink.has_match();
             drop(sink);
             let matched = if o.mode == Mode::FilesWithout { !m } else { m };
-            (printer.into_inner().into_inner(), matched, r.err().and_then(error))
+            (printer.into_inner().into_inner(), matched, r)
         }
+    };
+    // A larger line buffer can find a late NUL before emitting earlier matches in the
+    // next file. Reset if this read could have filled the default 64 KiB buffer, allowing
+    // headroom for UTF-16 decoded to UTF-8.
+    if u64::MAX - input.limit() >= 32 << 10 {
+        *searcher = builder.build();
     }
+    let bytes = if o.quiet { Vec::new() } else { bytes };
+    (bytes, matched, result.err().and_then(error))
 }
 
 /// `-g '!glob'`, `-t` and `-T`, applied to walked files (explicit files are always searched).
@@ -615,5 +640,50 @@ mod tests {
         assert_eq!(resolve(Path::new(""), "."), Some(PathBuf::new()));
         assert_eq!(resolve(Path::new("a"), "../b"), None);
         assert_eq!(resolve(Path::new("a"), "/etc"), None);
+    }
+
+    #[test]
+    fn a_long_line_does_not_change_binary_detection_in_the_next_file() {
+        let id = crate::ids::new_id();
+        let long = (std::env::temp_dir().join(format!("layrfs-rg-long-{id}")), PathBuf::from("long"), false);
+        let late_nul = (std::env::temp_dir().join(format!("layrfs-rg-nul-{id}")), PathBuf::from("late-nul"), false);
+        let _long = crate::fsutil::TempGuard(&long.0);
+        let _late_nul = crate::fsutil::TempGuard(&late_nul.0);
+        let mut bytes = b"needle\n".to_vec();
+        bytes.extend(b"filler!\n".repeat(12 << 10));
+        bytes.push(0);
+        std::fs::write(&late_nul.0, bytes).unwrap();
+
+        let o = parse(&args("-l needle")).unwrap();
+        let matcher = build_matcher(&o).unwrap();
+        let builder = SearcherBuilder::new();
+        let mut searcher = builder.build();
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend([0x00, 0x08].repeat(23_000)); // U+0800 expands to three UTF-8 bytes.
+        for long_line in [vec![b'x'; 130 << 10], utf16] {
+            std::fs::write(&long.0, long_line).unwrap();
+            assert_eq!(search_one(&mut searcher, &builder, &o, &matcher, &long, true), (Vec::new(), false, None));
+            assert_eq!(search_one(&mut searcher, &builder, &o, &matcher, &late_nul, true), (b"late-nul\n".to_vec(), true, None));
+        }
+    }
+
+    #[test]
+    fn output_is_deferred_until_all_files_are_searched() {
+        let id = crate::ids::new_id();
+        let input = std::env::temp_dir().join(format!("layrfs-rg-input-{id}"));
+        let output = std::env::temp_dir().join(format!("layrfs-rg-output-{id}"));
+        let _input = crate::fsutil::TempGuard(&input);
+        let _output = crate::fsutil::TempGuard(&output);
+        std::fs::write(&input, b"needle\n").unwrap();
+        let mut out = File::create(&output).unwrap();
+        let mut files = vec![(output.clone(), PathBuf::from("output"), false); SEARCH_BATCH_FILES + 1];
+        files[0] = (input.clone(), PathBuf::from("input"), false);
+        let o = parse(&args("needle")).unwrap();
+        let matcher = build_matcher(&o).unwrap();
+        let search = Search { o, matcher, files, with_filename: true };
+        let mut err = Vec::new();
+        assert_eq!(search.run(&mut out, &mut err), 0);
+        assert!(err.is_empty());
+        assert_eq!(std::fs::read(&output).unwrap(), b"input:needle\n");
     }
 }
