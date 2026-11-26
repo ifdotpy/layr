@@ -3891,6 +3891,49 @@ pub fn unbuilt_commit(repo: &Repo, state: &str) -> Result<Option<String>> {
     imported_commit(repo, state)
 }
 
+/// The selected regular file of an import that would otherwise be rebuilt from Git.
+pub(crate) fn selected_import_file(
+    repo: &Repo,
+    state: &str,
+    path: &str,
+) -> Result<Option<(crate::repo::Snap, Option<crate::repo::Temp>)>> {
+    use layr_fs_core::{RelDir, TreeRead};
+
+    if repo.p.has_state(state) || crate::objstore::recorded_refs(&repo.p, state)?.is_some() {
+        return Ok(None);
+    }
+    let Some(commit) = stored_commit(repo, state)? else { return Ok(None) };
+    let Some(entry) = with_objects(repo, |cat| path_entry(cat, &commit, path))? else { return Ok(None) };
+    if !matches!(entry.mode.as_str(), "100644" | "100755") {
+        return Ok(None);
+    }
+    if let Some((base, base_commit)) = nearest_built_import(repo, state)? {
+        let pin = repo.pin(&[&base])?;
+        if !repo.p.has_state(&base) {
+            return Ok(None);
+        }
+        let source = repo.state_src(&base)?;
+        // A rebuild keeps unmodified files from the base, including their stored attributes.
+        if with_objects(repo, |cat| path_entry(cat, &base_commit, path))?.as_ref() == Some(&entry) {
+            if fsutil::lmeta_checked(&source, path)?.is_some_and(|m| m.is_file()) {
+                repo.hold(pin);
+                return Ok(Some((source, None)));
+            }
+            return Ok(None);
+        }
+        // A new file in the rebuilt tree could inherit attributes from its directory.
+        let parent = RelDir::from_bytes(path.rsplit_once('/').map_or("", |(dir, _)| dir).as_bytes())?;
+        let attrs = source.metadata(&parent)?;
+        if !attrs.is_some_and(|m| m.kind == fsutil::FType::Dir && m.attributes.acl.is_none() && m.attributes.xattrs.is_empty()) {
+            return Ok(None);
+        }
+    }
+    let data = blob(repo, &entry.oid)?;
+    let tmp = crate::repo::Temp::empty(repo.p.work_dir().join(crate::store::temp_name()))?;
+    place_blob(&tmp.path, &entry.mode, path, &data, None, None)?;
+    Ok(Some((crate::repo::snap(&tmp.path), Some(tmp))))
+}
+
 /// True when `state` is an imported state whose record holds Git objects but whose commit the git
 /// store lacks (a machine that got the record without the Git pack).
 pub fn missing_objects(repo: &Repo, state: &str) -> bool {

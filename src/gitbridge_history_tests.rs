@@ -590,6 +590,19 @@ fn object_of_names_the_object_git_names_and_reads_it() -> Result<()> {
 
 #[test]
 fn object_history_opens_the_object_store_once_whatever_its_length() -> Result<()> {
+    // A fork in another test can inherit the prune lease. Check release in a fresh process.
+    if std::env::var_os("LAYR_TEST_HISTORY_PRUNE_CHILD").is_none() {
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "gitbridge::history_tests::object_history_opens_the_object_store_once_whatever_its_length",
+                "--nocapture",
+            ])
+            .env("LAYR_TEST_HISTORY_PRUNE_CHILD", "1")
+            .status()?;
+        anyhow::ensure!(status.success(), "isolated history prune-lease test failed");
+        return Ok(());
+    }
     let mut fixture = Fixture::new()?;
     fixture.object_history()?;
     let blame = |fixture: &Fixture| fixture.object_reads(crate::cmd::history::blame, &["-s"], &["seed"]);

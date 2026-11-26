@@ -810,6 +810,28 @@ fn state_changes(repo: &Repo, s: &StateRec, specs: &[String]) -> Result<(Entries
     }
 }
 
+/// Use a selected Git file for the unbuilt side of a mixed pair.
+fn mixed_file_touches(repo: &Repo, s: &StateRec, paths: &BTreeSet<String>) -> Result<Option<bool>> {
+    let Some(path) = paths.first().filter(|p| paths.len() == 1 && !skip_path(p) && !p.contains(char::REPLACEMENT_CHARACTER))
+    else {
+        return Ok(None);
+    };
+    let Some(parent) = s.parents.first() else { return Ok(None) };
+    let parent = repo.state(parent)?;
+    let (git, native, git_is_parent) = match (parent.kind == StateKind::Import, s.kind == StateKind::Import) {
+        (true, false) => (&parent.id, &s.id, true),
+        (false, true) => (&s.id, &parent.id, false),
+        _ => return Ok(None),
+    };
+    let Some((git, _keep)) = crate::gitbridge::selected_import_file(repo, git, path)? else { return Ok(None) };
+    let native = repo.state_src(native)?;
+    if fsutil::lmeta_checked(&native, path)?.is_some_and(|m| !m.is_file()) {
+        return Ok(None);
+    }
+    let (old, new) = if git_is_parent { (&git, &native) } else { (&native, &git) };
+    Ok(Some(changes::any_file_change_selected(old, new, paths, skip_path)?))
+}
+
 /// History selection needs only membership: filter before reading content and keep both move
 /// endpoints. Pairing separate adds/deletes as renames cannot change that membership.
 fn state_touches(repo: &Repo, s: &StateRec, specs: &[String], selected: Option<&BTreeSet<String>>) -> Result<bool> {
@@ -822,6 +844,11 @@ fn state_touches(repo: &Repo, s: &StateRec, specs: &[String], selected: Option<&
     // or invent changes against an empty parent when either side is unavailable locally.
     if !repo.tree_available(&s.id) || s.parents.first().is_some_and(|p| !repo.tree_available(p)) {
         return Ok(false);
+    }
+    if let Some(paths) = selected {
+        if let Ok(Some(touches)) = mixed_file_touches(repo, s, paths) {
+            return Ok(touches);
+        }
     }
     let root = repo.state_src(&s.id)?;
     let empty;
