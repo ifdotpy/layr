@@ -4650,7 +4650,7 @@ mod read_open_tests {
             )
         };
         let lease = crate::objstore::preparation_lease(&old)?;
-        assert!(make().unwrap_err().is::<crate::cmd::overlaycmd::OverlayRetirementBusy>());
+        assert!(make().unwrap_err().is::<crate::overlay::create::OverlayRetirementBusy>());
         assert!(old.dir.exists());
         drop(lease);
         let state = json!({"id":fixture.head,"kind":"commit","subvol":"","author":crate::model::Author::default(),"time":0});
@@ -4659,7 +4659,7 @@ mod read_open_tests {
             .execute("INSERT INTO states(id,display,kind,rec) VALUES(?1,?1,'commit',?2)", (&fixture.head, state.to_string()))?;
         old.db.test_connection().execute("INSERT INTO owners(state,kind,holder) VALUES(?1,'head','line')", [&fixture.head])?;
         let reader = crate::free::pin(&old, &[&fixture.head])?;
-        assert!(make().unwrap_err().is::<crate::cmd::overlaycmd::OverlayRetirementBusy>());
+        assert!(make().unwrap_err().is::<crate::overlay::create::OverlayRetirementBusy>());
         assert!(old.dir.exists());
         drop(reader);
         mark_removed(&ids::new_id())?;

@@ -558,7 +558,7 @@ impl Repo<'_> {
             })();
             match setup {
                 Ok(false) => return Ok(false),
-                Err(error) if error.is::<crate::cmd::overlaycmd::OverlayRetirementBusy>() => return Ok(false),
+                Err(error) if error.is::<crate::overlay::create::OverlayRetirementBusy>() => return Ok(false),
                 Err(error) => cache_warning(line, &error),
                 Ok(true) => {}
             }

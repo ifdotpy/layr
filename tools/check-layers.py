@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Enforce workspace edges and transitive leaf dependencies over all manifest targets/features."""
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -49,8 +50,12 @@ root = Path(m["workspace_root"])
 main = (root / "src/main.rs").read_text()
 if re.search(r"\bmod\s+storage\b|#\[path\s*=\s*\"(?:apfs|btrfs|overlayfs)\.rs\"", main):
     errors.append("src/main.rs: filesystem facade alias is forbidden")
+# Production source only: comments, literals and `#[cfg(test)]` modules are masked (the sync boundary guard's `source`).
+spec = importlib.util.spec_from_file_location("boundary", root / "tools/check-sync-boundary.py")
+boundary = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(boundary)
 for name in ["repo.rs", "lineops.rs", "overlay.rs", "cache_overlay.rs", "changes.rs", "objstore.rs", "tree.rs", "fsutil.rs", "merge.rs", "write_source.rs", "recv.rs", "project_copy.rs", "project_move.rs", "gitbridge.rs", "cmd/admin.rs", "cmd/du.rs", "cmd/work.rs", "cmd/mergecmd.rs", "cmd/park.rs"]:
-    source = (root / "src" / name).read_text()
+    source = boundary.source(root / "src" / name)
     if re.search(r"crate::(?:apfs|btrfs|btrfs_driver|overlayfs|storage)::|(?<![:\w])storage::", source):
         errors.append(f"src/{name}: shared algorithms must use filesystem contracts")
 # The sync seam starts inside the application; keep its temporary import allowlist enforceable in CI.

@@ -6,9 +6,9 @@
 //! fetch reads the state bodies, downloads the packs that hold the missing trees, times tables and
 //! blobs, and checks each state out of the object store.
 
-use super::{writer, Options, Report, Store};
+use super::{record_lines, writer, Options, Replica, Report, Store};
 use crate::objstore::recorded;
-use crate::sync_local::fetch::{publish_restored, push_selection, required_states, state_catalog, wanted};
+use crate::sync_local::fetch::publish_restored;
 use crate::{ctx::Ctx, model::StateRec, repo::Repo};
 use anyhow::{bail, Context, Result};
 use layr_objects::{transfer, Id, Keying, Kind, StateRef, Store as Objects, Temperature, WriteOptions};
@@ -74,36 +74,20 @@ fn import(objects: &Objects, repo: &Repo, state: &StateRec) -> Result<StateRef> 
 }
 
 /// Pushes the states that the server lacks (docs/remotes.md, "Trees, states and packs").
-pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options, report: &mut Report) -> Result<()> {
+pub(super) fn push_states(
+    store: &Store,
+    local: &Replica<'_>,
+    ctx: &Ctx,
+    repo: &Repo,
+    opts: &Options,
+    report: &mut Report,
+) -> Result<()> {
     let api = store.backend.api().context("not a Layr Cloud remote")?;
     let scope = store.api_scope();
-    let lines: Vec<String> = repo.p.export_jsonl()?.lines().map(str::to_string).collect();
-    // The catalog and the refs and line heads that it resolves are of one version (`select_push`).
-    let (required, selection) = repo.p.db.with_read_snapshot(|| {
-        let catalog = state_catalog(repo)?;
-        Ok((required_states(repo, &lines, opts, &catalog)?, push_selection(repo, &lines, opts, &catalog)?))
-    })?;
-    // Open once: loading pack indexes once per migrated state makes a large history expensive to push.
-    let objects = crate::objstore::exists(&repo.p).then(|| open(repo)).transpose()?;
-    let mut candidates = Vec::new();
-    for (id, _) in repo.p.db.state_auxiliary()? {
-        let Some((present, deleted)) = repo.p.db.state_flags(&id)? else { continue };
-        if deleted {
-            continue;
-        }
-        let state = repo.state(&id)?;
-        if !present && objects.as_ref().map(|store| recorded(store, &state)).transpose()?.flatten().is_none() {
-            continue;
-        }
-        if !wanted(&state, opts) && !required.contains(&id) {
-            report.omitted.push(format!("{} {}", id, serde_json::to_value(state.kind)?));
-            continue;
-        }
-        if selection.as_ref().is_some_and(|keep| !keep.contains(&id)) {
-            continue;
-        }
-        candidates.push(state);
-    }
+    // One object store handle (and its prune lease) serves the selection and the upload.
+    let reads = crate::objstore::share(&repo.p);
+    // The server is asked about each candidate below: no state is skipped as already pushed here.
+    let candidates = local.push_candidates(&record_lines(local)?, opts, &BTreeSet::new(), &mut report.omitted)?;
     api.learn_states(&scope, &candidates.iter().map(|s| s.id.clone()).collect::<Vec<_>>())?;
     let mut states = Vec::new();
     for state in candidates {
@@ -124,10 +108,8 @@ pub(super) fn push_states(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options,
         return Ok(());
     }
     crate::secrets::check_states(ctx, repo, states.iter().map(|s| s.id.as_str()))?;
-    let objects = match objects {
-        Some(objects) => objects,
-        None => open(repo)?,
-    };
+    // Open once: loading pack indexes once per migrated state makes a large history expensive to push.
+    let objects = reads.objects()?;
     let states = writer::parents_first(states)?;
     let mut refs = Vec::with_capacity(states.len());
     for state in &states {

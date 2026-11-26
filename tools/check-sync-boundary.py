@@ -1,23 +1,79 @@
 #!/usr/bin/env python3
 """Freeze legacy callers/definitions; engines and new transport helpers stay storage-free."""
-import collections, json, re, sys
+import collections, json, os, re, sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASE = ROOT / 'tools/sync-boundary-baseline.json'
 APP = re.compile(r'\b(?:Repo|Ctx|Db|repo|ctx|sync_local|export_jsonl|lock_maintenance)\b|\.\s*db\b|\bdb\s*::|\bstore\s*::\s*Project\b|\bcrate\s*::\s*(?:repo|db|store|gitbridge|objstore|free|secrets)\b')
 ENGINES = {'fetch_with_local', 'restore_with_local', 'record_left', 'push_with_local', 'prepare_push'}
-LITERALS = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|r(#{0,8})"[\s\S]*?"\1|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'', re.S)
+LITERALS = re.compile(r'//[^\n]*|/\*|r(#*)"[\s\S]*?"\1|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'', re.S)
+BLOCK = re.compile(r'/\*|\*/')
 def closing(text, start, left='{', right='}'):
     depth = 0
     for end in range(start, len(text)):
         depth += (text[end] == left) - (text[end] == right)
         if not depth: return end + 1
     raise ValueError('unbalanced Rust source')
+def gated(condition):
+    """Whether `test` is a conjunct of the cfg condition: only test builds have the item."""
+    condition = condition.strip()
+    if not (condition.startswith('all(') and condition.endswith(')')): return condition == 'test'
+    depth, parts = 0, ['']
+    for c in condition[4:-1]:
+        depth += (c == '(') - (c == ')')
+        if c == ',' and not depth: parts.append('')
+        else: parts[-1] += c
+    return any(gated(part) for part in parts)
+def tested(attributes):
+    return any(gated(condition) for condition in re.findall(r'#\[\s*cfg\(([^\]]*)\)\s*\]', attributes))
+def mask(text):
+    """`text` with comments (block comments nest), strings and chars blanked, at the same offsets."""
+    out, at = [], 0
+    while m := LITERALS.search(text, at):
+        end, depth = m.end(), m[0] == '/*'
+        while depth and (n := BLOCK.search(text, end)):
+            depth, end = depth + (n[0] == '/*') - (n[0] == '*/'), n.end()
+        end = len(text) if depth else end
+        out += [text[at:m.start()], ' ' * (end - m.start())]
+        at = end
+    return ''.join(out) + text[at:]
 def source(path):
-    text = LITERALS.sub(lambda m: ' ' * len(m[0]), path.read_text())
-    for m in reversed(list(re.finditer(r'#\[cfg\(test\)\]\s*(?:pub\([^)]*\)\s+)?mod\s+\w+\s*\{', text))):
+    text = mask(path.read_text())
+    for m in reversed([m for m in re.finditer(r'((?:#\[[^\]]*\]\s*)+)(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{', text) if tested(m[1])]):
         end = closing(text, text.index('{', m.start())); text = text[:m.start()] + ' ' * (end - m.start()) + text[end:]
     return text
+DECLARATION = re.compile(r'((?:#\[[^\]\n]*\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?\bmod\s+(\w+)\s*;')
+def test_files(root):
+    """The files that only test declarations load: `#[cfg(test)] mod name;` (with or without `#[path]`) and, below
+    such a file, any `mod child;`. A declaration outside an inline module takes its file; one inside an inline
+    module, whose directory this scan does not follow, stays by module name and file stem."""
+    found = []  # (declaring file, module name, `#[path]`, declared under cfg(test), inside an inline module)
+    for path in (root / 'src').rglob('*.rs'):
+        text = path.read_text()
+        masked = mask(text)
+        for m in DECLARATION.finditer(masked):
+            external = re.search(r'\bpath\s*=\s*r?#*"([^"]*)"', text[m.start(1):m.end(1)])
+            found.append((path, m[2], external and external[1], tested(m[1]),
+                          masked.count('{', 0, m.start()) != masked.count('}', 0, m.start())))
+    loaded = {Path(os.path.normpath(path.parent / external)) for path, _, external, _, _ in found if external}
+    def files(path, name, external):
+        base = path.parent if path.name in ('lib.rs', 'main.rs', 'mod.rs') or path.parent == root / 'src/bin' or path in loaded else path.parent / path.stem
+        return [Path(os.path.normpath(file)) for file in ([path.parent / external] if external else [base / (name + '.rs'), base / name / 'mod.rs']) if file.exists()]
+    def names(name, external):
+        return {name} | ({Path(external).parent.name if Path(external).stem == 'mod' else Path(external).stem} if external else set())
+    tests = {}  # file -> module names that load it
+    while grown := {file: names(name, external) for path, name, external, test, _ in found if test or path in tests
+                    for file in files(path, name, external) if file not in tests}:
+        tests |= grown
+    while True:  # A production declaration takes its file, and so every declaration in that file becomes production too.
+        taken, taken_names = set(), set()
+        for path, name, external, test, inline in found:
+            if not test and path not in tests:
+                taken_names |= names(name, external) if inline else set()
+                taken |= set() if inline else set(files(path, name, external))
+        production = [file for file, called in tests.items() if file in taken or called & taken_names]
+        if not production: return {file.relative_to(root).as_posix() for file in tests}
+        for file in production: del tests[file]
 def body(text, start):
     """The `{` of the body of the function whose signature starts at `start`, or -1 for a declaration. A `;` or `{`
     inside parentheses, brackets (`[u8; 32]`) or generics (`-> T<{ 1 }>`) belongs to the signature. A generic `<`
@@ -44,8 +100,10 @@ def transfer(text):
     return False
 def scan(root, frozen=None):
     data, errors = {'$callers': [], '$references': [], '$access': {}}, []
+    tests = test_files(root)
     for path in sorted((root / 'src').rglob('*.rs')):
         name, text = path.relative_to(root).as_posix(), source(path)
+        if name in tests: continue
         if name.startswith('src/store_remote/'):
             definitions = list(functions(text)); data[name] = dict(collections.Counter(n for n, _ in definitions))
             known = frozen.get(name, {}) if frozen is not None else data[name]

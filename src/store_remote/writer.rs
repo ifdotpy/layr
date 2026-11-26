@@ -675,7 +675,7 @@ pub(super) fn push_locked(store: &Store, ctx: &Ctx, repo: &Repo, opts: &Options)
         let _push = crate::trace::span("store push");
         // Compatibility path: the separate API object codec is migrated after the v2 fast path.
         let (_, _, mut report) = prepare_push(store, &local, opts)?;
-        super::cloud_objects::push_states(store, ctx, repo, opts, &mut report)?;
+        super::cloud_objects::push_states(store, &local, ctx, repo, opts, &mut report)?;
         return Ok(report);
     }
     push_with_local(store, &mut local, opts)
@@ -726,11 +726,7 @@ pub(crate) fn push_with_local(store: &Store, local: &mut super::Replica<'_>, opt
     let mut present: BTreeMap<String, String> = index.iter().map(|(id, entry)| (id.clone(), entry.attempt.clone())).collect();
     drop(stage);
     let stage = crate::trace::span("store select history");
-    let mut record_lines = Vec::new();
-    local.visit_records(None, &mut |line| {
-        record_lines.push(line.to_owned());
-        Ok(())
-    })?;
+    let record_lines = super::record_lines(local)?;
     let mut states = Vec::new();
     let mut recovered = Vec::new();
     let part = crate::trace::span("store push candidates");

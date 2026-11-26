@@ -43,6 +43,16 @@ use std::path::PathBuf;
 pub(crate) type Replica<'a> =
     dyn layr_store::sync::LocalReplica<State = crate::model::StateRec, Line = crate::model::Line, Selection = Options> + 'a;
 
+/// The signed records of every machine, exact bytes in order.
+fn record_lines(local: &Replica<'_>) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    local.visit_records(None, &mut |line| {
+        lines.push(line.to_owned());
+        Ok(())
+    })?;
+    Ok(lines)
+}
+
 #[derive(Clone, Default)]
 pub struct Options {
     pub public: bool,

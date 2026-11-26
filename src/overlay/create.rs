@@ -9,6 +9,16 @@ use crate::store::Project;
 use anyhow::Result;
 use std::collections::BTreeMap;
 
+/// A removed overlay of this name is still in use: its setup is retried later, not failed.
+#[derive(Debug)]
+pub(crate) struct OverlayRetirementBusy;
+impl std::fmt::Display for OverlayRetirementBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("removed overlay is busy; retry its setup")
+    }
+}
+impl std::error::Error for OverlayRetirementBusy {}
+
 /// Make overlay `name` of the caller with its empty first state and its records. The caller holds
 /// the project lock and has checked that no overlay has the name. `folder`: a folder overlay;
 /// `cache`: the cache overlay of a cache path (`save --overlays`).
@@ -29,7 +39,7 @@ pub(crate) fn make_overlay(
 ) -> Result<()> {
     locked.check(&repo.p)?;
     #[cfg(feature = "overlayfs")]
-    let _backend = crate::overlayfs::try_publication(&repo.p.dir)?.ok_or(crate::cmd::overlaycmd::OverlayRetirementBusy)?;
+    let _backend = crate::overlayfs::try_publication(&repo.p.dir)?.ok_or(OverlayRetirementBusy)?;
     let owner = ctx.caller.uid;
     let pname = format!("{}%{name}", repo.p.name);
     let dir = ctx.store.project_dir(&pname)?;
@@ -38,11 +48,11 @@ pub(crate) fn make_overlay(
     let removed = repo.p.db.overlay_config(&format!("overlay.{name}.removed"))?.is_some();
     if removed && dir.exists() {
         let Some(old) = Project::open_maintenance(&ctx.store, &pname)? else {
-            return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into());
+            return Err(OverlayRetirementBusy.into());
         };
-        let Some(_old_lock) = old.try_reserve()? else { return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into()) };
+        let Some(_old_lock) = old.try_reserve()? else { return Err(OverlayRetirementBusy.into()) };
         let Some(_lease) = crate::objstore::try_preparation_exclusive(&old)? else {
-            return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into());
+            return Err(OverlayRetirementBusy.into());
         };
         let root = repo
             .p
@@ -56,7 +66,7 @@ pub(crate) fn make_overlay(
             "removed overlay '{name}' has a different identity"
         );
         if !old.db.pin_holders()?.is_empty() {
-            return Err(crate::cmd::overlaycmd::OverlayRetirementBusy.into());
+            return Err(OverlayRetirementBusy.into());
         }
         let trash = repo.p.trash_dir()?;
         std::fs::create_dir_all(&trash)?;

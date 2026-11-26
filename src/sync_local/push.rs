@@ -80,7 +80,7 @@ fn in_object_store(p: &Project, catalog: &BTreeMap<String, StateRec>, ids: Vec<S
     if named.is_empty() || !crate::objstore::exists(p) {
         return Ok(Vec::new());
     }
-    let objects = crate::objstore::open(p)?;
+    let objects = crate::objstore::shared(p)?;
     let mut missing: HashSet<_> =
         named.iter().flat_map(|(_, found)| [found.tree, found.times]).filter(|object| !objects.has(object)).collect();
     if !missing.is_empty() {

@@ -67,18 +67,25 @@ pub fn shared(p: &Project) -> Result<Arc<Store>> {
 /// Reads of `p` share one object store handle (`shared`) until the guard goes: a history reads hundreds of states.
 /// The handle holds a shared prune lease, so a command that lives on (a worker, a watcher) or prunes the store
 /// itself reads without one.
-pub fn share<'p>(p: &'p Project<'_>) -> SharedReads<'p> {
+pub fn share<'p, 'a>(p: &'p Project<'a>) -> SharedReads<'p, 'a> {
     let objects = &p.lease.objects;
     objects.scopes.set(objects.scopes.get() + 1);
-    SharedReads(objects)
+    SharedReads(p)
 }
 
 /// The guard of `share`: the last one lets the handle go.
-pub struct SharedReads<'p>(&'p Shared);
+pub struct SharedReads<'p, 'a>(&'p Project<'a>);
 
-impl Drop for SharedReads<'_> {
+impl SharedReads<'_, '_> {
+    /// The handle that this scope shares (`shared`).
+    pub fn objects(&self) -> Result<Arc<Store>> {
+        shared(self.0)
+    }
+}
+
+impl Drop for SharedReads<'_, '_> {
     fn drop(&mut self) {
-        let objects = self.0;
+        let objects = &self.0.lease.objects;
         objects.scopes.set(objects.scopes.get() - 1);
         if objects.scopes.get() == 0 {
             objects.store.borrow_mut().take();

@@ -874,11 +874,7 @@ pub(crate) fn fetch_with_local(store: &mut Store, local: &mut super::Replica<'_>
     let identity = store.identity(&descriptor, opts.paper_key.as_deref())?;
     drop(stage);
     let stage = crate::trace::span("store records");
-    let mut records_local = Vec::new();
-    local.visit_records(None, &mut |line| {
-        records_local.push(line.to_owned());
-        Ok(())
-    })?;
+    let records_local = super::record_lines(local)?;
     let records = records_with_local(
         &store.backend,
         &identity,
