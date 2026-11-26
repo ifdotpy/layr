@@ -2,11 +2,13 @@
 //! ObjectTree directly. Native-only consumers can request a disposable tree through
 //! build_state; retire_native removes that copy after the command releases its readers.
 
+use crate::linepaths::LineFolders;
 use crate::repo::Repo;
 use crate::store::Project;
 use anyhow::{Context, Result};
 use layr_objects::{Id, Keying, Node, StateRef, Store};
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod maintenance;
@@ -626,40 +628,83 @@ fn queue_native(p: &Project, state: &str) -> Result<()> {
 /// protocol prevents another reader from taking a path while it is removed.
 pub fn retire_native(repo: &Repo) -> Result<()> {
     let _lock = repo.p.lock_or_borrow()?;
-    if !repo.p.meta_dir().join("object-native").is_dir() {
-        return Ok(());
-    }
-    retire_native_locked(repo, crate::retention::overlay_named_states(repo)?)
-}
-
-/// A command's free step leaves busy native copies for the next pass.
-pub fn retire_native_maintenance(repo: &Repo) -> Result<()> {
-    if !repo.p.meta_dir().join("object-native").is_dir() {
-        return Ok(());
-    }
-    let crate::store::LockAttempt::Acquired(_lock) = repo.p.try_lock()? else { return Ok(()) };
-    let Some(keep) = crate::retention::overlay_named_states_maintenance(repo)? else { return Ok(()) };
-    retire_native_locked(repo, keep)
-}
-
-fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -> Result<()> {
-    let Some(_lease) = try_preparation_exclusive(&repo.p)? else { return Ok(()) };
     let dir = repo.p.meta_dir().join("object-native");
     if !dir.is_dir() {
         return Ok(());
     }
-    #[allow(unused_mut)]
-    let mut keep = keep;
-    #[cfg(target_os = "macos")]
-    keep.extend(crate::views::protected_states(&repo.p));
-    #[cfg(target_os = "macos")]
-    keep.extend(crate::views::kept_seeds(&repo.p));
-    keep.extend(native_bases(repo)?);
+    retire_native_locked(repo, crate::retention::overlay_named_states(repo)?, None)
+}
+
+/// Reading these markers is also safe before the project lock: the durable work list
+/// remains for the next pass, and removal still checks protection under the lock.
+fn native_markers(dir: &Path) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut markers =
+        entries.map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned())).collect::<std::io::Result<Vec<_>>>()?;
+    markers.sort_unstable();
+    Ok(markers)
+}
+
+pub(crate) fn finish_native_retirement(
+    ctx: &crate::ctx::Ctx,
+    name: &str,
+    project_dir: &Path,
+    conn: Option<&rusqlite::Connection>,
+) -> Result<()> {
+    use crate::db::Db;
+    if conn.is_none() && !project_dir.try_exists()? {
+        return Ok(());
+    }
+    let mut markers = native_markers(&project_dir.join("meta/object-native")).ok();
+    if let Some((conn, markers)) = conn.zip(markers.as_mut()) {
+        if Db::has_drop_rows(conn).is_ok_and(|has_drops| !has_drops) {
+            if !markers.is_empty() {
+                if let Ok(keep) = native_bases(project_dir, name, markers, || Db::read_lines(conn)) {
+                    // This observation can keep a copy. Any candidate left must be checked under the lock.
+                    markers.retain(|id| !keep.contains(id));
+                }
+            }
+            if markers.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    let Some(p) = Project::open_maintenance(&ctx.store, name)? else { return Ok(()) };
+    let repo = Repo { restore_from_remote: true, p, ctx: Some(ctx) };
+    retire_native_maintenance(&repo, markers)
+}
+
+/// A command's free step leaves busy native copies for the next pass.
+pub(crate) fn retire_native_maintenance(repo: &Repo, markers: Option<Vec<String>>) -> Result<()> {
+    let crate::store::LockAttempt::Acquired(_lock) = repo.p.try_lock()? else { return Ok(()) };
+    let Some(keep) = crate::retention::overlay_named_states_maintenance(repo)? else { return Ok(()) };
+    retire_native_locked(repo, keep, markers)
+}
+
+fn retire_native_locked(repo: &Repo, mut keep: BTreeSet<String>, markers: Option<Vec<String>>) -> Result<()> {
+    let Some(_lease) = try_preparation_exclusive(&repo.p)? else { return Ok(()) };
+    let dir = repo.p.meta_dir().join("object-native");
+    let from_preflight = markers.is_some();
+    let markers = match markers {
+        Some(markers) => markers,
+        None => native_markers(&dir)?,
+    };
+    if !markers.is_empty() {
+        #[cfg(target_os = "macos")]
+        keep.extend(crate::views::protected_states(&repo.p));
+        #[cfg(target_os = "macos")]
+        keep.extend(crate::views::kept_seeds(&repo.p));
+        // A concurrent writer could change which heads are protected between preflight and lock.
+        keep.extend(native_bases(&repo.p.dir, &repo.p.name, &markers, || repo.p.db.lines())?);
+    }
     let mut ids = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let id = entry?.file_name().to_string_lossy().into_owned();
+    for id in markers {
         let Some(state) = repo.p.db.state(&id)? else { continue };
-        if keep.contains(&id) || state.kind.auxiliary() {
+        if keep.contains(&id) || state.kind.auxiliary() || (from_preflight && !dir.join(&id).try_exists()?) {
             continue;
         }
         if verified(&repo.p, &id)?.is_none() {
@@ -674,23 +719,26 @@ fn retire_native_locked(repo: &Repo, keep: std::collections::BTreeSet<String>) -
     Ok(())
 }
 
-/// The native copies that the next save needs off macOS: the head of each line with a working folder here.
-/// The next state of the line is written incrementally from it, and without it the write reads and hashes
-/// the whole tree. The marker stays, so a later pass retires the copy once a newer state replaced the head
-/// (or the line went). An overlay reads its parts through objects and keeps none. macOS writes
-/// incrementally from the thin layer and keeps none either.
-fn native_bases(repo: &Repo) -> Result<Vec<String>> {
-    if cfg!(target_os = "macos") || repo.p.is_overlay() {
-        return Ok(Vec::new());
+/// Off macOS, a base project's next incremental object write needs the native head of
+/// each line with a working folder. The marker stays so a later pass can retire the
+/// copy once a newer state replaces the head or the working folder goes.
+fn native_bases(
+    project_dir: &Path,
+    name: &str,
+    markers: &[String],
+    lines: impl FnOnce() -> Result<Vec<crate::model::Line>>,
+) -> Result<BTreeSet<String>> {
+    let mut keep = BTreeSet::new();
+    if cfg!(target_os = "macos") || name.contains('%') {
+        return Ok(keep);
     }
-    Ok(repo
-        .p
-        .db
-        .lines()?
-        .into_iter()
-        .filter(|line| repo.p.line_folder(&line.id, &line.name).exists())
-        .map(|line| line.head)
-        .collect())
+    let folders = LineFolders::read(project_dir)?;
+    for line in lines()? {
+        if markers.binary_search(&line.head).is_ok() && folders.path(project_dir, &line.id, &line.name).try_exists()? {
+            keep.insert(line.head);
+        }
+    }
+    Ok(keep)
 }
 
 #[cfg(test)]

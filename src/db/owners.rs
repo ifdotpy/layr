@@ -622,6 +622,17 @@ impl Db {
         Ok(v)
     }
 
+    /// Whether native retirement has reservations to recover, even without markers.
+    pub(crate) fn has_drop_rows(conn: &Connection) -> Result<bool> {
+        Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM owners WHERE kind='drop')", [], |r| r.get(0))?)
+    }
+
+    pub(crate) fn drop_rows(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.cached("SELECT state, holder FROM owners WHERE kind='drop'")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// The owners that the stored records give: a replay into a temporary database of the records that `counts`
     /// (`Project::refusal`).
     pub fn recomputed_owners(&self, local: &str, counts: &dyn Fn(&crate::model::Record) -> Result<bool>) -> Result<Vec<Row>> {

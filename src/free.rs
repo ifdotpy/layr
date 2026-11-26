@@ -133,13 +133,10 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
     for name in names {
         #[cfg(test)]
         INSPECTED.with(|names| names.borrow_mut().push(name.clone()));
-        if store.project_dir(&name).is_ok_and(|dir| dir.join("meta/object-native").is_dir()) {
-            if let Ok(Some(p)) = Project::open_maintenance(store, &name) {
-                let repo = crate::repo::Repo { restore_from_remote: true, p, ctx: Some(ctx) };
-                if let Err(error) = crate::objstore::retire_native_maintenance(&repo) {
-                    eprintln!("layr: native copies of {name} remain for retry: {error:#}");
-                }
-            }
+        let Ok(dir) = store.project_dir(&name) else { continue };
+        let conn = rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY);
+        if let Err(error) = crate::objstore::finish_native_retirement(ctx, &name, &dir, conn.as_ref().ok()) {
+            eprintln!("layr: native copies of {name} remain for retry: {error:#}");
         }
         if !moved.is_empty() {
             keyframe_heads(store, &name, &moved);
@@ -155,12 +152,7 @@ pub fn finish(ctx: &crate::ctx::Ctx) {
                 eprintln!("layr: derived data of {name} stays until the next command that changes it: {e:#}");
             }
         }
-        let Ok(dir) = store.project_dir(&name) else { continue };
-        let Ok(conn) =
-            rusqlite::Connection::open_with_flags(crate::store::db_file(&dir), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        else {
-            continue;
-        };
+        let Ok(conn) = conn else { continue };
         // Each inspection finishes its autocommit read before expiration can write owners.
         // A ref whose time ran out releases its owners now: the free step below frees what it kept.
         if expired_refs(&conn) {

@@ -1026,11 +1026,7 @@ impl<'a> Project<'a> {
     }
     /// The folder of a line in the store, `lines/<name>`.
     pub fn default_line_path(&self, name: &str) -> PathBuf {
-        if check_name("line", name).is_ok() || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit())) {
-            self.lines_dir().join(name)
-        } else {
-            self.lines_dir().join(".invalid-name")
-        }
+        crate::linepaths::default_line_path(&self.dir, name)
     }
     /// Path of a cache snapshot `<state-id>@<path>`.
     pub fn cache_path(&self, state: &str, name: &str) -> PathBuf {

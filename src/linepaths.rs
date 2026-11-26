@@ -72,16 +72,49 @@ impl LineFolders {
         Self { recorded, kept }
     }
 
-    pub(crate) fn path(&self, project: &Project<'_>, line_id: &str, name: &str) -> PathBuf {
+    pub(crate) fn read(project_dir: &Path) -> Result<Self> {
+        Ok(Self::new(read_paths(&paths_file_in(&project_dir.join("meta")))?))
+    }
+
+    pub(crate) fn path(&self, project_dir: &Path, line_id: &str, name: &str) -> PathBuf {
         if let Some(path) = self.recorded.get(line_id) {
-            return project.resolve_folder(path.clone());
+            return resolve_folder(project_dir, path.clone());
         }
         // This line has no recorded entry, so any reservation belongs to another line.
         if self.kept.contains(Path::new(name)) {
-            return project.meta_dir().join("no-folder").join(line_id);
+            return project_dir.join("meta/no-folder").join(line_id);
         }
-        project.default_line_path(name)
+        default_line_path(project_dir, name)
     }
+}
+
+fn read_paths(file: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    #[cfg(test)]
+    PATH_READS.with(|reads| reads.set(reads.get() + 1));
+    match std::fs::read(file) {
+        Ok(data) => Ok(serde_json::from_slice(&data)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn resolve_folder(project_dir: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    // A line name only, so an edited file cannot point out of `lines/`.
+    default_line_path(project_dir, &path.to_string_lossy())
+}
+
+pub(crate) fn default_line_path(project_dir: &Path, name: &str) -> PathBuf {
+    let name = if crate::store::check_name("line", name).is_ok()
+        || (name.starts_with(".try-") && name[5..].chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        name
+    } else {
+        ".invalid-name"
+    };
+    project_dir.join("lines").join(name)
 }
 
 #[cfg(test)]
@@ -97,9 +130,7 @@ impl Project<'_> {
     /// The project file as written: line id to an absolute folder (moved out of the store) or to a
     /// folder name below `lines/` (kept after a rename).
     fn recorded_paths(&self) -> BTreeMap<String, PathBuf> {
-        #[cfg(test)]
-        PATH_READS.with(|reads| reads.set(reads.get() + 1));
-        std::fs::read(self.paths_file()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
+        read_paths(&self.paths_file()).unwrap_or_default()
     }
 
     /// The folders of this project outside the store: line id to folder.
@@ -110,15 +141,7 @@ impl Project<'_> {
     /// The recorded folder of a line: a path outside the store (`line move`), or a folder in
     /// `lines/` that is not `lines/<name>` (kept by `line rename`). None: `lines/<name>`.
     pub fn moved_path(&self, line_id: &str) -> Option<PathBuf> {
-        self.recorded_paths().remove(line_id).map(|p| self.resolve_folder(p))
-    }
-
-    fn resolve_folder(&self, p: PathBuf) -> PathBuf {
-        if p.is_absolute() {
-            return p;
-        }
-        // A line name only, so an edited file cannot point out of `lines/`.
-        self.default_line_path(&p.to_string_lossy())
+        self.recorded_paths().remove(line_id).map(|p| resolve_folder(&self.dir, p))
     }
 
     /// The working folder of line `line_id` named `name`: its recorded folder, else `lines/<name>`. When another
@@ -126,7 +149,7 @@ impl Project<'_> {
     /// folder of its id below `meta/`, which no command makes, so that no command reads, writes or deletes the
     /// folder of the other line as this line's.
     pub fn line_folder(&self, line_id: &str, name: &str) -> PathBuf {
-        self.line_folders().path(self, line_id, name)
+        self.line_folders().path(&self.dir, line_id, name)
     }
 
     /// Read recorded folders once for a batch of resolutions. Do not retain across validations:
@@ -285,17 +308,17 @@ mod tests {
             [("moved".into(), outside.clone()), ("renamed".into(), "old".into()), ("invalid".into(), "../escape".into())].into();
         std::fs::write(p.paths_file(), serde_json::to_vec(&map)?)?;
         let folders = p.line_folders();
-        assert_eq!(folders.path(&p, "moved", "new"), outside);
-        assert_eq!(folders.path(&p, "renamed", "new"), p.default_line_path("old"));
-        assert_eq!(folders.path(&p, "other", "old"), p.meta_dir().join("no-folder/other"));
-        assert_eq!(folders.path(&p, "other", "new"), p.default_line_path("new"));
-        assert_eq!(folders.path(&p, "invalid", "new"), p.default_line_path("../escape"));
+        assert_eq!(folders.path(&p.dir, "moved", "new"), outside);
+        assert_eq!(folders.path(&p.dir, "renamed", "new"), p.default_line_path("old"));
+        assert_eq!(folders.path(&p.dir, "other", "old"), p.meta_dir().join("no-folder/other"));
+        assert_eq!(folders.path(&p.dir, "other", "new"), p.default_line_path("new"));
+        assert_eq!(folders.path(&p.dir, "invalid", "new"), p.default_line_path("../escape"));
         for (id, name) in [("moved", "new"), ("renamed", "new"), ("other", "old"), ("invalid", "new")] {
-            assert_eq!(folders.path(&p, id, name), p.line_folder(id, name));
+            assert_eq!(folders.path(&p.dir, id, name), p.line_folder(id, name));
         }
         // A snapshot is stable, but the next validation sees a move or malformed-file fallback.
         std::fs::write(p.paths_file(), b"not JSON")?;
-        assert_eq!(folders.path(&p, "moved", "new"), outside);
+        assert_eq!(folders.path(&p.dir, "moved", "new"), outside);
         assert_eq!(p.line_folder("moved", "new"), p.default_line_path("new"));
         std::fs::remove_file(p.paths_file())?;
         assert_eq!(p.line_folder("renamed", "new"), p.default_line_path("new"));

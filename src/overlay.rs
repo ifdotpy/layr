@@ -4691,13 +4691,111 @@ mod read_open_tests {
             let marker = queue.join(&fixture.head);
             std::fs::write(&marker, b"")?;
             assert!(crate::retention::overlay_named_states_maintenance(&repo)?.is_none());
-            crate::objstore::retire_native_maintenance(&repo)?;
+            crate::objstore::retire_native_maintenance(&repo, None)?;
             assert!(marker.exists());
             std::fs::remove_dir(&pending)?;
             drop(held);
         }
         let named = crate::retention::overlay_named_states_maintenance(&repo)?.expect("available overlays");
         assert!(named.contains(&fixture.head));
+        Ok(())
+    }
+
+    #[test]
+    fn finish_native_retirement_uses_markers_and_drop_rows() -> Result<()> {
+        // Other tests fork and can inherit a preparation lock file descriptor.
+        if std::env::var_os("LAYR_TEST_NATIVE_RETIRE_CHILD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "overlay::read_open_tests::finish_native_retirement_uses_markers_and_drop_rows", "--nocapture"])
+                .env("LAYR_TEST_NATIVE_RETIRE_CHILD", "1")
+                .status()?;
+            anyhow::ensure!(status.success(), "isolated native retirement test failed");
+            return Ok(());
+        }
+        let fixture = Fixture::new()?;
+        let repo = Repo::open(&fixture.ctx, "p")?;
+        let conn = repo.p.db.test_connection();
+        let markers = repo.p.meta_dir().join("object-native");
+        std::fs::create_dir(&markers)?;
+        let finish = || crate::objstore::finish_native_retirement(&fixture.ctx, "p", &repo.p.dir, Some(conn));
+
+        let before = crate::store::project_open_count();
+        finish()?;
+        assert_eq!(crate::store::project_open_count(), before, "empty markers need no project reopen");
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let line = repo.line("main")?;
+            let moved = fixture.ctx.cwd.with_file_name("moved");
+            let _lock = repo.p.lock_maintenance()?;
+            std::fs::rename(&fixture.ctx.cwd, &moved)?;
+            repo.p.set_moved_path(&line.id, Some(&moved))?;
+            drop(_lock);
+            let marker = markers.join(&fixture.head);
+            std::fs::write(&marker, b"")?;
+            finish()?;
+            assert_eq!(crate::store::project_open_count(), before, "a moved working head needs no project reopen");
+
+            let objects = crate::objstore::open(&repo.p)?;
+            let options = layr_objects::write::WriteOptions {
+                temperature: layr_objects::Temperature::Hot,
+                previous: None,
+                exclude: Vec::new(),
+                similar: false,
+            };
+            let refs = layr_objects::write::write_tree(&objects, &repo.p.state_path(&fixture.head), &options)?;
+            let record = json!({
+                "id": fixture.head, "kind": "commit", "subvol": "", "time": 0,
+                "author": {"name": "test", "email": ""},
+                "tree": refs.tree.unwrap().to_string(), "times": refs.times.unwrap().to_string()
+            });
+            conn.execute("INSERT INTO states(id, rec) VALUES (?1, ?2)", (&fixture.head, record.to_string()))?;
+            assert!(crate::objstore::verified(&repo.p, &fixture.head)?.is_some());
+
+            // This marker was unresolved in preflight. The line gained a local folder before the locked pass.
+            let reads = crate::db::STATE_READS.get();
+            crate::objstore::retire_native_maintenance(&repo, Some(vec![fixture.head.clone()]))?;
+            assert_eq!(crate::db::STATE_READS.get() - reads, 1, "the now-protected copy skips object verification");
+            assert!(marker.exists());
+            assert!(repo.p.has_state(&fixture.head));
+
+            let paths = crate::linepaths::paths_file_in(&repo.p.meta_dir());
+            let valid = std::fs::read(&paths)?;
+            std::fs::write(&paths, b"{invalid")?;
+            assert!(finish().is_err());
+            assert!(marker.exists());
+            assert!(repo.p.has_state(&fixture.head));
+            std::fs::write(&paths, valid)?;
+
+            conn.execute("UPDATE states SET rec='invalid JSON' WHERE id=?1", [&fixture.head])?;
+            let unresolved = markers.join(ids::new_id());
+            std::fs::write(&unresolved, b"")?;
+            let reads = crate::db::STATE_READS.get();
+            finish()?;
+            assert_eq!(crate::db::STATE_READS.get() - reads, 1, "a mixed batch inspects only the unresolved marker");
+            assert!(marker.exists() && unresolved.exists());
+            assert!(crate::objstore::retire_native(&repo).is_err(), "explicit GC inspects even the kept head");
+            std::fs::remove_file(unresolved)?;
+            conn.execute("DELETE FROM states WHERE id=?1", [&fixture.head])?;
+            std::fs::remove_file(marker)?;
+        }
+
+        let unknown = ids::new_id();
+        let marker = markers.join(&unknown);
+        std::fs::write(&marker, b"")?;
+        finish()?;
+        assert!(crate::store::project_open_count() > before, "an unresolved marker needs the guarded pass");
+        assert!(marker.exists());
+        std::fs::remove_file(marker)?;
+
+        let live = crate::free::self_holder();
+        conn.execute("INSERT INTO owners VALUES (?1,'drop','2147483647:'),(?1,'drop',?2)", (&unknown, &live))?;
+        let preparation = crate::objstore::preparation_lease(&repo.p)?;
+        finish()?;
+        assert_eq!(repo.p.db.drop_rows()?.len(), 2, "a busy preparation defers recovery");
+        drop(preparation);
+        finish()?;
+        assert_eq!(repo.p.db.drop_rows()?, [(unknown, live)], "only the dead holder is recovered");
         Ok(())
     }
 

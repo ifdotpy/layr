@@ -44,7 +44,7 @@ fn overlay_project_named_states(overlays: Vec<Project<'_>>) -> Result<BTreeSet<S
 /// the states whose trees went.
 pub(crate) fn drop_trees(repo: &Repo, ids: &[String]) -> Result<Vec<String>> {
     let mut left: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (state, _, holder) in repo.p.db.owner_rows()?.into_iter().filter(|r| r.1 == "drop") {
+    for (state, holder) in repo.p.db.drop_rows()? {
         if !crate::free::holder_alive(&holder) {
             left.entry(holder).or_default().push(state);
         }

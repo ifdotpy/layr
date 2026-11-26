@@ -71,6 +71,10 @@ queue = meta / 'object-native'
 queue.mkdir(exist_ok=True)
 marker = queue / state
 marker.touch()
+# A working head can now skip the lock altogether. Include an unresolved marker
+# so the reader still exercises the guarded attempt.
+unresolved = queue / '00000000-0000-4000-8000-000000000001'
+unresolved.touch()
 
 holder = reader = None
 prompt = False
@@ -118,6 +122,7 @@ finally:
             raise
 
 assert reader.returncode == 0, (root / 'reader.err').read_text()
+unresolved.unlink()
 if sys.platform != 'darwin':
     # Off macOS the head of a line keeps its native copy for the next incremental object write.
     run('gc', '-q', cwd=work)

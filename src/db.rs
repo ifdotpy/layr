@@ -1083,8 +1083,11 @@ impl Db {
     }
 
     pub fn lines(&self) -> Result<Vec<Line>> {
-        let mut st =
-            self.conn.prepare_cached("SELECT id, name, owner, machine, head FROM lines WHERE deleted=0 ORDER BY name")?;
+        Self::read_lines(&self.conn)
+    }
+
+    pub(crate) fn read_lines(conn: &Connection) -> Result<Vec<Line>> {
+        let mut st = conn.prepare_cached("SELECT id, name, owner, machine, head FROM lines WHERE deleted=0 ORDER BY name")?;
         let v = st.query_map([], Self::line_row)?.collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
