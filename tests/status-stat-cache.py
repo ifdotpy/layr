@@ -124,9 +124,18 @@ same("mapping closed")
 # Persisted format/version mismatches and truncation must safely rebuild the cache.
 cache = next((root / "store/projects/cache/meta/status").glob("*.cache"))
 raw = json.loads(cache.read_bytes())
+assert raw["format"] == 6 and isinstance(raw["entries"], list) and all(len(e) == 2 for e in raw["entries"]), "entries are [path, fingerprint] pairs"
 raw["version"] = "old version"
 cache.write_text(json.dumps(raw))
 same("version invalidation")
+cache = next((root / "store/projects/cache/meta/status").glob("*.cache"))
+raw = json.loads(cache.read_bytes())
+assert raw["version"] != "old version", "the rebuilt cache is current"
+raw["format"] = 5
+cache.write_text(json.dumps(raw))
+same("format invalidation")
+cache = next((root / "store/projects/cache/meta/status").glob("*.cache"))
+assert json.loads(cache.read_bytes())["format"] == 6, "the rebuilt cache is format 6"
 cache.write_bytes(b"truncated")
 same("corrupt cache fallback")
 print("STATUS CACHE PASS", flush=True)
