@@ -1,5 +1,5 @@
 //! zstd frames with a chosen level, long-distance matching and an optional dictionary (pack
-//! blocks; `layr_store::zst` makes the loose frames).
+//! blocks; `layr_zstd_frame` makes the loose frames).
 
 use anyhow::{anyhow, ensure, Result};
 use zstd_safe::{CCtx, CParameter, DCtx};

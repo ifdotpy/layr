@@ -610,7 +610,7 @@ mod tests {
         assert!(store.stat().unwrap().whole_blobs == 200);
         store.pack().unwrap();
         assert_eq!(fs::read_dir(dir.join("store/dicts")).unwrap().count(), 1, "the repack trained one dictionary");
-        let plain = layr_store::zst::compress(file(1000).as_bytes(), None).unwrap().len();
+        let plain = layr_zstd_frame::compress(file(1000).as_bytes(), None).unwrap().len();
         let (id, _) = store.put_cold_bytes(file(1000).as_bytes(), None).unwrap();
         let hex = id.hex();
         let loose = fs::read(dir.join("store/objects").join(&hex[..2]).join(&hex[2..])).unwrap();

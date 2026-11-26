@@ -1,0 +1,21 @@
+[lints]
+workspace = true
+
+[package]
+name = "layr-zstd-frame"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "Shared zstd framing for Layr objects and vaults"
+license = "MIT"
+publish = false
+
+[features]
+default = ["native"]
+native = ["dep:zstd-safe"]
+wasm = ["dep:ruzstd"]
+
+[dependencies]
+anyhow = "1"
+ruzstd = { version = "0.9", optional = true }
+zstd-safe = { version = "7", features = ["std"], optional = true }

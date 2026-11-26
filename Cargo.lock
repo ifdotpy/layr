@@ -2056,7 +2056,7 @@ dependencies = [
  "layr-fs-core",
  "layr-hashers",
  "layr-object-format",
- "layr-store",
+ "layr-zstd-frame",
  "rayon",
  "rustix",
  "zstd-safe",
@@ -2091,15 +2091,14 @@ dependencies = [
  "hmac",
  "layr-hashers",
  "layr-object-format",
+ "layr-zstd-frame",
  "rand 0.8.8",
  "reqwest",
- "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "ssh-key",
  "uuid",
- "zstd-safe",
 ]
 
 [[package]]
@@ -2115,6 +2114,15 @@ version = "0.55.2"
 dependencies = [
  "hex",
  "uuid",
+]
+
+[[package]]
+name = "layr-zstd-frame"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ruzstd",
+ "zstd-safe",
 ]
 
 [[package]]

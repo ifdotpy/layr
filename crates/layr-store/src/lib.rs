@@ -15,7 +15,7 @@ pub mod paths;
 #[cfg(feature = "native")]
 pub mod s3;
 #[cfg(any(feature = "native", feature = "wasm"))]
-pub mod zst;
+pub use layr_zstd_frame as zst;
 
 pub mod person;
 pub mod public;

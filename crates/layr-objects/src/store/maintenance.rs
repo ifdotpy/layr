@@ -1179,7 +1179,7 @@ mod tests {
     fn self_referencing_chunk_lists_and_deltas_are_damage() {
         let dir = scratch("self-reference");
         let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
-        let frame = layr_store::zst::compress(b"x", None).unwrap();
+        let frame = zst::compress(b"x", None).unwrap();
         let list = Keying::Plain.id(Kind::Blob, b"a chunk list that names itself");
         let mut bytes = b"LOB1bc".to_vec();
         varint_into(&mut bytes, 1);
@@ -1219,7 +1219,7 @@ mod tests {
         let dir = scratch("delta-chain-limit");
         let store = Store::open(&dir.join("store"), Keying::Plain).unwrap();
         let (whole, _) = store.put_cold_bytes(b"the end of a chain", None).unwrap();
-        let frame = layr_store::zst::compress(b"x", None).unwrap();
+        let frame = zst::compress(b"x", None).unwrap();
         // Delta n names delta n - 1 as its base; delta 0 names the whole blob.
         let mut base = whole;
         let mut chain = Vec::new();
@@ -1340,7 +1340,7 @@ mod tests {
         let chunk = Keying::Plain.id(Kind::Chunk, b"a chunk");
         let mut bytes = b"LOB1cy".to_vec();
         bytes.extend_from_slice(&dict.0);
-        bytes.extend_from_slice(&layr_store::zst::compress(b"a chunk", None).unwrap());
+        bytes.extend_from_slice(&zst::compress(b"a chunk", None).unwrap());
         place(&chunk, &bytes);
         let list = Keying::Plain.id(Kind::Blob, b"a chunk");
         let mut bytes = b"LOB1bc".to_vec();

@@ -1,5 +1,7 @@
-//! zstd frames of the vault. A delta frame takes the previous content as a raw dictionary, as
-//! `zstd --patch-from` and the writer make it.
+//! Shared zstd framing for Layr objects and vaults. A delta frame uses the previous content
+//! as a raw dictionary, as in `zstd --patch-from`.
+#![deny(unsafe_code)]
+#![cfg(any(feature = "native", feature = "wasm"))]
 
 #[cfg(feature = "native")]
 use anyhow::anyhow;
@@ -66,17 +68,26 @@ pub fn decompress_with_limit(frame: &[u8], base: Option<&[u8]>, limit: usize) ->
     decompress_stream(frame, base, limit)
 }
 
-/// Decode an indexed pack directly into its size-bounded output, without a streaming window.
-#[cfg(feature = "native")]
+/// Decode an indexed pack into its size-bounded output. The native backend decodes
+/// directly into the output without a streaming window.
 pub fn decompress_pack(frame: &[u8], size: usize, limit: usize) -> Result<Vec<u8>> {
     anyhow::ensure!(size <= limit, "pack exceeds its size limit");
-    anyhow::ensure!(zstd_safe::find_frame_compressed_size(frame).map_err(error)? == frame.len(), "bytes after the zstd frame");
-    let mut dctx = DCtx::create();
-    let window_log = usize::BITS - (limit - 1).leading_zeros();
-    dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(window_log)).map_err(error)?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(size)?;
-    dctx.decompress(&mut out, frame).map_err(error)?;
+    #[cfg(feature = "native")]
+    let out = {
+        anyhow::ensure!(
+            zstd_safe::find_frame_compressed_size(frame).map_err(error)? == frame.len(),
+            "bytes after the zstd frame"
+        );
+        let mut dctx = DCtx::create();
+        let window_log = usize::BITS - (limit - 1).leading_zeros();
+        dctx.set_parameter(zstd_safe::DParameter::WindowLogMax(window_log)).map_err(error)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(size)?;
+        dctx.decompress(&mut out, frame).map_err(error)?;
+        out
+    };
+    #[cfg(not(feature = "native"))]
+    let out = decompress_with_limit(frame, None, size)?;
     anyhow::ensure!(out.len() == size, "pack size differs from its index");
     Ok(out)
 }
@@ -328,13 +339,13 @@ mod rust_tests {
 
     #[test]
     fn rust_decoder_reads_pack_frames_with_a_long_window() {
-        // A chunk pack: 4 MiB with repeats far apart, at the pack level with long-distance matching.
+        // A chunk pack: 4 MiB with repeats far apart, with long-distance matching.
         let block = tests::text(20_000);
         let mut data = Vec::new();
         while data.len() < 4 << 20 {
             data.extend_from_slice(&block);
         }
-        let frame = compress_level(&data, crate::chunks::PACK_LEVEL).unwrap();
+        let frame = compress_level(&data, 12).unwrap();
         assert!(frame.len() * 10 < data.len());
         assert_eq!(decompress_rust(&frame, None, data.len()).unwrap(), data);
     }
@@ -352,5 +363,33 @@ mod rust_tests {
         assert!(decompress_rust(&frame, None, data.len() - 1).is_err());
         *frame.last_mut().unwrap() ^= 1;
         assert!(decompress_rust(&frame, None, LIMIT).is_err());
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn reads_frames_written_by_layr_0_55_2() -> Result<()> {
+        // The release wrote these same bytes for a loose frame and a one-chunk pack.
+        let plain = b"existing Layr zstd frame\n";
+        let frame = b"\x28\xb5\x2f\xfd\x20\x19\xc9\x00\x00existing Layr zstd frame\n";
+        assert_eq!(decompress(frame, None)?, plain);
+        assert!(decompress_with_limit(frame, None, plain.len() - 1).is_err());
+        check_pack_header(frame, 1024)?;
+        assert_eq!(decompress_pack(frame, plain.len(), 1024)?, plain);
+        assert!(decompress_pack(frame, plain.len() + 1, 1024).is_err());
+
+        let base = br#"fn sample(value: &str) -> String {
+    let result = format!("result: {value}");
+    result.to_uppercase()
+}
+"#;
+        let delta =
+            b"\x28\xb5\x2f\xfd\x20\x7c\xbd\x00\x00\x80// revision two\n\x01\x00\xe9\x4d\x03\x10";
+        assert_eq!(decompress(delta, Some(base))?, [base.as_slice(), b"// revision two\n"].concat());
+        assert!(decompress(delta, None).is_err());
+        Ok(())
     }
 }

@@ -9,6 +9,7 @@ members = [
   "crates/fs/plain",
   "crates/fs/unix",
   "crates/store/object-format",
+  "crates/store/zstd-frame",
   "crates/layr-api",
   "crates/layr-store",
   "crates/layr-model",
@@ -56,11 +57,20 @@ layr-object-format = { layer = 1, dependencies = [
   "layr-hashers",
   "hmac",
 ] }
-layr-store = { layer = 1, dependencies = ["layr-hashers", "layr-object-format"] }
+layr-zstd-frame = { layer = 0, dependencies = [
+], leaf = true, normal-dependencies = [
+  "anyhow",
+  "ruzstd",
+  "zstd-safe",
+], allow-heavy = [
+  "anyhow",
+  "zstd-safe",
+] }
+layr-store = { layer = 1, dependencies = ["layr-hashers", "layr-object-format", "layr-zstd-frame"] }
 layr-cache = { layer = 1, dependencies = ["layr-adapter"] }
 layr-model = { layer = 2, dependencies = ["layr-hashers", "layr-store", "layr-types"] }
 layr-matching = { layer = 0, dependencies = [], leaf = true, normal-dependencies = [] }
-layr-objects = { layer = 2, dependencies = ["layr-fs-core", "layr-hashers", "layr-object-format", "layr-store"] }
+layr-objects = { layer = 2, dependencies = ["layr-fs-core", "layr-hashers", "layr-object-format", "layr-zstd-frame"] }
 layr-retest = { layer = 2, dependencies = ["layr-cache"] }
 layr = { layer = 3, dependencies = [
   "layr-adapter",

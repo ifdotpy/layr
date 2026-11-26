@@ -46,11 +46,15 @@
     "clippy::struct_excessive_bools": 2
   },
   "layr-store": {
-    "clippy::unwrap_used": 343,
+    "clippy::unwrap_used": 318,
     "clippy::expect_used": 24,
     "clippy::panic": 3,
-    "clippy::cast_possible_truncation": 12,
+    "clippy::cast_possible_truncation": 8,
     "clippy::cast_possible_wrap": 2
+  },
+  "layr-zstd-frame": {
+    "clippy::unwrap_used": 25,
+    "clippy::cast_possible_truncation": 4
   },
   "layr-object-format": {
     "clippy::cast_sign_loss": 4,

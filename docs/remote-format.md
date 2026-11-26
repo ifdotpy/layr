@@ -271,7 +271,8 @@ S7eww50UaRLUiyu646IdgZiC53cdiJQ7gTfMrT7cD9FnDeikWWfB3I4VC6LGDsUi7lSkm3ex6DkYBY7X
 Python JSON encoding and OpenSSL Ed25519 independently reproduce both vectors.
 Changes to the header, btrfs identity, or tree content must fail verification.
 `keys::tests::paper_and_machine_slots_open_the_same_identity` checks both slot forms and a wrong machine key.
-`zst::tests::frames_decode_with_and_without_a_base` checks full and raw-prefix delta frames.
+`cargo test --locked -p layr-zstd-frame tests::frames_decode_with_and_without_a_base`
+checks full and raw-prefix delta frames.
 
 Legacy cache layer snapshots do not use this format. The writer reports their names as omitted.
 After Core adds cache states, `--caches` carries these ordinary states under `states/<UUID>/`.

@@ -285,6 +285,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn signing_identity_is_sealed_to_one_person_and_bound_to_its_public_key() {
         let identity = keys::generate_identity();

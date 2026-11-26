@@ -12,18 +12,25 @@ publish = false
 
 [features]
 default = ["native"]
-native = ["dep:chrono", "dep:rand", "dep:reqwest", "dep:zstd-safe", "ed25519-dalek/rand_core", "uuid/v7"]
-wasm = ["dep:getrandom", "dep:ruzstd"]
+native = [
+  "dep:chrono",
+  "dep:rand",
+  "dep:reqwest",
+  "dep:layr-zstd-frame",
+  "layr-zstd-frame/native",
+  "ed25519-dalek/rand_core",
+  "uuid/v7",
+]
+wasm = ["dep:getrandom", "dep:layr-zstd-frame", "layr-zstd-frame/wasm"]
 
 [dependencies]
 layr-object-format = { path = "../store/object-format" }
+layr-zstd-frame = { path = "../store/zstd-frame", default-features = false, optional = true }
 anyhow = "1"
 age = { version = "0.11", features = ["ssh"] }
 bech32 = "0.11"
 bip39 = "2"
 ssh-key = { version = "0.6", features = ["ed25519"] }
-zstd-safe = { version = "7", features = ["std"], optional = true }
-ruzstd = { version = "0.9", optional = true }
 getrandom = { version = "0.2", features = ["js"], optional = true }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
@@ -37,3 +44,7 @@ serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "http2"], optional = true }
 layr-hashers = { path = "../layr-hashers", default-features = false, features = ["git"] }
 uuid = "1"
+
+[[example]]
+name = "release_store_probe"
+required-features = ["native"]

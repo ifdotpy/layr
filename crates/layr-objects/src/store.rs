@@ -21,6 +21,8 @@ use crate::id::{Id, Keying, Kind};
 use crate::pack::{self, Builder, Index, LazyIndex};
 use crate::tree::{varint_into, Reader, Tree};
 use anyhow::{bail, ensure, Context, Result};
+use layr_object_format::chunks;
+use layr_zstd_frame as zst;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -597,7 +599,7 @@ impl Store {
                 let kind = header.kind;
                 Ok(match header.form {
                     loose::Form::Whole => {
-                        Payload { kind, form: pack::RAW, bytes: layr_store::zst::decompress(&data[6..], None)? }
+                        Payload { kind, form: pack::RAW, bytes: zst::decompress(&data[6..], None)? }
                     }
                     loose::Form::Dictionary => {
                         ensure!(data.len() > 6 + 32, "object {id} is cut short");
@@ -696,7 +698,7 @@ impl Store {
         let bytes = tree.encode();
         let id = self.keying.id(Kind::Tree, &bytes);
         if !self.present(&id, false)? {
-            let frame = layr_store::zst::compress(&bytes, None)?;
+            let frame = zst::compress(&bytes, None)?;
             self.write_object(&id, Kind::Tree, WHOLE, &[&frame])?;
         }
         Ok(id)
@@ -706,7 +708,7 @@ impl Store {
         let bytes = times.encode();
         let id = self.keying.id(Kind::Times, &bytes);
         if !self.present(&id, false)? {
-            let frame = layr_store::zst::compress(&bytes, None)?;
+            let frame = zst::compress(&bytes, None)?;
             self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
         }
         Ok(id)
@@ -731,7 +733,7 @@ impl Store {
     pub(crate) fn put_times_unchecked_for_test(&self, bytes: &[u8]) -> Result<Id> {
         let id = self.keying.id(Kind::Times, bytes);
         if !self.present(&id, false)? {
-            let frame = layr_store::zst::compress(bytes, None)?;
+            let frame = zst::compress(bytes, None)?;
             self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
         }
         Ok(id)
@@ -742,7 +744,7 @@ impl Store {
         crate::cloud_times::validate(bytes)?;
         let id = self.keying.id(Kind::Times, bytes);
         if !self.present(&id, false)? {
-            let frame = layr_store::zst::compress(bytes, None)?;
+            let frame = zst::compress(bytes, None)?;
             self.write_object(&id, Kind::Times, WHOLE, &[&frame])?;
         }
         Ok(id)
@@ -931,7 +933,7 @@ impl Store {
                 if base.len() as u64 > self.options.delta_max {
                     continue;
                 }
-                let frame = layr_store::zst::compress(data, Some(&base))?;
+                let frame = zst::compress(data, Some(&base))?;
                 if best.as_ref().is_none_or(|(b, _, _)| frame.len() < b.len()) {
                     best = Some((frame, *base_id, depth));
                 }
@@ -958,11 +960,11 @@ impl Store {
     fn whole_frame(&self, data: &[u8]) -> Result<(u8, Vec<u8>, Vec<u8>)> {
         if data.len() <= DICT_FILE_MAX {
             if let Some((dict_id, dict)) = self.dict.read().expect("no panic holds the lock").clone() {
-                let codec = crate::zstdx::Codec { level: layr_store::zst::LEVEL, long: false, dict: Some(dict.to_vec()) };
+                let codec = crate::zstdx::Codec { level: zst::LEVEL, long: false, dict: Some(dict.to_vec()) };
                 return Ok((WHOLE_DICT, dict_id.0.to_vec(), crate::zstdx::compress(data, &codec)?));
             }
         }
-        Ok((WHOLE, Vec::new(), layr_store::zst::compress(data, None)?))
+        Ok((WHOLE, Vec::new(), zst::compress(data, None)?))
     }
 
     fn load_dict(&self) -> Result<()> {
@@ -1034,7 +1036,7 @@ impl Store {
     fn put_chunk(&self, chunk: &[u8]) -> Result<Id> {
         let id = self.keying.id(Kind::Chunk, chunk);
         if !self.present(&id, false)? {
-            let frame = layr_store::zst::compress(chunk, None)?;
+            let frame = zst::compress(chunk, None)?;
             self.write_object(&id, Kind::Chunk, WHOLE, &[&frame])?;
         }
         Ok(id)
@@ -1042,7 +1044,7 @@ impl Store {
 
     fn put_chunked_bytes(&self, id: Id, data: &[u8]) -> Result<()> {
         let mut list = Vec::new();
-        let chunks = layr_store::chunks::split(data);
+        let chunks = chunks::split(data);
         varint_into(&mut list, chunks.len() as u64);
         for chunk in chunks {
             list.extend_from_slice(&self.put_chunk(chunk)?.0);
@@ -1055,7 +1057,7 @@ impl Store {
     /// Chunk a large file as a stream: the cut points are those of `chunks::split` on the whole
     /// file, because a cut depends only on the bytes from the chunk start up to `chunks::MAX`.
     fn put_chunked_file(&self, path: &Path) -> Result<(Id, u64)> {
-        use layr_store::chunks::MAX;
+        use chunks::MAX;
         let mut f = File::open(path)?;
         let len = f.metadata()?.len();
         let mut h = self.keying.hasher(Kind::Blob, len);
@@ -1074,7 +1076,7 @@ impl Store {
                 break;
             }
             let mut used = 0;
-            for chunk in layr_store::chunks::split(&buf) {
+            for chunk in chunks::split(&buf) {
                 // A chunk that starts in the last MAX bytes may end at the buffer end, not at its cut.
                 if !eof && buf.len() - used < MAX {
                     break;
@@ -1145,7 +1147,7 @@ impl Store {
             pack::DELTA => {
                 let base_id = Id(body[1..33].try_into().expect("32 bytes"));
                 let base = self.read_blob_unchecked(&base_id, depth + 1, true)?;
-                damage_of(|| layr_store::zst::decompress(&body[33..], Some(&base)))
+                damage_of(|| zst::decompress(&body[33..], Some(&base)))
             }
             _ => {
                 let mut out = Vec::new();
@@ -2119,7 +2121,7 @@ mod tests {
         assert_eq!(store.read_blob(&id).unwrap(), data);
         let s = store.stat().unwrap();
         // The stream cut the file where `split` cuts the whole file.
-        assert_eq!(s.chunks, layr_store::chunks::split(&data).len() as u64);
+        assert_eq!(s.chunks, chunks::split(&data).len() as u64);
         // The in-memory path gives the same chunks: an edit far from the start shares most of them.
         let mut edited = data.clone();
         edited[4 << 20] ^= 1;
@@ -2150,7 +2152,7 @@ mod tests {
         let path = dir.join("dictionary-form");
         let mut bytes = b"LOB1by".to_vec();
         bytes.extend_from_slice(&[0; 32]);
-        bytes.extend_from_slice(&layr_store::zst::compress(&[5; 3000], None).unwrap());
+        bytes.extend_from_slice(&zst::compress(&[5; 3000], None).unwrap());
         fs::write(&path, bytes).unwrap();
         assert_eq!(check_loose(&path).unwrap().unwrap().input, 3000);
     }
@@ -2201,7 +2203,7 @@ mod tests {
         let mut perms = fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o644);
         fs::set_permissions(&path, perms).unwrap();
-        let other = layr_store::zst::compress(b"changed!", None).unwrap();
+        let other = zst::compress(b"changed!", None).unwrap();
         let mut bytes = b"LOB1bz".to_vec();
         bytes.extend_from_slice(&other);
         fs::write(&path, bytes).unwrap();

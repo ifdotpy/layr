@@ -13,10 +13,10 @@ publish = false
 [dependencies]
 layr-fs-core = { path = "../fs/core" }
 layr-object-format = { path = "../store/object-format" }
+layr-zstd-frame = { path = "../store/zstd-frame", default-features = false, features = ["native"] }
 anyhow = "1"
 hmac = "0.12"
 layr-hashers = { path = "../layr-hashers", default-features = false, features = ["sha256"] }
-layr-store = { path = "../layr-store" }
 rayon = "1"
 rustix = { version = "1", features = ["fs", "process"] }
 zstd-safe = { version = "7", features = ["std"] }

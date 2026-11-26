@@ -137,16 +137,12 @@ impl Builder {
 }
 
 /// The plaintext of a pack, checked against its index.
+#[cfg(any(feature = "native", feature = "wasm"))]
 pub fn open_pack(frame: &[u8], index: &Index) -> anyhow::Result<Vec<u8>> {
     let size = usize::try_from(index.size())?;
     anyhow::ensure!(size <= PACK_LIMIT, "pack exceeds its size limit");
     crate::zst::check_pack_header(frame, PACK_LIMIT)?;
-    #[cfg(feature = "native")]
-    let data = crate::zst::decompress_pack(frame, size, PACK_LIMIT)?;
-    #[cfg(not(feature = "native"))]
-    let data = crate::zst::decompress_with_limit(frame, None, size)?;
-    anyhow::ensure!(data.len() as u64 == index.size(), "pack size differs from its index");
-    Ok(data)
+    crate::zst::decompress_pack(frame, size, PACK_LIMIT)
 }
 
 #[cfg(test)]
