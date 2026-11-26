@@ -2072,9 +2072,6 @@ fn grep_lines(data: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     data.split(|b| *b == b'\n').enumerate().take_while(move |(i, l)| !(*i > 0 && *i == final_segment && l.is_empty()))
 }
 
-#[allow(dead_code)]
-fn unused(_: &Here) {}
-
 #[cfg(test)]
 mod tests {
     use super::rev_argument;

@@ -1059,7 +1059,7 @@ impl<'a> Project<'a> {
     }
 
     /// A new project on the default volume (the tests make most of their projects this way).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn create(store: &'a Store, name: &str, actor: &Actor, config: serde_json::Value) -> Result<Project<'a>> {
         Self::create_on(store, name, None, actor, config)
     }

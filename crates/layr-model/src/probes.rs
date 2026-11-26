@@ -94,11 +94,11 @@ pub struct RunResult {
 }
 /// File data needed to compare a probe. Hashes come from the supplied bytes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct FileData {
-    size: u64,
-    sha256: String,
+pub struct FileData {
+    pub size: u64,
+    pub sha256: String,
     #[serde(skip)]
-    text: Option<String>,
+    pub text: Option<String>,
 }
 fn files(input: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, FileData> {
     input
@@ -113,7 +113,7 @@ fn files(input: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, FileData> {
         })
         .collect()
 }
-fn metrics(value: &Value) -> Result<BTreeMap<String, f64>> {
+pub fn metrics(value: &Value) -> Result<BTreeMap<String, f64>> {
     let object = value.as_object().context("expected an object of numeric metrics")?;
     object
         .iter()
@@ -248,7 +248,7 @@ pub fn diff(project: &Project, base: &Subject, head: &Subject, context: &Context
         let changes = if p.kind == Kind::Screenshots {
             screenshots::compare(&context.outputs[&a.output_state], &context.outputs[&b.output_state], p)?
         } else {
-            compare(&before, &after, p)?
+            compare(&before, &after, p.kind, p.noise)?
         };
         if p.kind == Kind::Number
             && changes.is_empty()
@@ -276,7 +276,8 @@ pub fn diff(project: &Project, base: &Subject, head: &Subject, context: &Context
     })
 }
 
-fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, probe: &Probe) -> Result<Vec<Value>> {
+/// The changed files of a `Files`, `Json` or `Number` probe (screenshots compare decoded outputs).
+pub fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, kind: Kind, noise: f64) -> Result<Vec<Value>> {
     let paths: BTreeSet<_> = old.keys().chain(new.keys()).collect();
     let mut out = Vec::new();
     for path in paths {
@@ -284,7 +285,7 @@ fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, p
         if a.zip(b).map(|(a, b)| a.sha256 == b.sha256).unwrap_or(false) {
             continue;
         }
-        match probe.kind {
+        match kind {
             Kind::Screenshots => unreachable!("screenshots compare decoded outputs"),
             Kind::Files => {
                 let text = a.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
@@ -307,12 +308,12 @@ fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, p
                     .transpose()
                 };
                 let (a, b) = (parse(a)?, parse(b)?);
-                let changes = if probe.kind == Kind::Json {
+                let changes = if kind == Kind::Json {
                     let mut rows = Vec::new();
                     json_changes(a.as_ref(), b.as_ref(), "", &mut rows);
                     rows
                 } else {
-                    number_changes(a.as_ref(), b.as_ref(), probe.noise)?
+                    number_changes(a.as_ref(), b.as_ref(), noise)?
                 };
                 if !changes.is_empty() {
                     out.push(json!({"path":path,"changes":changes}));
@@ -379,7 +380,8 @@ mod tests {
         compare(
             &files(&BTreeMap::from([("out".into(), a.to_vec())])),
             &files(&BTreeMap::from([("out".into(), b.to_vec())])),
-            &definition(kind),
+            kind,
+            0.05,
         )
         .unwrap()
     }
@@ -394,6 +396,16 @@ mod tests {
         assert_ne!(binary[0]["before"]["sha256"], binary[0]["after"]["sha256"]);
     }
     #[test]
+    fn mixed_outputs_come_in_path_order_with_exact_hashes() {
+        let file = |text: Option<&str>, hash: &str| FileData { size: 3, sha256: hash.into(), text: text.map(str::to_owned) };
+        let old = BTreeMap::from([("text".into(), file(Some("old\n"), "a")), ("binary".into(), file(None, "b"))]);
+        let new = BTreeMap::from([("text".into(), file(Some("new\n"), "c")), ("binary".into(), file(None, "d"))]);
+        let changes = compare(&old, &new, Kind::Files, 0.05).unwrap();
+        assert_eq!(changes[0]["kind"], "binary");
+        assert_eq!(changes[0]["before"]["sha256"], "b");
+        assert!(changes[1]["diff"].as_str().unwrap().contains("+new"));
+    }
+    #[test]
     fn json_paths_escape_reserved_characters() {
         let delta = compare_bytes(Kind::Json, br#"{"a/b":{"~key":[1]}}"#, br#"{"a/b":{"~key":[2]}}"#);
         assert_eq!(delta[0]["changes"][0]["key"], "/a~1b/~0key/0");
@@ -405,6 +417,29 @@ mod tests {
         assert_eq!(delta[0]["changes"][0]["relative_change"], -0.1);
         assert!(delta[0]["changes"][1]["relative_change"].is_null());
         assert!(metrics(&json!({"wrong":"1"})).is_err());
+    }
+    #[test]
+    fn structural_json_diff_tracks_keys_arrays_and_null() {
+        let a = json!({"a/b":{"~key":[1,null]},"removed":null});
+        let b = json!({"a/b":{"~key":[2,null,3]},"added":null});
+        let mut changes = Vec::new();
+        json_changes(Some(&a), Some(&b), "", &mut changes);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().any(|c| c["key"] == "/a~1b/~0key/0" && c["after"] == 2));
+        assert!(changes.iter().any(|c| c["key"] == "/removed" && c["change"] == "remove"));
+        assert!(changes.iter().any(|c| c["key"] == "/added" && c["change"] == "add"));
+    }
+    #[test]
+    fn metric_diff_applies_noise_and_handles_zero_baselines() {
+        let a = json!({"quiet":100,"slow":100,"zero":0,"negative":-100,"gone":2});
+        let b = json!({"quiet":104,"slow":110,"zero":1,"negative":-110,"new":4});
+        let rows = number_changes(Some(&a), Some(&b), 0.05).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(!rows.iter().any(|c| c["metric"] == "quiet"));
+        assert_eq!(rows.iter().find(|c| c["metric"] == "slow").unwrap()["relative_change"], 0.1);
+        assert_eq!(rows.iter().find(|c| c["metric"] == "negative").unwrap()["relative_change"], -0.1);
+        assert!(rows.iter().find(|c| c["metric"] == "zero").unwrap()["relative_change"].is_null());
+        assert!(metrics(&json!({"bad":"1"})).is_err());
     }
     #[test]
     fn absence_does_not_claim_a_probe_ran() {

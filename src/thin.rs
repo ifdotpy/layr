@@ -640,7 +640,9 @@ impl Diff {
 #[cfg(target_os = "macos")]
 pub(crate) const OS_MARKER: &[u8] = b"com.apple.provenance";
 
-/// The stored extended attributes of `p`, sorted (`stored_metadata_same`).
+/// The stored extended attributes of `p`, sorted (`stored_metadata_same`). The system stamps
+/// `com.apple.provenance` on a file and no user sets it, so it does not count (as in
+/// `fsx::xattrs`). Its value also costs a slow system call on every file.
 #[cfg(target_os = "macos")]
 pub(crate) fn stored_xattrs(p: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let mut x: Vec<_> =
@@ -654,16 +656,7 @@ pub(crate) fn stored_xattrs(p: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
 /// that look equal. A change of them keeps the modification time.
 #[cfg(target_os = "macos")]
 pub(crate) fn stored_metadata_same(a: &Path, b: &Path) -> Result<bool> {
-    // The system stamps `com.apple.provenance` on a file and no user sets it, so it does not
-    // count (as in `fsx::xattrs`). Its value also costs a slow system call on every file.
-    let read = |name: &[u8]| name != OS_MARKER;
-    let list = |p: &Path| -> Result<Vec<_>> {
-        Ok(crate::sys::apfs_xattrs_where(p, read)?.into_iter().filter(|(name, _)| name != OS_MARKER).collect())
-    };
-    let (mut xa, mut xb) = (list(a)?, list(b)?);
-    xa.sort();
-    xb.sort();
-    Ok(xa == xb && crate::sys::apfs_acl_text(a)? == crate::sys::apfs_acl_text(b)?)
+    Ok(stored_xattrs(a)? == stored_xattrs(b)? && crate::sys::apfs_acl_text(a)? == crate::sys::apfs_acl_text(b)?)
 }
 
 /// Produce the native sparse-write plan from shared logical comparison evidence. Scans are

@@ -31,16 +31,10 @@ pub struct Probe {
     #[serde(default = "default_ignore_attributes", skip_serializing_if = "is_default_ignore_attributes")]
     pub ignore_attributes: Vec<String>,
 }
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    #[default]
-    Files,
-    Json,
-    Number,
-    Screenshots,
-}
-use layr_model::probes::{default_ignore_attributes, default_tolerance, is_default_ignore_attributes, is_default_tolerance};
+use layr_model::probes::{
+    compare, default_ignore_attributes, default_tolerance, is_default_ignore_attributes, is_default_tolerance, metrics, Behavior,
+    FileData, Kind, RunResult,
+};
 fn default_noise() -> f64 {
     0.05
 }
@@ -179,15 +173,6 @@ pub fn definitions(repo: &Repo, input: &Input) -> Result<BTreeMap<String, Probe>
     Ok(crate::oci::parse(&text)?.probe)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RunResult {
-    pub probe: String,
-    pub subject: Subject,
-    pub argv: Vec<String>,
-    pub exit: i32,
-    pub output_state: String,
-    pub reused: bool,
-}
 fn reference(name: &str, subject: &str) -> String {
     format!("derived/probe-v1/{name}/{subject}")
 }
@@ -433,13 +418,6 @@ fn collect(source: &Tree, dest: &Tree, paths: &[String], missing_ok: bool) -> Re
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct FileData {
-    size: u64,
-    sha256: String,
-    #[serde(skip)]
-    text: Option<String>,
-}
 fn files(root: &Path) -> Result<BTreeMap<String, FileData>> {
     fn visit(tree: &Tree, path: &str, out: &mut BTreeMap<String, FileData>) -> Result<()> {
         let m = tree.stat(path).ok_or_else(|| anyhow!("missing probe output '{path}'"))?;
@@ -495,33 +473,6 @@ fn validate_outputs(root: &Path, probe: &Probe) -> Result<()> {
     }
     Ok(())
 }
-fn metrics(value: &Value) -> Result<BTreeMap<String, f64>> {
-    let object = value.as_object().context("expected an object of numeric metrics")?;
-    object
-        .iter()
-        .map(|(key, value)| {
-            Ok((
-                key.clone(),
-                value.as_f64().filter(|n| n.is_finite()).with_context(|| format!("metric '{key}' must be a finite number"))?,
-            ))
-        })
-        .collect()
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Behavior {
-    pub base: String,
-    pub head: String,
-    pub base_source: String,
-    pub head_source: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub base_views: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub head_views: Vec<String>,
-    pub probes: Vec<Value>,
-    #[serde(skip)]
-    quiet_noise: BTreeMap<String, f64>,
-}
 pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
     shared_outputs(repo, &base.layers)?;
     shared_outputs(repo, &head.layers)?;
@@ -549,7 +500,7 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
         let changes = if p.kind == Kind::Screenshots {
             screenshots::compare(&base_root, &before, &head_root, &after, p)?
         } else {
-            compare(&before, &after, p)?
+            compare(&before, &after, p.kind, p.noise)?
         };
         if p.kind == Kind::Number
             && changes.is_empty()
@@ -575,90 +526,6 @@ pub fn diff(repo: &Repo, base: &Input, head: &Input) -> Result<Behavior> {
         probes,
         quiet_noise,
     })
-}
-fn compare(old: &BTreeMap<String, FileData>, new: &BTreeMap<String, FileData>, probe: &Probe) -> Result<Vec<Value>> {
-    let paths: BTreeSet<_> = old.keys().chain(new.keys()).collect();
-    let mut out = Vec::new();
-    for path in paths {
-        let (a, b) = (old.get(path), new.get(path));
-        if a.zip(b).map(|(a, b)| a.sha256 == b.sha256).unwrap_or(false) {
-            continue;
-        }
-        match probe.kind {
-            Kind::Screenshots => unreachable!("screenshots compare decoded outputs"),
-            Kind::Files => {
-                let text = a.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
-                let next = b.map(|f| f.text.as_deref().unwrap_or("")).unwrap_or("");
-                if a.into_iter().chain(b).all(|f| f.text.is_some()) {
-                    let patch = similar::TextDiff::from_lines(text, next)
-                        .unified_diff()
-                        .header(&format!("a/{path}"), &format!("b/{path}"))
-                        .to_string();
-                    out.push(json!({"path":path,"kind":"text","change":if a.is_none(){"add"}else if b.is_none(){"remove"}else{"modify"},"diff":patch}));
-                } else {
-                    out.push(json!({"path":path,"kind":"binary","before":a,"after":b}));
-                }
-            }
-            Kind::Json | Kind::Number => {
-                let parse = |f: Option<&FileData>| -> Result<Option<Value>> {
-                    f.map(|f| {
-                        serde_json::from_str(f.text.as_deref().context("stored JSON probe is not text")?).map_err(Into::into)
-                    })
-                    .transpose()
-                };
-                let (a, b) = (parse(a)?, parse(b)?);
-                let changes = if probe.kind == Kind::Json {
-                    let mut rows = Vec::new();
-                    json_changes(a.as_ref(), b.as_ref(), "", &mut rows);
-                    rows
-                } else {
-                    number_changes(a.as_ref(), b.as_ref(), probe.noise)?
-                };
-                if !changes.is_empty() {
-                    out.push(json!({"path":path,"changes":changes}));
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-fn json_changes(a: Option<&Value>, b: Option<&Value>, path: &str, out: &mut Vec<Value>) {
-    if a == b {
-        return;
-    }
-    match (a, b) {
-        (Some(Value::Object(a)), Some(Value::Object(b))) => {
-            for key in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
-                let escaped = key.replace('~', "~0").replace('/', "~1");
-                json_changes(a.get(key), b.get(key), &format!("{path}/{escaped}"), out);
-            }
-        }
-        (Some(Value::Array(a)), Some(Value::Array(b))) => {
-            for i in 0..a.len().max(b.len()) {
-                json_changes(a.get(i), b.get(i), &format!("{path}/{i}"), out);
-            }
-        }
-        _ => out.push(
-            json!({"key":path,"change":if a.is_none(){"add"}else if b.is_none(){"remove"}else{"modify"},"before":a,"after":b}),
-        ),
-    }
-}
-fn number_changes(a: Option<&Value>, b: Option<&Value>, noise: f64) -> Result<Vec<Value>> {
-    let a = a.map(metrics).transpose()?.unwrap_or_default();
-    let b = b.map(metrics).transpose()?.unwrap_or_default();
-    let mut out = Vec::new();
-    for metric in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
-        let (old, new) = (a.get(metric), b.get(metric));
-        if old == new {
-            continue;
-        }
-        let relative = old.zip(new).and_then(|(a, b)| if *a == 0.0 { None } else { Some((b - a) / a.abs()) });
-        if relative.map(|r| r.abs() <= noise).unwrap_or(false) {
-            continue;
-        }
-        out.push(json!({"metric":metric,"before":old,"after":new,"relative_change":relative,"noise":noise}));
-    }
-    Ok(out)
 }
 pub fn print(ctx: &Ctx, behavior: &Behavior) {
     let views: BTreeSet<_> = behavior.base_views.iter().chain(&behavior.head_views).collect();
@@ -923,17 +790,6 @@ mod tests {
     }
 
     use super::*;
-    fn definition(kind: Kind) -> Probe {
-        Probe {
-            run: vec!["/bin/true".into()],
-            outputs: vec!["out".into()],
-            kind,
-            noise: 0.05,
-            fail_over: None,
-            tolerance: default_tolerance(),
-            ignore_attributes: default_ignore_attributes(),
-        }
-    }
     #[test]
     fn private_layer_outputs_require_all_project_readers() {
         use crate::access::{Policy, Role};
@@ -1002,39 +858,5 @@ mod tests {
         assert!(over_limit("p", "m", 0.0, 1.0, 0.2).unwrap().contains("+∞ %"));
         assert!(over_limit("p", "m", -100.0, -79.0, 0.2).is_some());
         assert!(over_limit("p", "m", -100.0, -121.0, 0.2).is_none());
-    }
-
-    #[test]
-    fn structural_json_diff_tracks_keys_arrays_and_null() {
-        let a = json!({"a/b":{"~key":[1,null]},"removed":null});
-        let b = json!({"a/b":{"~key":[2,null,3]},"added":null});
-        let mut changes = Vec::new();
-        json_changes(Some(&a), Some(&b), "", &mut changes);
-        assert_eq!(changes.len(), 4);
-        assert!(changes.iter().any(|c| c["key"] == "/a~1b/~0key/0" && c["after"] == 2));
-        assert!(changes.iter().any(|c| c["key"] == "/removed" && c["change"] == "remove"));
-        assert!(changes.iter().any(|c| c["key"] == "/added" && c["change"] == "add"));
-    }
-    #[test]
-    fn metric_diff_applies_noise_and_handles_zero_baselines() {
-        let a = json!({"quiet":100,"slow":100,"zero":0,"negative":-100,"gone":2});
-        let b = json!({"quiet":104,"slow":110,"zero":1,"negative":-110,"new":4});
-        let rows = number_changes(Some(&a), Some(&b), 0.05).unwrap();
-        assert_eq!(rows.len(), 5);
-        assert!(!rows.iter().any(|c| c["metric"] == "quiet"));
-        assert_eq!(rows.iter().find(|c| c["metric"] == "slow").unwrap()["relative_change"], 0.1);
-        assert_eq!(rows.iter().find(|c| c["metric"] == "negative").unwrap()["relative_change"], -0.1);
-        assert!(rows.iter().find(|c| c["metric"] == "zero").unwrap()["relative_change"].is_null());
-        assert!(metrics(&json!({"bad":"1"})).is_err());
-    }
-    #[test]
-    fn file_diff_reports_hashes_for_binary_and_patches_for_text() {
-        let file = |text: Option<&str>, hash: &str| FileData { size: 3, sha256: hash.into(), text: text.map(str::to_owned) };
-        let old = BTreeMap::from([("text".into(), file(Some("old\n"), "a")), ("binary".into(), file(None, "b"))]);
-        let new = BTreeMap::from([("text".into(), file(Some("new\n"), "c")), ("binary".into(), file(None, "d"))]);
-        let changes = compare(&old, &new, &definition(Kind::Files)).unwrap();
-        assert_eq!(changes[0]["kind"], "binary");
-        assert_eq!(changes[0]["before"]["sha256"], "b");
-        assert!(changes[1]["diff"].as_str().unwrap().contains("+new"));
     }
 }

@@ -13,35 +13,7 @@ pub(crate) mod refs;
 use crate::store::Project;
 use std::collections::BTreeMap;
 
-pub use layr_model::policy::{Role, Rule, RuleSpec};
-
-/// The actions of a project and the lowest role that takes each one. Changes inside a line are
-/// not here: they belong to the owner of the line and to the line's protection rule.
-pub const ACTIONS: &[(&str, Role)] = &[
-    ("read", Role::Reader),
-    ("try", Role::Reader),
-    ("export", Role::Reader),
-    ("line.create", Role::Writer),
-    ("merge", Role::Writer),
-    ("line.manage", Role::Maintainer),
-    ("tag", Role::Maintainer),
-    ("push", Role::Maintainer),
-    ("access", Role::Admin),
-    ("config", Role::Admin),
-    ("remote", Role::Admin),
-    ("sync", Role::Admin),
-    ("gc", Role::Admin),
-    ("records", Role::Admin),
-    ("fsck", Role::Admin),
-];
-
-pub fn action_role(action: &str) -> Option<Role> {
-    ACTIONS.iter().find(|(a, _)| *a == action).map(|(_, r)| *r)
-}
-
-pub fn path_matches(pattern: &str, path: &str) -> bool {
-    layr_model::policy::path_matches(pattern, path)
-}
+pub use layr_model::policy::{action_role, path_matches, Role, Rule, RuleSpec, ACTIONS};
 
 /// Who acts: a uid and its groups.
 #[derive(Clone, Debug)]

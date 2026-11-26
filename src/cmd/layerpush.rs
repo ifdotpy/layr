@@ -161,21 +161,7 @@ fn pushed_state(repo: &Repo, remote: &str, branch: &str) -> Result<Option<String
 fn git_size(repo: &Repo, head: &str, remote: &str, branch: &str) -> Result<String> {
     let n = new_states(repo, head, pushed_state(repo, remote, branch)?.as_deref())?;
     let bytes = crate::overlay::tree_size(&repo.state_root(head)?);
-    Ok(format!("{n} new state(s), tree {}", human(bytes)))
-}
-
-fn human(n: u64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let (mut v, mut i) = (n as f64, 0);
-    while v >= 1024.0 && i + 1 < units.len() {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", units[i])
-    }
+    Ok(format!("{n} new state(s), tree {}", crate::byte_size::human_size(bytes)))
 }
 
 /// The state of overlay `name` that line `line` shows or saved: its overlay line's head.
@@ -316,7 +302,7 @@ pub fn push_all(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         layer: format!("{overlay} ({folder})"),
                         remote: name.clone(),
                         kind: "layr",
-                        size: format!("1 state, {} ({platform})", human(bytes)),
+                        size: format!("1 state, {} ({platform})", crate::byte_size::human_size(bytes)),
                     });
                 }
             }
