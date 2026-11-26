@@ -1,24 +1,38 @@
+#[cfg(all(target_os = "linux", not(test)))]
+use rustix::fs::ioctl_ficlone;
 use rustix::fs::{seek, SeekFrom};
 use std::{
     fs::File,
     io,
     os::unix::fs::{FileExt, MetadataExt},
 };
+#[cfg(all(target_os = "linux", test))]
+use tests::ioctl_ficlone;
 
 /// Replace file content, preserving the destination inode and both descriptor positions.
-/// Native cloning is attempted before mutation. The executor owns its sparse/dense fallback;
-/// an error can follow partial writes and must never be treated as an unavailable clone.
+/// A shrinking destination is truncated before attempting a native clone. This operation
+/// owns its fallback and can return an error after changing the destination.
 pub fn copy_contents(source: &File, destination: &File) -> io::Result<()> {
     let from = source.metadata()?;
     let to = destination.metadata()?;
     if !from.is_file() || !to.is_file() || (from.dev(), from.ino()) == (to.dev(), to.ino()) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "content copy requires distinct regular files"));
     }
+    let size = from.len();
     #[cfg(target_os = "linux")]
-    if matches!(clone_contents(source, destination)?, layr_fs_core::Attempt::Applied(())) {
+    let shrinking = size < to.len();
+    #[cfg(target_os = "linux")]
+    if !shrinking && matches!(clone_contents(source, destination)?, layr_fs_core::Attempt::Applied(())) {
         return Ok(());
     }
-    copy_sparse(source, destination, from.len())
+
+    let offset = seek(source, SeekFrom::Current(0))?;
+    destination.set_len(0)?;
+    #[cfg(target_os = "linux")]
+    if shrinking && size != 0 && matches!(clone_whole_file(source, destination)?, layr_fs_core::Attempt::Applied(())) {
+        return Ok(());
+    }
+    copy_sparse(source, destination, size, offset)
 }
 
 #[cfg(target_os = "linux")]
@@ -29,7 +43,12 @@ pub fn clone_contents(source: &File, destination: &File) -> io::Result<layr_fs_c
     if source.metadata()?.len() < destination.metadata()?.len() {
         return Ok(layr_fs_core::Attempt::Unavailable(rustix::io::Errno::OPNOTSUPP.into()));
     }
-    match rustix::fs::ioctl_ficlone(destination, source) {
+    clone_whole_file(source, destination)
+}
+
+#[cfg(target_os = "linux")]
+fn clone_whole_file(source: &File, destination: &File) -> io::Result<layr_fs_core::Attempt<()>> {
+    match ioctl_ficlone(destination, source) {
         Ok(()) => Ok(layr_fs_core::Attempt::Applied(())),
         Err(error)
             if matches!(
@@ -52,9 +71,8 @@ impl Drop for Position<'_> {
         let _ = seek(self.file, SeekFrom::Start(self.offset));
     }
 }
-fn copy_sparse(source: &File, destination: &File, size: u64) -> io::Result<()> {
-    let position = Position { file: source, offset: seek(source, SeekFrom::Current(0))? };
-    destination.set_len(0)?;
+fn copy_sparse(source: &File, destination: &File, size: u64, offset: u64) -> io::Result<()> {
+    let position = Position { file: source, offset };
     destination.set_len(size)?;
     let result = (|| -> io::Result<()> {
         let mut at = 0;
@@ -205,7 +223,33 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn sparse_fallback_truncates_preserves_inode_aliases_and_positions() -> io::Result<()> {
+    fn sparse_copy_preserves_inode_aliases_and_positions() -> io::Result<()> {
+        check_sparse_copy(copy_contents)
+    }
+    #[cfg(target_os = "linux")]
+    std::thread_local! {
+        static FICLONE_ERROR: std::cell::Cell<Option<rustix::io::Errno>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn ioctl_ficlone(destination: &File, source: &File) -> rustix::io::Result<()> {
+        FICLONE_ERROR.take().map_or_else(|| rustix::fs::ioctl_ficlone(destination, source), Err)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shrinking_copy_falls_back_when_reflink_is_unavailable() -> io::Result<()> {
+        for error in [rustix::io::Errno::OPNOTSUPP, rustix::io::Errno::XDEV] {
+            check_sparse_copy(|source, destination| {
+                FICLONE_ERROR.set(Some(error));
+                let result = copy_contents(source, destination);
+                assert!(FICLONE_ERROR.take().is_none(), "copy did not attempt FICLONE");
+                result
+            })?;
+        }
+        Ok(())
+    }
+    fn check_sparse_copy(copy: impl FnOnce(&File, &File) -> io::Result<()>) -> io::Result<()> {
         let fixture = Fixture::new()?;
         let mut source = fixture.file("source")?;
         source.write_all(b"first")?;
@@ -217,8 +261,7 @@ mod tests {
         destination.seek(io::SeekFrom::Start(17))?;
         fs::hard_link(fixture.0.join("destination"), fixture.0.join("alias"))?;
         let inode = destination.metadata()?.ino();
-        // Exercise the sparse executor even on hosts where FICLONE always succeeds.
-        copy_sparse(&source, &destination, source.metadata()?.len())?;
+        copy(&source, &destination)?;
         assert_eq!(source.stream_position()?, 3);
         assert_eq!(destination.stream_position()?, 17);
         assert_eq!(destination.metadata()?.ino(), inode);
@@ -243,7 +286,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn failed_sparse_copy_restores_source_position() -> io::Result<()> {
+    fn failed_truncation_preserves_bytes_and_source_position() -> io::Result<()> {
         let fixture = Fixture::new()?;
         let mut source = fixture.file("source")?;
         source.write_all(b"contents")?;
@@ -251,8 +294,25 @@ mod tests {
         let mut destination = fixture.file("destination")?;
         destination.write_all(b"untouched")?;
         let readonly = File::open(fixture.0.join("destination"))?;
-        assert!(copy_sparse(&source, &readonly, 8).is_err());
+        assert!(copy_contents(&source, &readonly).is_err());
         assert_eq!(source.stream_position()?, 2);
+        assert_eq!(fs::read(fixture.0.join("destination"))?, b"untouched");
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_source_seek_leaves_shrinking_destination_intact() -> io::Result<()> {
+        use rustix::fs::{open, Mode, OFlags};
+
+        let fixture = Fixture::new()?;
+        fixture.file("source")?.write_all(b"short")?;
+        let source = File::from(open(fixture.0.join("source"), OFlags::PATH | OFlags::CLOEXEC, Mode::empty())?);
+        fixture.file("destination")?.write_all(b"untouched")?;
+        let destination = fs::OpenOptions::new().write(true).open(fixture.0.join("destination"))?;
+        assert!(matches!(
+            copy_contents(&source, &destination),
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::BADF.raw_os_error())
+        ));
         assert_eq!(fs::read(fixture.0.join("destination"))?, b"untouched");
         Ok(())
     }
