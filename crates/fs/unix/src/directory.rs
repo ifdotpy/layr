@@ -12,6 +12,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) fn sys<T>(result: rustix::io::Result<T>) -> Result<T> {
     result.map_err(|e| FsError::Io(e.into()))
 }
+/// A resolved parent: the tree root (borrowed, never duplicated) or an opened directory.
+enum Parent<'t> {
+    Root(&'t File),
+    Owned(File),
+}
+impl std::os::fd::AsFd for Parent<'_> {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::ops::Deref::deref(self).as_fd()
+    }
+}
+impl std::ops::Deref for Parent<'_> {
+    type Target = File;
+    fn deref(&self) -> &File {
+        match self {
+            Parent::Root(file) => file,
+            Parent::Owned(file) => file,
+        }
+    }
+}
 /// Directory IO rooted in a retained descriptor. Paths never traverse a parent symlink.
 pub struct DirectoryTree {
     root: File,
@@ -49,16 +68,20 @@ impl DirectoryTree {
         Ok(File::from(sys(fs::openat(&parent, name, flags, Mode::empty()))?))
     }
     pub fn open_directory(&self, dir: &RelDir) -> Result<File> {
-        self.directory(dir.as_bytes())
+        match self.lookup_dir(dir.as_bytes())? {
+            Parent::Root(root) => Ok(root.try_clone()?),
+            Parent::Owned(file) => Ok(file),
+        }
     }
-    fn directory(&self, dir: &[u8]) -> Result<File> {
-        let mut current = self.root.try_clone()?;
+    /// Resolve `dir` (the bytes of a validated path, or a prefix of one that ends at a component boundary)
+    /// without duplicating the root descriptor.
+    fn lookup_dir(&self, dir: &[u8]) -> Result<Parent<'_>> {
+        let mut current = Parent::Root(&self.root);
         if !dir.is_empty() {
-            RelPath::new(dir)?;
             for name in dir.split(|b| *b == b'/') {
                 let name = OsStr::from_bytes(name);
                 let opened = match fs::openat(
-                    &current,
+                    &*current,
                     name,
                     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                     Mode::empty(),
@@ -66,7 +89,7 @@ impl DirectoryTree {
                     Err(error @ (rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP)) => {
                         // Linux reports ENOTDIR for O_DIRECTORY|O_NOFOLLOW on a symlink.
                         // Keep traversal rejection distinct from an absent/non-directory ancestor.
-                        if fs::statat(&current, name, AtFlags::SYMLINK_NOFOLLOW)
+                        if fs::statat(&*current, name, AtFlags::SYMLINK_NOFOLLOW)
                             .is_ok_and(|stat| fs::FileType::from_raw_mode(stat.st_mode) == fs::FileType::Symlink)
                         {
                             return Err(FsError::SymlinkAncestor);
@@ -75,18 +98,49 @@ impl DirectoryTree {
                     }
                     result => sys(result)?,
                 };
-                current = File::from(opened);
+                current = Parent::Owned(File::from(opened));
             }
         }
         Ok(current)
     }
-    fn parent<'a>(&self, path: &'a RelPath) -> Result<(File, &'a OsStr)> {
+    fn parent<'a>(&self, path: &'a RelPath) -> Result<(Parent<'_>, &'a OsStr)> {
         let bytes = path.as_bytes();
         let (parent, name) = match bytes.iter().rposition(|b| *b == b'/') {
             Some(i) => (&bytes[..i], &bytes[i + 1..]),
             None => (b"".as_slice(), bytes),
         };
-        Ok((self.directory(parent)?, OsStr::from_bytes(name)))
+        Ok((self.lookup_dir(parent)?, OsStr::from_bytes(name)))
+    }
+    /// Like `TreeRead::metadata` with empty extended attributes: the leaf is never opened or listed.
+    pub fn metadata_without_xattrs(&self, path: &RelDir) -> Result<Option<EntryMetadata>> {
+        self.entry(path, false)
+    }
+    fn entry(&self, path: &RelDir, with_xattrs: bool) -> Result<Option<EntryMetadata>> {
+        let RelDir::Path(path) = path else {
+            let stat = sys(fs::fstat(&self.root))?;
+            return entry_metadata(&stat, |_| if with_xattrs { xattrs(&self.root) } else { Ok(Vec::new()) }).map(Some);
+        };
+        let (parent, name) = match self.parent(path) {
+            Ok(pair) => pair,
+            Err(FsError::Io(error))
+                if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) =>
+            {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        let stat = match fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(e) => return Err(FsError::Io(e.into())),
+        };
+        entry_metadata(&stat, |kind| match kind {
+            _ if !with_xattrs => Ok(Vec::new()),
+            FType::File | FType::Dir => xattrs(&Self::open_entry_at(&parent, name, OFlags::RDONLY)?),
+            FType::Symlink => symlink_xattrs(&parent, name),
+            FType::Special => Ok(Vec::new()),
+        })
+        .map(Some)
     }
     pub fn open_native_file(&self, path: &RelPath) -> Result<File> {
         let file = self.open_entry(path, OFlags::RDONLY)?;
@@ -97,8 +151,11 @@ impl DirectoryTree {
     }
     fn open_entry(&self, path: &RelPath, flags: OFlags) -> Result<File> {
         let (parent, name) = self.parent(path)?;
+        Self::open_entry_at(&parent, name, flags)
+    }
+    fn open_entry_at(parent: &File, name: &OsStr, flags: OFlags) -> Result<File> {
         Ok(File::from(sys(fs::openat(
-            &parent,
+            parent,
             name,
             flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
             Mode::empty(),
@@ -250,6 +307,43 @@ fn attributes(
 fn xattrs(file: &File) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     attributes(|buffer| fs::flistxattr(file, buffer), |name, buffer| fs::fgetxattr(file, name, buffer))
 }
+fn ftype(stat: &fs::Stat) -> FType {
+    match fs::FileType::from_raw_mode(stat.st_mode) {
+        fs::FileType::RegularFile => FType::File,
+        fs::FileType::Directory => FType::Dir,
+        fs::FileType::Symlink => FType::Symlink,
+        _ => FType::Special,
+    }
+}
+/// The metadata of a stat result. `read_xattrs` supplies the extended attributes of an entry of the given kind.
+fn entry_metadata(stat: &fs::Stat, read_xattrs: impl FnOnce(FType) -> Result<Vec<(Vec<u8>, Vec<u8>)>>) -> Result<EntryMetadata> {
+    let kind = ftype(stat);
+    let nanos = i64::try_from(stat.st_mtime_nsec).map_err(|_| FsError::Invalid("nanoseconds out of range"))?;
+    let modified_ns = i64::from(stat.st_mtime)
+        .checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(nanos))
+        .ok_or(FsError::Invalid("timestamp out of range"))?;
+    let size = u64::try_from(stat.st_size).map_err(|_| FsError::Invalid("negative entry size"))?;
+    let attributes = EntryAttributes {
+        acl: None,
+        mode: u32::from(stat.st_mode) & 0o7777,
+        uid: stat.st_uid,
+        gid: stat.st_gid,
+        modified_ns,
+        stored_time: Some(modified_ns),
+        xattrs: read_xattrs(kind)?,
+    };
+    Ok(EntryMetadata {
+        kind,
+        size,
+        attributes,
+        link: (kind != FType::Dir).then_some(LinkIdentity {
+            device: u64::try_from(stat.st_dev).map_err(|_| FsError::Invalid("device out of range"))?,
+            inode: stat.st_ino,
+            count: u64::from(stat.st_nlink),
+        }),
+    })
+}
 #[cfg(target_os = "linux")]
 fn link_path(parent: &File, name: &OsStr) -> std::path::PathBuf {
     use std::os::fd::AsRawFd;
@@ -318,81 +412,10 @@ impl TreeRead for DirectoryTree {
                 }
             }
         };
-        Ok(Some(match fs::FileType::from_raw_mode(stat.st_mode) {
-            fs::FileType::Directory => FType::Dir,
-            fs::FileType::RegularFile => FType::File,
-            fs::FileType::Symlink => FType::Symlink,
-            _ => FType::Special,
-        }))
+        Ok(Some(ftype(&stat)))
     }
     fn metadata(&self, path: &RelDir) -> Result<Option<EntryMetadata>> {
-        let (stat, file) = match path {
-            RelDir::Root => (sys(fs::fstat(&self.root))?, Some(self.root.try_clone()?)),
-            RelDir::Path(path) => {
-                let (parent, name) = match self.parent(path) {
-                    Ok(pair) => pair,
-                    Err(FsError::Io(error))
-                        if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) =>
-                    {
-                        return Ok(None)
-                    }
-                    Err(error) => return Err(error),
-                };
-                let stat = match fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-                    Ok(stat) => stat,
-                    Err(rustix::io::Errno::NOENT) => return Ok(None),
-                    Err(e) => return Err(FsError::Io(e.into())),
-                };
-                let kind = fs::FileType::from_raw_mode(stat.st_mode);
-                let file = if kind == fs::FileType::RegularFile || kind == fs::FileType::Directory {
-                    Some(self.open_entry(path, OFlags::RDONLY)?)
-                } else {
-                    None
-                };
-                (stat, file)
-            }
-        };
-        let kind = match fs::FileType::from_raw_mode(stat.st_mode) {
-            fs::FileType::RegularFile => FType::File,
-            fs::FileType::Directory => FType::Dir,
-            fs::FileType::Symlink => FType::Symlink,
-            _ => FType::Special,
-        };
-        let nanos = i64::try_from(stat.st_mtime_nsec).map_err(|_| FsError::Invalid("nanoseconds out of range"))?;
-        let modified_ns = i64::from(stat.st_mtime)
-            .checked_mul(1_000_000_000)
-            .and_then(|n| n.checked_add(nanos))
-            .ok_or(FsError::Invalid("timestamp out of range"))?;
-        let size = u64::try_from(stat.st_size).map_err(|_| FsError::Invalid("negative entry size"))?;
-        let attributes = EntryAttributes {
-            acl: None,
-            mode: u32::from(stat.st_mode) & 0o7777,
-            uid: stat.st_uid,
-            gid: stat.st_gid,
-            modified_ns,
-            stored_time: Some(modified_ns),
-            xattrs: match file {
-                Some(file) => xattrs(&file)?,
-                None if kind == FType::Symlink => {
-                    let RelDir::Path(path) = path else {
-                        return Err(FsError::Invalid("root cannot be a symbolic link"));
-                    };
-                    let (parent, name) = self.parent(path)?;
-                    symlink_xattrs(&parent, name)?
-                }
-                None => Vec::new(),
-            },
-        };
-        Ok(Some(EntryMetadata {
-            kind,
-            size,
-            attributes,
-            link: (kind != FType::Dir).then_some(LinkIdentity {
-                device: u64::try_from(stat.st_dev).map_err(|_| FsError::Invalid("device out of range"))?,
-                inode: stat.st_ino,
-                count: u64::from(stat.st_nlink),
-            }),
-        }))
+        self.entry(path, true)
     }
     fn entries(&self, dir: &RelDir, visit: &mut dyn FnMut(&RelPath) -> Result<()>) -> Result<()> {
         // Consume the newly opened child FD: read_from reopens "." and unnecessarily
@@ -402,7 +425,7 @@ impl TreeRead for DirectoryTree {
         } else {
             None
         };
-        let directory = self.directory(dir.as_bytes())?;
+        let directory = self.open_directory(dir)?;
         let mut stream = sys(fs::Dir::new(directory))?;
         if matches!(dir, RelDir::Root) {
             stream.rewind();
@@ -441,7 +464,7 @@ impl DirectoryTree {
         match data {
             EntryData::Directory => {
                 sys(fs::mkdirat(&parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR))?;
-                let directory = self.open_entry(path, OFlags::RDONLY)?;
+                let directory = Self::open_entry_at(&parent, name, OFlags::RDONLY)?;
                 Self::apply(&directory, attributes)?;
                 return apply(&directory);
             }
@@ -592,4 +615,52 @@ fn set_time(file: &File, modified_ns: i64) -> Result<()> {
             },
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use layr_fs_core::RelPath;
+
+    fn rel(path: &str) -> RelDir {
+        RelDir::Path(RelPath::new(path).unwrap())
+    }
+
+    #[test]
+    fn metadata_without_xattrs_is_metadata_with_an_empty_attribute_list() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("layr-directory-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir_all(root.join("dir/sub")).unwrap();
+        std::fs::write(root.join("dir/file"), b"data").unwrap();
+        // Where the filesystem has user attributes, the full read sees this one and the stat-only read must not.
+        let has_xattr = fs::setxattr(root.join("dir/file"), "user.layr-test", b"v", fs::XattrFlags::empty()).is_ok();
+        std::fs::hard_link(root.join("dir/file"), root.join("alias")).unwrap();
+        std::os::unix::fs::symlink("dir/file", root.join("link")).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(root.join("fifo")).status().unwrap().success());
+        let tree = DirectoryTree::open(&root).unwrap();
+        let wanted = if has_xattr { vec![(b"user.layr-test".to_vec(), b"v".to_vec())] } else { Vec::new() };
+        assert_eq!(tree.metadata(&rel("dir/file")).unwrap().unwrap().attributes.xattrs, wanted);
+        for path in [
+            RelDir::Root,
+            rel("dir"),
+            rel("dir/file"),
+            rel("alias"),
+            rel("link"),
+            rel("fifo"),
+            rel("absent"),
+            rel("absent/x"),
+            rel("dir/file/x"),
+        ] {
+            let mut full = tree.metadata(&path).unwrap();
+            if let Some(full) = &mut full {
+                full.attributes.xattrs.clear();
+            }
+            assert_eq!(tree.metadata_without_xattrs(&path).unwrap(), full);
+        }
+        assert_eq!(tree.metadata_without_xattrs(&rel("alias")).unwrap().unwrap().link.unwrap().count, 2);
+        // A symbolic link as an ancestor stays an error, never an absence.
+        assert!(matches!(tree.metadata_without_xattrs(&rel("link/x")), Err(FsError::SymlinkAncestor)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

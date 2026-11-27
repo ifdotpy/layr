@@ -3,10 +3,33 @@ use crate::compare::{pair_rename, DataEvidence, EntryChange};
 use crate::fsutil::Meta;
 use crate::stream;
 use anyhow::Result;
-use layr_fs_core::{RelDir, TreeRead};
+use layr_fs_core::{EntryMetadata, RelDir, TreeRead};
 use std::collections::{BTreeMap, HashSet};
 
-pub(crate) fn build(parent: &dyn TreeRead, child: &dyn TreeRead, entries: Vec<stream::Entry>) -> Result<Vec<EntryChange>> {
+/// Candidates for the paths a stream touched, and whether any observed non-directory entry has more than one
+/// hard link. `lookup` reads one entry of a tree; it only needs the stat fields, not the extended attributes.
+pub(crate) fn build<R: TreeRead>(
+    parent: &R,
+    child: &R,
+    entries: Vec<stream::Entry>,
+    lookup: impl Fn(&R, &RelDir) -> layr_fs_core::Result<Option<EntryMetadata>>,
+) -> Result<(Vec<EntryChange>, bool)> {
+    let mut multi_linked = false;
+    let mut observe = |tree: &R, path: &str| -> Result<Option<Meta>> {
+        let metadata = match lookup(tree, &RelDir::from_bytes(path.as_bytes())?) {
+            Ok(metadata) => metadata,
+            Err(layr_fs_core::FsError::Io(error))
+                if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.as_ref().and_then(|m| m.link).is_some_and(|link| link.count > 1) {
+            multi_linked = true;
+        }
+        Ok(metadata.as_ref().map(layr_fs_common::observation))
+    };
     // Every path the stream touched, in the parent and in the child. `Some(ranges)` when the only
     // entry at the path kept its inode there, so unchanged byte ranges share extents.
     let mut paths: BTreeMap<String, Option<Vec<(u64, crate::compare::RangeEnd)>>> = BTreeMap::new();
@@ -105,18 +128,5 @@ pub(crate) fn build(parent: &dyn TreeRead, child: &dyn TreeRead, entries: Vec<st
         used.insert(src);
         used.insert(dst);
     }
-    Ok(out.into_values().collect())
-}
-
-fn observe(tree: &dyn TreeRead, path: &str) -> Result<Option<Meta>> {
-    let metadata = match tree.metadata(&RelDir::from_bytes(path.as_bytes())?) {
-        Ok(metadata) => metadata,
-        Err(layr_fs_core::FsError::Io(error))
-            if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) =>
-        {
-            None
-        }
-        Err(error) => return Err(error.into()),
-    };
-    Ok(metadata.as_ref().map(layr_fs_common::observation))
+    Ok((out.into_values().collect(), multi_linked))
 }

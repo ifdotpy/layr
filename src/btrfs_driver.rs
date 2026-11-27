@@ -329,22 +329,12 @@ impl BtrfsFs {
         let tree = trees.get(&b).and_then(Resource::pinned).ok_or(FsError::Invalid("tree absent"))?;
         let entries =
             backend(send(&base.path, &tree.path, base.reader.directory.root_file(), tree.reader.directory.root_file()))?;
-        let candidates = backend(crate::fs_candidates::build(base.reader.as_ref(), tree.reader.as_ref(), entries))?;
-        for candidate in &candidates {
-            for (reader, path, meta) in
-                [(&base.reader, candidate.src(), candidate.old()), (&tree.reader, candidate.path().as_str(), candidate.new())]
-            {
-                if meta.is_some_and(|m| !m.is_dir())
-                    && reader
-                        .metadata(&RelDir::from_bytes(path.as_bytes())?)?
-                        .and_then(|m| m.link)
-                        .is_some_and(|link| link.count > 1)
-                {
-                    return Ok(hints::HintSet::Partial);
-                }
-            }
-        }
-        Ok(hints::HintSet::Complete(candidates))
+        // Candidates need the stat fields only; a path with more than one hard link makes the hints partial.
+        let (candidates, multi_linked) =
+            backend(crate::fs_candidates::build(base.reader.as_ref(), tree.reader.as_ref(), entries, |reader, path| {
+                reader.directory.metadata_without_xattrs(path)
+            }))?;
+        Ok(if multi_linked { hints::HintSet::Partial } else { hints::HintSet::Complete(candidates) })
     }
 }
 pub(crate) struct RangeClone;

@@ -755,12 +755,14 @@ mod tests {
         std::fs::write(child.join("source"), "data").unwrap();
         std::fs::hard_link(child.join("source"), child.join("link")).unwrap();
         let entry = crate::stream::Entry { path: Some("link".into()), linked_from: Some("source".into()), ..Default::default() };
-        let result = crate::fs_candidates::build(
+        let (result, multi_linked) = crate::fs_candidates::build(
             &layr_fs_unix::DirectoryTree::open(&parent).unwrap(),
             &layr_fs_unix::DirectoryTree::open(&child).unwrap(),
             vec![entry],
+            |tree, path| layr_fs_core::TreeRead::metadata(tree, path),
         )
         .unwrap();
+        assert!(multi_linked);
         assert!(result.iter().any(|c| c.path() == "source"));
         assert!(result.iter().any(|c| c.path() == "link"));
         std::fs::remove_dir_all(tmp).unwrap();

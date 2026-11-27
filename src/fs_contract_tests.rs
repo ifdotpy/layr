@@ -1638,7 +1638,7 @@ fn stream_normalization_treats_non_directory_ancestors_as_absent() -> Result<()>
                 ..Default::default()
             },
         ];
-        let candidates = crate::fs_candidates::build(base, tree, entries)?;
+        let (candidates, _) = crate::fs_candidates::build(base, tree, entries, |tree, path| tree.metadata(path))?;
         let child = candidates.iter().find(|c| c.path() == "d/x").context("child candidate absent")?;
         assert_eq!(child.old().is_some(), !created);
         assert_eq!(child.new().is_some(), created);
@@ -1646,6 +1646,52 @@ fn stream_normalization_treats_non_directory_ancestors_as_absent() -> Result<()>
         assert_eq!(directory.old().unwrap().is_dir(), !created);
         assert_eq!(directory.new().unwrap().is_dir(), created);
     }
+    Ok(())
+}
+
+/// The hint path observes stat fields only; its candidates equal the full-metadata candidates, and a hard-linked
+/// non-directory entry on either side is reported (a directory's own link count never is).
+#[test]
+fn stat_only_candidates_equal_full_candidates_and_report_hard_links() -> Result<()> {
+    use crate::stream::Entry;
+    let scratch = Scratch::new()?;
+    let (before, after) = (scratch.directory("before")?, scratch.directory("after")?);
+    for root in [&before, &after] {
+        std::fs::create_dir_all(root.join("dir/sub"))?;
+        std::fs::write(root.join("dir/file"), b"one")?;
+        std::os::unix::fs::symlink("dir/file", root.join("link"))?;
+    }
+    std::fs::write(after.join("dir/file"), b"changed")?;
+    std::fs::write(after.join("added"), b"new")?;
+    std::fs::hard_link(before.join("dir/file"), before.join("alias"))?;
+    let (before, after) = (layr_fs_unix::DirectoryTree::open(&before)?, layr_fs_unix::DirectoryTree::open(&after)?);
+    let entry = |origin: Option<&str>, path: Option<&str>| Entry {
+        origin: origin.map(Into::into),
+        path: path.map(Into::into),
+        ..Default::default()
+    };
+    let run = |entries: Vec<Entry>| -> Result<(String, String, bool)> {
+        let (stat, multi) =
+            crate::fs_candidates::build(&before, &after, entries.clone(), |tree, p| tree.metadata_without_xattrs(p))?;
+        let (full, _) = crate::fs_candidates::build(&before, &after, entries, |tree, p| tree.metadata(p))?;
+        Ok((format!("{stat:?}"), format!("{full:?}"), multi))
+    };
+    let plain = vec![
+        entry(Some("link"), Some("link")),
+        entry(Some("dir"), Some("dir")),
+        entry(None, Some("added")),
+        entry(Some("dir/sub"), None),
+    ];
+    let (stat, full, multi) = run(plain)?;
+    assert_eq!(stat, full);
+    assert!(!multi, "a directory's link count and single-link entries are not hard links");
+    // `dir/file` has a second name (`alias`) only in the parent, which is not in the stream: the modified file's old side counts.
+    let (stat, full, multi) = run(vec![entry(Some("dir/file"), Some("dir/file"))])?;
+    assert_eq!(stat, full);
+    assert!(multi);
+    let (stat, full, multi) = run(vec![entry(Some("alias"), None)])?;
+    assert_eq!(stat, full);
+    assert!(multi);
     Ok(())
 }
 
