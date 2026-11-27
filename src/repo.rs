@@ -1658,9 +1658,7 @@ impl<'a> Repo<'a> {
             // The head is the index, unless a stage appeared since the selection.
             return Ok(self.current_stage(line)?.is_none().then(changes::Selection::default));
         }
-        let Some(record) =
-            std::fs::read(self.staged_file(line)).ok().and_then(|raw| serde_json::from_slice::<StagedPaths>(&raw).ok())
-        else {
+        let Some(record) = std::fs::read(self.staged_file(line)).ok().and_then(|raw| StagedPaths::decode(&raw)) else {
             return Ok(None);
         };
         let (token, _) = self.index_digest(line, selected, Some(&record.racy))?;
@@ -1678,7 +1676,7 @@ impl<'a> Repo<'a> {
         let Some(mut selection) = before.filter(|_| selected.stage.is_some()) else { return self.forget_staged(line) };
         selection.subtrees.extend(staged.iter().cloned());
         let (token, racy) = self.index_digest(line, &selected, None)?;
-        crate::fsutil::atomic_write(&self.staged_file(line), &serde_json::to_vec(&StagedPaths { token, racy, selection })?, 0o600)
+        StagedPaths { token, racy, selection }.write(&self.staged_file(line))
     }
 
     /// The index to read and the staging folder when there is one. The caller must hold the
@@ -2619,9 +2617,9 @@ impl<'a> Repo<'a> {
             let orepo = self.overlay_repo(&name)?;
             let current = crate::overlay::find_overlay_line(&orepo.p.db, &info, line)?.map(|ol| ol.head);
             let due = match current.as_deref() {
-                Some(id) if id != info.root && orepo.p.has_state(id) => {
+                Some(id) if id != info.root => {
                     let since = orepo.p.db.state(id)?.map(|st| st.time).unwrap_or(0);
-                    folder_changed_since(&cp, since)
+                    folder_changed_since(&cp, since) || !crate::cache_overlay::cache_reusable(&orepo, id)
                 }
                 _ => true,
             };
@@ -4814,6 +4812,36 @@ struct StagedPaths {
     token: IndexToken,
     racy: BTreeSet<String>,
     selection: changes::Selection,
+}
+
+impl StagedPaths {
+    // The index token validates the index. The checksum also covers the hint's selected paths.
+    const HASH_LEN: usize = 40;
+
+    fn decode(raw: &[u8]) -> Option<Self> {
+        let data = if cfg!(target_os = "macos") {
+            raw
+        } else {
+            let (header, data) = raw.split_at_checked(Self::HASH_LEN + 1)?;
+            if header[Self::HASH_LEN] != b'\n' || &header[..Self::HASH_LEN] != fsutil::git_blob_id(data).as_bytes() {
+                return None;
+            }
+            data
+        };
+        serde_json::from_slice(data).ok()
+    }
+
+    fn write(&self, path: &Path) -> Result<()> {
+        if cfg!(target_os = "macos") {
+            // The directory sync covers a thin-to-full stage exchange after the base key is written.
+            return fsutil::atomic_write(path, &serde_json::to_vec(self)?, 0o600);
+        }
+        let mut raw = vec![b'\n'; Self::HASH_LEN + 1];
+        serde_json::to_writer(&mut raw, self)?;
+        let hash = fsutil::git_blob_id(&raw[Self::HASH_LEN + 1..]);
+        raw[..Self::HASH_LEN].copy_from_slice(hash.as_bytes());
+        fsutil::cache_write(path, &raw, 0o600)
+    }
 }
 
 /// An index choice whose presence and source are shared by its token and comparison.

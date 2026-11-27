@@ -2569,9 +2569,10 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
     };
     let res = (|| -> Result<(Line, String)> {
         let _lock = repo.p.lock_maintenance()?;
+        let objects = a.has("--objects") && !a.has("--no-objects");
         // v2 object storage stays opt-in until every command reads object-only states
         // (export, sync, project copy and the cache paths still need native copies).
-        if a.has("--objects") && !a.has("--no-objects") {
+        if objects {
             crate::objstore::enable(&_lock, ctx, &repo)?;
         }
         let work = repo.p.work_dir().join(crate::store::temp_name());
@@ -2752,6 +2753,14 @@ pub fn init(ctx: &Ctx, args: &[String]) -> Result<i32> {
         // The state stays the service's (no store file belongs to the user, t98); the line
         // made from it below belongs to the intended owner.
         let st = repo.new_state(ctx, &work, StateKind::Commit, parents, &msg, None)?;
+        #[cfg(target_os = "linux")]
+        let st = {
+            let mut st = st;
+            if objects && a.get("--from").is_some() && st.parents.is_empty() {
+                crate::objstore::record_initial_state(&_lock, &mut st)?;
+            }
+            st
+        };
         let mut rec = crate::model::DraftRecord::new("commit");
         rec.states.push(st.clone());
         repo.commit_record(&_lock, ctx, rec)?;

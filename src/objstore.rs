@@ -399,6 +399,53 @@ fn trace_write(state: &crate::model::StateRec, written: &layr_objects::WriteRepo
     ));
 }
 
+const HOT_STATE_WRITE: layr_objects::WriteOptions = layr_objects::WriteOptions {
+    temperature: layr_objects::Temperature::Hot,
+    previous: None,
+    exclude: Vec::new(),
+    similar: false,
+};
+
+/// Encode the first snapshot of a new project before the initial commit can name it.
+/// Use an unpublished store so a failed flush cannot leave objects for other writers to reuse.
+#[cfg(target_os = "linux")]
+pub(crate) fn record_initial_state(p: &crate::store::LockedProject<'_>, state: &mut crate::model::StateRec) -> Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+    use std::fs::File;
+
+    let root = dir(p);
+    let meta = p.meta_dir();
+    // Older kernels do not report filesystem writeback errors through syncfs.
+    let checked_syncfs = sysinfo::System::kernel_version().is_some_and(|release| {
+        let mut parts = release.split('.');
+        let major = parts.next().and_then(|n| n.parse::<u32>().ok());
+        let minor = parts.next().and_then(|n| n.parse::<u32>().ok());
+        major.zip(minor).is_some_and(|version| version >= (5, 8))
+    });
+    if !checked_syncfs || root.exists() || crate::sys::fs_type_name(&meta)? != "btrfs" {
+        return Ok(());
+    }
+    let source = crate::source::Source::of_state(p, &state.id)?;
+    let temp = crate::repo::Temp::directory(p.work_dir().join(crate::store::temp_name()), 0o700)?;
+    let private = temp.path.join("objects");
+    std::fs::create_dir(&private)?;
+    let (_leased, mut written) =
+        Store::write_private_tree(&private, Keying::Plain, &SnapshotSource(&source), &HOT_STATE_WRITE)?;
+    written.mode = layr_objects::write::WriteMode::Full { reason: layr_objects::write::FullReason::NoCheckedDelta };
+
+    // The filesystem flush covered all files and internal directory entries. Persist the new
+    // public directory name before installing the state ref or appending the signed record.
+    match renameat_with(CWD, &private, CWD, &root, RenameFlags::NOREPLACE) {
+        // Another opener created the public store. The normal record writer will use it.
+        Err(rustix::io::Errno::EXIST) => return Ok(()),
+        result => result?,
+    }
+    File::open(&temp.path)?.sync_all()?;
+    File::open(&meta)?.sync_all()?;
+    describe_write(state, &written)?;
+    install_prepared(p, state)
+}
+
 /// A shared lease protects objects encoded before a record can name their roots.
 /// Acquire before preparation; pruning always tries its exclusive side without waiting.
 pub(crate) struct PreparationLease {
@@ -493,12 +540,6 @@ pub fn record_states(p: &Project, records: &mut [crate::model::DraftRecord]) -> 
             continue;
         }
         let source = crate::source::Source::of_state(p, &state.id)?;
-        let options = layr_objects::WriteOptions {
-            temperature: layr_objects::Temperature::Hot,
-            previous: None,
-            exclude: Vec::new(),
-            similar: false,
-        };
         let incremental = state_write_base(p, &store, &state.id, state.parents.first().map(String::as_str), &source)?;
         // LAYR_TRACE names the kind of write (tests/t257-btrfs-incremental-write.sh reads it).
         let _t = crate::trace::named(|| {
@@ -512,10 +553,10 @@ pub fn record_states(p: &Project, records: &mut [crate::model::DraftRecord]) -> 
                 &source,
                 &layr_objects::write::Base { tree: refs.tree, times: refs.times },
                 &paths,
-                &options,
+                &HOT_STATE_WRITE,
             )?,
             None => {
-                let mut report = layr_objects::write::write_tree_from(&store, &source, &options)?;
+                let mut report = layr_objects::write::write_tree_from(&store, &source, &HOT_STATE_WRITE)?;
                 report.mode = layr_objects::write::WriteMode::Full { reason: layr_objects::write::FullReason::NoCheckedDelta };
                 report
             }

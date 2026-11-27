@@ -505,6 +505,11 @@ impl Store {
         Ok(Some(r))
     }
 
+    /// Whether the tree and times, including their descendants, are available locally.
+    pub fn has_state_objects(&self, refs: &StateRef) -> Result<bool> {
+        Ok(self.walk(std::slice::from_ref(refs), &HashSet::new())?.1.is_empty())
+    }
+
     /// Every damaged item of the store (fsck): loose object files (their first bytes, the fan-out
     /// folders in parallel), dictionaries, state records, and every object that a state reaches and
     /// that cannot be read with what it needs (the walk of gc, over every record). An I/O error stops it.

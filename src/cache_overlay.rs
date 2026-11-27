@@ -301,21 +301,33 @@ pub fn other_platform(platform: Option<&str>) -> bool {
     platform.is_some_and(|p| p != base && !p.starts_with(&format!("{base}-")))
 }
 
-/// After the pin of the cache state `sid`: whether its tree is still here. `gc` can evict it between the choice of
-/// the cache and the pin (`cmd::admin::evict_caches`); the pin keeps it from then on. False: the folder starts
-/// cold, with a warning.
 /// Whether a read of cache state `id` can give its tree: the state is here, or it is in the object
 /// store and not freed. A freed state stays freed (`Repo::check_state`), even while its objects remain.
-fn cache_readable(orepo: &Repo, id: &str) -> Result<bool> {
-    if orepo.p.has_state(id) {
-        return Ok(true);
-    }
+fn cache_objects(orepo: &Repo, id: &str) -> Result<Option<(std::sync::Arc<layr_objects::Store>, layr_objects::StateRef)>> {
     if matches!(orepo.p.db.state_flags(id)?, Some((_, true))) {
-        return Ok(false);
+        return Ok(None);
     }
-    Ok(crate::objstore::verified(&orepo.p, id)?.is_some())
+    crate::objstore::verified(&orepo.p, id)
 }
 
+fn cache_readable(orepo: &Repo, id: &str) -> Result<bool> {
+    Ok(orepo.p.has_state(id) || cache_objects(orepo, id)?.is_some())
+}
+
+/// Reuse an unchanged part only if its native tree is here or its objects are complete and
+/// rooted by the local state mapping that object GC uses.
+/// A failed availability check leaves the working folder eligible for a fresh capture.
+pub(crate) fn cache_reusable(orepo: &Repo, id: &str) -> bool {
+    orepo.p.has_state(id)
+        || cache_objects(orepo, id)
+            .and_then(|part| match part {
+                Some((store, refs)) => Ok(store.state_ref(id)? == Some(refs) && store.has_state_objects(&refs)?),
+                None => Ok(false),
+            })
+            .unwrap_or(false)
+}
+
+/// `gc` can evict a chosen cache state before the pin. Check again after pinning it.
 fn cache_here(orepo: &Repo, sid: &str, folder: &str) -> Result<bool> {
     if cache_readable(orepo, sid)? {
         return Ok(true);

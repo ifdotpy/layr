@@ -33,13 +33,19 @@ p1=$(part_of "$(l rev-parse head)")
 no "the state names a part" test -z "$p1"
 ok "the overlay has an object store" test -f "$P/meta/overlays/$G/meta/objects/config.json"
 ok "the part is a state of that object store" test -f "$P/meta/overlays/$G/meta/objects/states/$p1"
+no "the first part already retired its native copy" test -d "$P/meta/overlays/$G/states/$p1"
 first=$(objects_bytes)
+
+echo unchanged >> notes.txt
+ok "a named save with unchanged build output" l save -qam "unchanged build"
+eq "the new state reuses the object-only part" "$p1" "$(part_of "$(l rev-parse head)")"
 
 # The same build again (only the times change): almost no new bytes.
 touch target/debug/unit1.rlib
 echo b >> notes.txt
 ok "a second named save" l save -qam "same build"
 p2=$(part_of "$(l rev-parse head)")
+no "a cache timestamp change gets a new part" test "$p2" = "$p1"
 second=$(objects_bytes)
 if [ -n "$p2" ] && [ "$p2" != "$p1" ]; then
   ok "the new part is in the object store" test -f "$P/meta/overlays/$G/meta/objects/states/$p2"
@@ -68,4 +74,14 @@ l remote add cloud "file://$T/archive" --paper-key-out "$T/paper.txt" >/dev/null
 no "the head has no native copy" test -d "$P/states/$hid"
 ok "a push" l push cloud -q
 ok "the remote has the head that is only objects here" test -d "$T/archive/states/$hid"
+
+# GC keeps objects through local state mappings, even when the signed part still names its roots.
+rm "$P/meta/overlays/$G/meta/objects/states/$cur"
+echo mapping >> notes.txt
+ok "a named save recaptures a part with a missing mapping" l save -qam "missing cache mapping"
+restored=$(part_of "$(l rev-parse head)")
+no "the new state names a fresh cache part" test "$restored" = "$cur"
+ok "GC preserves the fresh cache part" l gc -q
+ok "a new line uses the surviving part" l line new restored main -q
+ok "the cache bytes survived GC" cmp target/debug/unit50.rlib "$P/lines/restored/target/debug/unit50.rlib"
 finish

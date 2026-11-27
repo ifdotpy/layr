@@ -15,6 +15,7 @@
 //! concurrent writers of the same object agree, and a crash leaves no empty or partial object behind a
 //! name. A file that a crash damaged anyway (an older version wrote without a sync) counts as absent:
 //! the next write of that object replaces it (`check_loose`), and `damage` lists it for fsck.
+//! An initial tree built in a private store can sync all its objects before publishing the store.
 
 use crate::fsx;
 use crate::id::{Id, Keying, Kind};
@@ -277,6 +278,7 @@ pub struct Store {
     pub options: Options,
     pub added: Added,
     pub clone_hook: Option<CloneHook>,
+    defer_object_sync: bool,
     packs: RwLock<Arc<PackSet>>,
     /// The pack of the last lookup (`PackSet::find`).
     last_pack: AtomicU32,
@@ -330,7 +332,7 @@ impl Store {
                 let tmp = root.join("tmp").join(format!("config-{}", std::process::id()));
                 // A file of an earlier process with this id is stale (`remove_orphans` runs later).
                 let _ = fs::remove_file(&tmp);
-                write_synced(&tmp, &[want.as_bytes()], 0o644)?;
+                write_temp_file(&tmp, &[want.as_bytes()], 0o644, true)?;
                 if let Err(e) = fs::hard_link(&tmp, &config) {
                     let _ = fs::remove_file(&tmp);
                     if e.kind() != io::ErrorKind::AlreadyExists {
@@ -417,6 +419,7 @@ impl Store {
             options: Options::default(),
             added: Added::default(),
             clone_hook: None,
+            defer_object_sync: false,
             packs: RwLock::new(Arc::new(PackSet::default())),
             last_pack: AtomicU32::new(0),
             cache: Mutex::new(BlockCache::default()),
@@ -430,6 +433,26 @@ impl Store {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Write the first tree of a private store on a filesystem that supports checked `syncfs`.
+    /// Only the caller can open this store. It may publish the directory after this returns
+    /// successfully, or must discard it on error.
+    #[cfg(target_os = "linux")]
+    pub fn write_private_tree(
+        root: &Path,
+        keying: Keying,
+        source: &dyn crate::write::Source,
+        options: &crate::write::WriteOptions,
+    ) -> Result<(Self, crate::write::WriteReport)> {
+        // Open before starting the writers so syncfs also reports errors from early writeback.
+        let filesystem = File::open(root)?;
+        let mut store = Self::open(root, keying)?;
+        store.defer_object_sync = true;
+        let written = crate::write::write_tree_from(&store, source, options)?;
+        rustix::fs::syncfs(&filesystem).with_context(|| format!("cannot sync {}", root.display()))?;
+        store.defer_object_sync = false;
+        Ok((store, written))
     }
 
     pub fn keying(&self) -> &Keying {
@@ -627,10 +650,10 @@ impl Store {
         self.root.join("tmp").join(format!("{}-{n}", std::process::id()))
     }
 
-    /// A new temporary file holding `parts`, synced to disk before any name points at it.
-    fn write_temp(&self, parts: &[&[u8]], mode: u32) -> Result<PathBuf> {
+    /// A new temporary file holding `parts`.
+    fn write_temp(&self, parts: &[&[u8]], mode: u32, sync: bool) -> Result<PathBuf> {
         let tmp = self.temp();
-        write_synced(&tmp, parts, mode)?;
+        write_temp_file(&tmp, parts, mode, sync)?;
         Ok(tmp)
     }
 
@@ -664,7 +687,7 @@ impl Store {
         let header = Header { kind, form: loose::Form::from_byte(form)? }.encode();
         let parts: Vec<&[u8]> = std::iter::once(header.as_slice()).chain(body.iter().copied()).collect();
         let n = parts.iter().map(|p| p.len() as u64).sum();
-        let tmp = self.write_temp(&parts, 0o444)?;
+        let tmp = self.write_temp(&parts, 0o444, !self.defer_object_sync)?;
         let replace = match check_loose(&dst) {
             Ok(None) => false,
             // A damaged file of this object (#452), or one that needs what is missing, is replaced. A
@@ -857,7 +880,9 @@ impl Store {
                 hook(File::open(&tmp)?.as_fd())?;
             }
             // The copy or clone reaches the disk before its name does (#452).
-            rustix::fs::fsync(File::open(&tmp)?)?;
+            if !self.defer_object_sync {
+                rustix::fs::fsync(File::open(&tmp)?)?;
+            }
             // A clone takes the attributes of its source; the tree keeps them per entry.
             fsx::clear_xattrs(&tmp)?;
             let (id, len) = self.hash_file(&tmp)?;
@@ -1027,7 +1052,7 @@ impl Store {
         let refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
         let dict = crate::zstdx::train(&refs, DICT_SIZE)?;
         let id = self.keying.id(Kind::Opaque, &dict);
-        let tmp = self.write_temp(&[&dict], 0o444)?;
+        let tmp = self.write_temp(&[&dict], 0o444, true)?;
         self.publish(&tmp, &self.root.join("dicts").join(id.hex()))?;
         self.load_dict()?;
         Ok(Some(id))
@@ -1171,7 +1196,7 @@ impl Store {
     pub fn set_state(&self, state: &str, r: &StateRef) -> Result<()> {
         ensure!(!state.is_empty() && state.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "invalid state id {state}");
         let text = format!("{{\"times\":\"{}\",\"tree\":\"{}\"}}\n", r.times, r.tree);
-        let tmp = self.write_temp(&[text.as_bytes()], 0o644)?;
+        let tmp = self.write_temp(&[text.as_bytes()], 0o644, true)?;
         let dir = self.root.join("states");
         if let Err(e) = fs::rename(&tmp, dir.join(state)) {
             let _ = fs::remove_file(&tmp);
@@ -1620,7 +1645,7 @@ impl Store {
         let index_bytes = index.encode();
         let dir = self.root.join("packs");
         for (bytes, name) in [(&data, format!("{id}.pack")), (&index_bytes, format!("{id}.idx"))] {
-            let tmp = self.write_temp(&[bytes], 0o444)?;
+            let tmp = self.write_temp(&[bytes], 0o444, true)?;
             // An existing pack with this id holds the same bytes.
             self.publish(&tmp, &dir.join(name))?;
         }
@@ -1839,16 +1864,18 @@ pub(crate) fn chunk_list(body: &[u8]) -> Result<Vec<(Id, u64)>> {
     Ok(out)
 }
 
-/// Write the new file `tmp` and sync it (removed again on an error). A plain fsync on every system:
+/// Write the new file `tmp` (removed again on an error). When syncing, use a plain fsync on every system:
 /// it survives a kernel crash or a file system that turns read-only (#452); F_FULLFSYNC per object
 /// would make large writes on macOS very slow.
-fn write_synced(tmp: &Path, parts: &[&[u8]], mode: u32) -> Result<()> {
+fn write_temp_file(tmp: &Path, parts: &[&[u8]], mode: u32, sync: bool) -> Result<()> {
     let written = (|| -> Result<()> {
         let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(tmp)?;
         for part in parts {
             f.write_all(part)?;
         }
-        rustix::fs::fsync(&f)?;
+        if sync {
+            rustix::fs::fsync(&f)?;
+        }
         Ok(())
     })();
     if written.is_err() {
