@@ -55,7 +55,7 @@ pub fn resolve(repo: &Repo, line: Option<&Line>, rev: &str) -> Result<ResolvedRe
             repo.resolved_state(&parked.first().ok_or_else(|| anyhow::anyhow!("no park entries"))?.head)?
         }
         BaseSelector::Change { prefix, version, spelling } => {
-            let id = crate::revs::change::find(repo, prefix)?;
+            let id = crate::revs::change::find(repo, &mut None, prefix)?;
             let states = repo.p.db.change_versions(&id)?;
             let state = states
                 .get(version.unwrap_or(states.len().saturating_sub(1)))

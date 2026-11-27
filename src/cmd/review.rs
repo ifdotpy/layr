@@ -43,7 +43,7 @@ pub fn comment(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
     let _lock = h.repo.p.lock_maintenance()?;
-    let id = find(&h.repo, change)?;
+    let id = find(&h.repo, &mut None, change)?;
     let versions = h.repo.p.db.change_versions(&id)?;
     let state = match (a.get("--state"), a.get("--version")) {
         (Some(_), Some(_)) => bail!("--state and --version both name the version; give one"),
@@ -200,7 +200,9 @@ pub fn react(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let _lock = h.repo.p.lock_maintenance()?;
     let model = h.repo.read_model()?;
     let comment = model.find_comment(target);
-    let change = find(&h.repo, target);
+    let mut model = Some(model);
+    let change = find(&h.repo, &mut model, target);
+    let model = model.context("the project model was not read")?;
     let (change, target) = match (comment, change) {
         (Ok(_), Ok(_)) => bail!("'{target}' names a comment and a change; give more characters"),
         (Ok(c), Err(_)) => (
@@ -245,8 +247,9 @@ reviewer: person:<login>, user:<name or uid>, <user name>, or machine:<name or i
     let h = here(ctx)?;
     h.repo.require(ctx, "try")?;
     let _lock = h.repo.p.lock_maintenance()?;
-    let change = find(&h.repo, change)?;
-    let mut model = h.repo.read_model()?;
+    let mut model = None;
+    let change = find(&h.repo, &mut model, change)?;
+    let mut model = model.map_or_else(|| h.repo.read_model(), Ok)?;
     let reviewers = names.iter().map(|n| principal(&model, n)).collect::<Result<Vec<_>>>()?;
     let mut rows = Vec::new();
     for reviewer in reviewers {

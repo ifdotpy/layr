@@ -22,7 +22,7 @@ pub(super) fn write(store: &Store, repo: &Repo) -> Result<Report> {
         descriptor.mode.name()
     );
     let identity = store.identity(&descriptor, None)?;
-    repo.p.verify_records()?;
+    repo.p.check_records()?;
     ensure!(
         repo.p.db.trusted(&store.machine)?.as_deref() == Some(&hex::encode(store.key.verifying_key().to_bytes())),
         "index writer is not a trusted machine"

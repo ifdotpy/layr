@@ -190,6 +190,8 @@ pub fn status(ctx: &Ctx, args: &[String]) -> Result<i32> {
         ignored: if a.has("--no-ignored") { StatusIgnored::Omit } else { StatusIgnored::Include },
     };
     let h = here(ctx)?;
+    // The comparison and the overlap pass read states of this project through one object store handle.
+    let _objects = crate::objstore::share(&h.repo.p);
     let line = h.line()?.clone();
     #[cfg(target_os = "macos")]
     let line = h.repo.line(&line.id)?;

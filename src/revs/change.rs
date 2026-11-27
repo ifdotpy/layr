@@ -5,8 +5,8 @@ use anyhow::{bail, Result};
 
 /// The change that `prefix` names: `#12` (a number), a bare number such as `12`, a full change id, or
 /// at least four characters of its displayed id. A bare number that is also the start of a change id is
-/// ambiguous.
-pub fn find(repo: &Repo, prefix: &str) -> Result<String> {
+/// ambiguous. A number is looked up in `model`, read into it here when the caller has not read it.
+pub fn find(repo: &Repo, model: &mut Option<layr_model::Project>, prefix: &str) -> Result<String> {
     let (digits, explicit) = match prefix.strip_prefix('#') {
         Some(n) => (n, true),
         None => (prefix, false),
@@ -19,7 +19,12 @@ pub fn find(repo: &Repo, prefix: &str) -> Result<String> {
         bail!("bad change number '{prefix}': use #1, #2, ...");
     }
     let by_number = match number {
-        Some(n) => repo.read_model()?.numbering().change(n).map(String::from),
+        Some(n) => {
+            if model.is_none() {
+                *model = Some(repo.read_model()?);
+            }
+            model.as_ref().and_then(|model| model.numbering().change(n)).map(String::from)
+        }
         None => None,
     };
     if explicit {

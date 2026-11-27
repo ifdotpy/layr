@@ -7,6 +7,7 @@ use anyhow::{bail, Context, Result};
 pub use layr_api::Version;
 use layr_api::{Peer, SchemaVersion, StoreState, StoreVersionReport as Report, Upgrade, API_MAJOR};
 use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::num::NonZeroU32;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -18,6 +19,8 @@ pub const FORMAT: u32 = 2;
 /// The older format that this binary upgrades in place (metadata only).
 const UPGRADES_FROM: u32 = 1;
 pub const MARKER: &str = "store-version.json";
+/// The largest marker file that is read.
+const MARKER_MAX: usize = 4096;
 const LOCK: &str = ".layr-version.lock";
 
 pub fn binary() -> Version {
@@ -72,14 +75,17 @@ fn marker(root: &Path) -> Result<Option<Version>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("read {} for {}", path.display(), description(&binary()))),
     };
-    let meta = file.metadata()?;
-    if !meta.is_file() || meta.len() > 4096 {
-        bail!("invalid store version file {} for {}", path.display(), description(&binary()));
+    let invalid = || format!("invalid store version file {} for {}", path.display(), description(&binary()));
+    if !file.metadata()?.is_file() {
+        bail!("{}", invalid());
     }
-    Ok(Some(
-        serde_json::from_reader(file)
-            .with_context(|| format!("invalid store version file {} for {}", path.display(), description(&binary())))?,
-    ))
+    // One read of at most 4097 bytes: a marker that grew past 4096 bytes after the check is refused, not cut.
+    let mut bytes = Vec::with_capacity(MARKER_MAX + 1);
+    file.take(MARKER_MAX as u64 + 1).read_to_end(&mut bytes).with_context(invalid)?;
+    if bytes.len() > MARKER_MAX {
+        bail!("{}", invalid());
+    }
+    Ok(Some(serde_json::from_slice(&bytes).with_context(invalid)?))
 }
 
 fn lock_file(root: &Path, create: bool) -> Result<File> {
@@ -226,12 +232,6 @@ impl Guard {
         require_compatible(&binary, &stored, "store")?;
         Ok(Self { _file: file })
     }
-
-    pub fn ready(&self, root: &Path) -> Result<()> {
-        rustix::fs::flock(&self._file, rustix::fs::FlockOperation::LockShared)?;
-        let stored = marker(root)?.context("the store version disappeared; refuse access")?;
-        require_compatible(&binary(), &stored, "store")
-    }
 }
 
 /// Inspect without Store::open, locks, directory creation, or database migrations.
@@ -325,6 +325,22 @@ mod race_tests {
         fs::write(root.join(MARKER), serde_json::to_vec(&later).unwrap()).unwrap();
         assert!(Guard::open(&root).is_err());
         assert_eq!(marker(&root).unwrap().unwrap().format, FORMAT + 1, "a later format is never rewritten");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The marker is read whole up to its size limit: 4096 bytes parse, one more byte is refused, not cut.
+    #[test]
+    fn marker_is_read_whole_up_to_its_limit() {
+        let root = std::env::temp_dir().join(format!("layr-marker-size-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut json = serde_json::to_vec(&binary()).unwrap();
+        json.resize(MARKER_MAX, b' ');
+        fs::write(root.join(MARKER), &json).unwrap();
+        assert_eq!(marker(&root).unwrap(), Some(binary()));
+        json.push(b' ');
+        fs::write(root.join(MARKER), &json).unwrap();
+        assert!(format!("{:#}", marker(&root).unwrap_err()).contains("invalid store version file"));
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -295,7 +295,7 @@ pub(crate) fn source_lines(repo: &Repo, canonical_main: bool) -> Result<Vec<crat
                 .terms()
                 .is_none_or(|terms| matches!(terms.role, layr_store::trust::Role::Full | layr_store::trust::Role::Merge))
         })
-        .map(|r| (r.record().machine.clone(), *r.signed().key()))
+        .map(|r| (r.record().machine.clone(), *r.key()))
         .collect();
     let records = authorized.iter().map(|r| r.record().clone()).collect::<Vec<_>>();
     let creator = layr_model::project_perspective(&repo.p.id, &records)?;

@@ -11,8 +11,9 @@ use anyhow::{bail, Result};
 
 /// On the numbering machine of the project: give a number to each change that has none, oldest first
 /// version first, in one record. Other machines get the numbers when they receive that record. Takes the
-/// project lock: the caller must not hold it. Returns how many numbers it gave.
-pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<usize> {
+/// project lock: the caller must not hold it. When it gives no number, returns the model it read: the caller's next
+/// read until it writes.
+pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<Option<layr_model::Project>> {
     let unnumbered = |model: &layr_model::Project| -> Vec<String> {
         if model.numbering().authority.as_deref() != Some(repo.p.store.machine.id.as_str()) {
             return Vec::new();
@@ -28,14 +29,17 @@ pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<usize> {
         out.sort();
         out.into_iter().map(|(_, change)| change.to_string()).collect()
     };
-    if unnumbered(&repo.read_model()?).is_empty() {
-        return Ok(0);
+    {
+        let model = repo.read_model()?;
+        if unnumbered(&model).is_empty() {
+            return Ok(Some(model));
+        }
     }
     let _lock = repo.p.lock_maintenance()?;
     let model = repo.read_model()?;
     let todo = unnumbered(&model);
     if todo.is_empty() {
-        return Ok(0);
+        return Ok(Some(model));
     }
     let next = model.numbering().next;
     let numbers: serde_json::Map<String, serde_json::Value> =
@@ -43,13 +47,18 @@ pub fn assign_numbers(ctx: &Ctx, repo: &Repo) -> Result<usize> {
     let mut rec = crate::model::DraftRecord::new(layr_model::changes::NUMBER_OP);
     rec.data = serde_json::json!({ "numbers": numbers });
     repo.commit_record(&_lock, ctx, rec)?;
-    Ok(todo.len())
+    Ok(None)
 }
 
-/// `assign_numbers` for a command that also works without numbers: a failure is a warning.
-pub fn try_assign_numbers(ctx: &Ctx, repo: &Repo) {
-    if let Err(e) = assign_numbers(ctx, repo) {
-        eprintln!("layr: change numbers were not given: {e:#}");
+/// `assign_numbers` for a command that also works without numbers: a failure is a warning. Returns the model that
+/// `assign_numbers` read when it wrote nothing.
+pub fn try_assign_numbers(ctx: &Ctx, repo: &Repo) -> Option<layr_model::Project> {
+    match assign_numbers(ctx, repo) {
+        Ok(model) => model,
+        Err(e) => {
+            eprintln!("layr: change numbers were not given: {e:#}");
+            None
+        }
     }
 }
 
@@ -98,9 +107,9 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if a.has("--all") && a.has("--closed") {
         bail!("give --all or --closed, not both");
     }
-    try_assign_numbers(ctx, repo);
+    let mut numbered = try_assign_numbers(ctx, repo);
     if command == "list" && a.pos.len() == 1 {
-        let model = repo.read_model()?;
+        let model = numbered.map_or_else(|| repo.read_model(), Ok)?;
         let rows: Vec<_> = model
             .change_views()
             .into_iter()
@@ -129,15 +138,19 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     if command == "numbering" && a.pos.len() == 1 {
+        drop(numbered);
         return numbering(ctx, repo, a.get("--hand-to"), a.has("--json"));
     }
     if a.pos.len() != 2 {
         bail!("{usage}");
     }
     if matches!(command, "edit" | "close" | "reopen") {
+        drop(numbered);
         return lifecycle(ctx, repo, command, &a.pos[1], &a);
     }
-    let id = find(repo, &a.pos[1])?;
+    // The numbering read maps a change number; the views below read after the versions.
+    let id = find(repo, &mut numbered, &a.pos[1])?;
+    drop(numbered);
     let versions = repo.p.db.change_versions(&id)?;
     match command {
         "show" => {
@@ -266,7 +279,7 @@ pub fn change(ctx: &Ctx, args: &[String]) -> Result<i32> {
 /// (the user who made its first version, on that machine) or a maintainer may run them.
 fn lifecycle(ctx: &Ctx, repo: &Repo, command: &str, which: &str, a: &crate::args::Parsed) -> Result<i32> {
     use layr_model::changes::{Status, CLOSE_OP, EDIT_OP, MAX_DESCRIPTION, MAX_TITLE, REOPEN_OP};
-    let id = find(repo, which)?;
+    let id = find(repo, &mut None, which)?;
     let description = match (a.get("--description"), a.get("--description-file")) {
         (Some(_), Some(_)) => bail!("give --description or --description-file, not both"),
         (Some(text), None) => Some(text.to_string()),

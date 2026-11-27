@@ -451,8 +451,7 @@ fn plan(repo: &Repo, state: Option<&str>, required: &[String], planned_only: boo
     let changes = names("checks.changes", &setting(&policy, "checks.changes", json!([]))?)?;
     let lines = setting(&policy, "checks.lines", json!({}))?;
     let platforms = setting(&policy, "checks.platforms", json!({}))?;
-    let privileged: BTreeSet<_> =
-        names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?.into_iter().collect();
+    let privileged: BTreeSet<_> = privileged_checks(&policy)?.into_iter().collect();
     let mut jobs = BTreeSet::new();
     let mut change_jobs = BTreeSet::new();
     if let Some(state) = state.filter(|_| !planned_only) {
@@ -653,11 +652,21 @@ fn attested_result(
         .any(|(_, r)| matches_check(&r.data["check"], argv, privileged, want, passing)))
 }
 
-/// A queue gate uses the creator's privilege policy and requires a passing executor result.
-pub(crate) fn passing_required(repo: &Repo, state: &str, name: &str, argv: &[String], want: Option<&str>) -> Result<bool> {
-    let records = repo.p.authorized_records()?;
-    let (policy, _) = creator_policy(&repo.p.id, records)?;
-    let privileged = names("checks.privileged", &setting(&policy, "checks.privileged", json!([]))?)?;
+/// The checks that the creator's policy (`creator_project`) marks privileged (`checks.privileged`), for
+/// `passing_required`. A gate reads them once for all its checks.
+pub(crate) fn privileged_checks(creator: &layr_model::Project) -> Result<Vec<String>> {
+    names("checks.privileged", &setting(creator, "checks.privileged", json!([]))?)
+}
+
+/// A queue gate uses the creator's privilege policy (`privileged_checks`) and requires a passing executor result.
+pub(crate) fn passing_required(
+    repo: &Repo,
+    state: &str,
+    name: &str,
+    argv: &[String],
+    want: Option<&str>,
+    privileged: &[String],
+) -> Result<bool> {
     attested_result(repo, state, argv, privileged.iter().any(|check| check == name), want, true)
 }
 
@@ -1689,6 +1698,7 @@ mod policy_tests {
             &keys,
             layr_model::record::LocalAuthority {
                 machine: layr_types::MachineId::parse(&machine).unwrap(),
+                announced: &keys,
                 trust_writers: &keys,
                 limits: &rules,
                 overlay: None,

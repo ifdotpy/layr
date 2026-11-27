@@ -2,7 +2,7 @@
 use crate::{merge_authority, Record};
 use anyhow::{ensure, Context, Result};
 use ed25519_dalek::VerifyingKey;
-use layr_store::record::{parse_line, VerifiedRecord};
+use layr_store::record::parse_line;
 use layr_types::{MachineId, ProjectId};
 use std::collections::BTreeMap;
 
@@ -22,12 +22,14 @@ impl ProjectScope {
     }
 }
 
-/// No public constructor or Deserialize implementation can manufacture this proof.
+/// A record whose signer the project's authority accepted, with the key selected for its machine. `authorize_lines`
+/// checked its signature under that key; `authorize_local_lines` relies on the catalog, which checked or signed each
+/// row when it took it in. No public constructor or Deserialize implementation can manufacture it.
 #[derive(Clone, Debug)]
 #[must_use]
 pub struct AuthorizedRecord<Scope> {
     record: Record,
-    signed: VerifiedRecord,
+    key: VerifyingKey,
     scope: Scope,
 }
 
@@ -35,8 +37,8 @@ impl<Scope> AuthorizedRecord<Scope> {
     pub fn record(&self) -> &Record {
         &self.record
     }
-    pub fn signed(&self) -> &VerifiedRecord {
-        &self.signed
+    pub fn key(&self) -> &VerifyingKey {
+        &self.key
     }
     pub fn scope(&self) -> &Scope {
         &self.scope
@@ -60,15 +62,20 @@ pub fn authorize_lines(
 
 /// A local catalog explicitly grants these project keys authority. Its own machine
 /// keeps its records even when another reader's policy would refuse them; overlays
-/// use their parent's trust limits. All signatures and limits are still checked here.
+/// use their parent's trust limits. All limits are still checked here.
 pub struct LocalAuthority<'a> {
     pub machine: MachineId,
+    /// The key of each machine's first record (`op: "machine"`) in the catalog: the key under which the catalog checks
+    /// (`import_lines`) or signs (`append_batch`) the rows it takes in. A row whose selected key is this one is not
+    /// checked again; any other row is.
+    pub announced: &'a BTreeMap<String, VerifyingKey>,
     /// Signing identities admitted by a server cannot grant local machine trust.
     pub trust_writers: &'a BTreeMap<String, VerifyingKey>,
     pub limits: &'a layr_store::trust::Rules,
     pub overlay: Option<&'a str>,
 }
 
+/// Only for rows of a local catalog (`LocalAuthority::announced`); other input goes through `authorize_lines`.
 pub fn authorize_local_lines(
     project: &str,
     lines: &[String],
@@ -88,6 +95,7 @@ fn authorize(
 ) -> Result<Vec<AuthorizedRecord<ProjectScope>>> {
     let project_id = ProjectId::parse(project)?;
     let mut verified = Vec::new();
+    let mut proofs = Vec::new();
     for line in lines {
         let signed = parse_line(line)?;
         let record: Record = serde_json::from_str(signed.get())?;
@@ -96,14 +104,19 @@ fn authorize(
             record.project == project || (record.project.is_empty() && record.op == "machine" && record.seq == 1),
             "policy records belong to another project"
         );
-        let key = known_keys.get(&record.machine).context("record signer is not a known project machine")?;
-        verified.push((record, signed.verify(key)?));
+        let key = *known_keys.get(&record.machine).context("record signer is not a known project machine")?;
+        match &local {
+            Some(local) if local.announced.get(&record.machine) == Some(&key) => {}
+            Some(_) => drop(signed.verify(&key)?),
+            None => proofs.push(signed.verify(&key)?),
+        }
+        verified.push((record, key));
     }
     let resolved;
     let (trusted, limits) = match &local {
         Some(local) => (known_keys, local.limits),
         None => {
-            resolved = layr_store::public::project_signers(project, verified.iter().map(|(_, signed)| signed))?;
+            resolved = layr_store::public::project_signers(project, &proofs)?;
             (&resolved.0, &resolved.1)
         }
     };
@@ -116,15 +129,15 @@ fn authorize(
     verified.sort_by(|a, b| (a.0.time, &a.0.machine, a.0.seq).cmp(&(b.0.time, &b.0.machine, b.0.seq)));
     let mut current = merge_authority::Folded::new(now);
     let mut out = Vec::new();
-    for (record, signed) in verified {
-        if trusted.get(&record.machine) != Some(signed.key()) {
+    for (record, key) in verified {
+        if trusted.get(&record.machine) != Some(&key) {
             continue;
         }
         current.at = record.time;
         let own = local.as_ref().is_some_and(|local| record.machine == local.machine.to_string());
         if !own
             && matches!(record.op.as_str(), "machine.trust" | "machine.untrust" | "trust.delegate")
-            && local.as_ref().is_some_and(|local| local.trust_writers.get(&record.machine) != Some(signed.key()))
+            && local.as_ref().is_some_and(|local| local.trust_writers.get(&record.machine) != Some(&key))
         {
             continue;
         }
@@ -145,7 +158,7 @@ fn authorize(
         out.push(AuthorizedRecord {
             scope: ProjectScope { project: project_id, terms: limits.get(&record.machine).cloned() },
             record,
-            signed,
+            key,
         });
     }
     Ok(out)
@@ -222,12 +235,93 @@ mod tests {
         let reader = checked.iter().find(|r| r.record().machine == READER).unwrap();
         assert_eq!(reader.scope().project().to_string(), PROJECT);
         assert_eq!(reader.scope().terms().unwrap().role, layr_store::trust::Role::Reader);
-        assert_eq!(reader.signed().key(), &keys[READER]);
+        assert_eq!(reader.key(), &keys[READER]);
         assert!(Model::from_verified_lines(checked, OWNER).unwrap().projects.contains_key(PROJECT));
         let mut wrong = keys.clone();
         wrong.insert(OWNER.into(), keys[READER]);
         assert!(authorize_lines(PROJECT, &lines, &wrong, 100).is_err());
         assert!(authorize_lines(READER, &lines, &keys, 100).is_err());
+    }
+
+    /// The taken records (machine, seq, key, scope) of a read, or its first error.
+    type Read = Result<Vec<(String, u64, [u8; 32], String)>, String>;
+
+    /// One local read of `lines` as a catalog of `me` with these pins and announcements, its trust rules from the
+    /// lines.
+    fn local_read(
+        lines: &[String],
+        keys: &BTreeMap<String, VerifyingKey>,
+        announced: &BTreeMap<String, VerifyingKey>,
+        me: &str,
+    ) -> Read {
+        let read = || -> Result<_> {
+            let mut records = Vec::new();
+            for line in lines {
+                records.push(serde_json::from_str::<Record>(parse_line(line)?.get())?);
+            }
+            let rules = layr_store::trust::rules(
+                OWNER,
+                records.iter().map(|r| layr_store::trust::TrustRecord {
+                    signer: &r.machine,
+                    time: r.time,
+                    op: &r.op,
+                    data: &r.data,
+                }),
+            );
+            let authority =
+                LocalAuthority { machine: MachineId::parse(me)?, announced, trust_writers: keys, limits: &rules, overlay: None };
+            let out = authorize_local_lines(PROJECT, lines, keys, authority, 100)?;
+            Ok(out
+                .iter()
+                .map(|r| (r.record().machine.clone(), r.record().seq, r.key().to_bytes(), format!("{:?}", r.scope())))
+                .collect())
+        };
+        read().map_err(|e| format!("{e:#}"))
+    }
+
+    /// A local read checks the signature only of a row whose selected key is not its machine's first record: the
+    /// catalog checked or signed every row under that key when it took it in. For every catalog of such rows it takes
+    /// and refuses the same records, with the same first error, as checking every row (an empty `announced`).
+    #[test]
+    fn local_reads_check_only_rows_outside_their_announcement() -> Result<(), String> {
+        let owner = SigningKey::from_bytes(&[1; 32]);
+        let reader = SigningKey::from_bytes(&[2; 32]);
+        let (mut lines, keys) = history();
+        // A limited signer's later records, one after its trust ends: rules and policy are read as before.
+        lines.push(line(READER, 3, "config", json!({"config":{"a":"1"}}), &reader));
+        lines.push(line(OWNER, 4, "machine.untrust", json!({"machine":READER}), &owner));
+        lines.push(line(READER, 5, "config", json!({"config":{"a":"2"}}), &reader));
+        // `keys` are also the catalog's announcements; `selected` are the pins and the own key of the read.
+        let none = BTreeMap::new();
+        let same = |lines: &[String], selected: &BTreeMap<String, VerifyingKey>, me: &str| {
+            let checked = local_read(lines, selected, &none, me);
+            assert_eq!(local_read(lines, selected, &keys, me), checked);
+            checked
+        };
+        let taken = same(&lines, &keys, OWNER)?;
+        assert!(taken.iter().any(|(m, seq, _, _)| m == READER && *seq == 1));
+        assert!(!taken.iter().any(|(m, seq, _, _)| m == READER && (2..=5).contains(seq)), "a reader's records outside its terms");
+        let own = same(&lines, &keys, READER)?;
+        assert_eq!(own.iter().filter(|(m, _, key, _)| m == READER && key == &keys[READER].to_bytes()).count(), 4, "all its own");
+        let mut tampered = lines.clone();
+        tampered[4] = tampered[4].replace("\"s\":\"", "\"s\":\"AAAA");
+        // A pin-only signer (no announcement in the catalog) is checked on every read.
+        let pinned = BTreeMap::from([(OWNER.to_string(), keys[OWNER])]);
+        let checked = local_read(&tampered, &keys, &none, OWNER);
+        assert!(checked.as_ref().is_err_and(|e| e.contains("record signature does not verify")), "{checked:?}");
+        assert_eq!(local_read(&tampered, &keys, &pinned, OWNER), checked);
+        // A pin or an own-key override other than the announcement: those rows are checked.
+        let mut wrong = keys.clone();
+        wrong.insert(READER.into(), owner.verifying_key());
+        assert!(same(&lines, &wrong, OWNER).is_err());
+        assert!(same(&lines, &wrong, READER).is_err());
+        // An unknown signer.
+        let mut unknown = keys.clone();
+        unknown.remove(READER);
+        assert!(same(&lines, &unknown, OWNER).is_err_and(|e| e.contains("not a known project machine")));
+        // The one difference: a row changed after the catalog took it in is read; `layr fsck` finds it.
+        assert_eq!(local_read(&tampered, &keys, &keys, OWNER), same(&lines, &keys, OWNER));
+        Ok(())
     }
 
     #[test]
@@ -242,8 +336,7 @@ mod tests {
         lines[1] = format!("{{\"r\":{body},\"s\":\"{sig}\"}}");
         let checked = authorize_lines(PROJECT, &lines, &keys, 100).unwrap();
         let creation = checked.iter().find(|r| r.record().op == "project").unwrap();
-        assert_eq!(creation.signed().get(), body);
-        assert_eq!(creation.signed().line(), lines[1]);
+        assert_eq!(creation.key(), &keys[OWNER]);
         assert!(
             authorize_lines(PROJECT, &lines.iter().map(|l| l.replace("true", "false")).collect::<Vec<_>>(), &keys, 100).is_err()
         );
@@ -348,6 +441,7 @@ mod tests {
                     &keys,
                     LocalAuthority {
                         machine: MachineId::parse(machine).unwrap(),
+                        announced: &keys,
                         trust_writers: &keys,
                         limits: &rules,
                         overlay: None,

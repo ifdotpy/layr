@@ -186,7 +186,6 @@ impl Store {
         let key = SigningKey::from_bytes(&arr);
         drop(machine_lock);
         mkdir_mode(&root.join("projects"), 0o755)?;
-        version_guard.ready(root)?;
         // Every volume folder must hold the identity file of this store (checked when used).
         let store = Store { root: root.to_path_buf(), machine: Machine { id, name, key }, _version_guard: Some(version_guard) };
         // A volume with its own OverlayFS registry (a project moved there) is recovered too.
@@ -1651,19 +1650,21 @@ impl<'a> Project<'a> {
             keys.insert(machine, ed25519_dalek::VerifyingKey::from_bytes(&bytes)?);
         }
         let trust_writers = keys.clone();
-        // Committed catalog chains were admitted by import_lines (including explicit
-        // Trust::All/Server imports). Pin their first announcement, then recheck the
-        // signature before reconstructing local authorization after a restart.
+        // Every catalog row was signed here or checked against the first announcement of its machine when it came in
+        // (`import_lines`, including explicit Trust::All/Server imports). Pin that announcement; the read checks no
+        // signature again where it is the selected key (`LocalAuthority::announced`; `layr fsck` checks them all).
+        let mut announced = std::collections::BTreeMap::new();
         for machine in self.db.record_machines()? {
             if let Some(line) = self.db.record_line(&machine, 1)? {
                 let record = oplog::parse_line(&line)?.record;
                 if record.op == "machine" {
                     let key = oplog::machine_key(&record)?;
-                    if let Some(known) = keys.insert(machine, key) {
+                    if let Some(known) = keys.insert(machine.clone(), key) {
                         if known != key {
                             bail!("catalog machine key differs from trusted key");
                         }
                     }
+                    announced.insert(machine, key);
                 }
             }
         }
@@ -1675,6 +1676,7 @@ impl<'a> Project<'a> {
             &keys,
             layr_model::record::LocalAuthority {
                 machine: layr_types::MachineId::parse(&self.store.machine.id)?,
+                announced: &announced,
                 trust_writers: &trust_writers,
                 limits: &terms,
                 overlay: self.name.split_once('%').map(|(_, overlay)| overlay),
@@ -1712,22 +1714,7 @@ impl<'a> Project<'a> {
 
     /// Check every machine's chain of records: key, sequence numbers, signatures.
     pub fn verify_records(&self) -> Result<Vec<(String, u64)>> {
-        self.verify_records_with(&mut oplog::Verified::default())
-    }
-
-    /// `verify_records` that checks the signatures of each chain only after the run that it verified before
-    /// (`oplog::Verified`, beside the catalog, under a MAC with this machine's key).
-    pub fn check_records(&self) -> Result<Vec<(String, u64)>> {
-        let path = self.meta_dir().join("verified-records");
-        let mut verified = oplog::Verified::load(&path, &self.store.machine.key);
-        let out = self.verify_records_with(&mut verified)?;
-        // A cache: without it (a read-only folder), the next check verifies every signature again.
-        let _ = verified.save(&path, &self.store.machine.key);
-        Ok(out)
-    }
-
-    /// The stored lines of each machine, numbered by their order: each must carry its number.
-    fn verify_records_with(&self, verified: &mut oplog::Verified) -> Result<Vec<(String, u64)>> {
+        let mut verified = oplog::Verified::default();
         let mut out = Vec::new();
         for m in self.db.record_machines()? {
             let lines = self.db.lines_after(&m, 0)?;
@@ -1735,6 +1722,25 @@ impl<'a> Project<'a> {
             out.push((m, lines.len() as u64));
         }
         Ok(out)
+    }
+
+    /// Check that every machine's chain is whole: its rows are numbered 1 to n without a gap and row 1 is the
+    /// machine's key. The signatures were checked when the rows came in (`import_lines`); when a chain is not whole,
+    /// `verify_records` gives the reason.
+    pub fn check_records(&self) -> Result<()> {
+        let whole = |chain: &crate::db::Chain| {
+            chain.min == 1
+                && chain.count == chain.max
+                && chain
+                    .first
+                    .as_deref()
+                    .and_then(|line| oplog::parse_line(line).ok())
+                    .is_some_and(|first| first.record.op == "machine" && oplog::machine_key(&first.record).is_ok())
+        };
+        if !self.db.chains()?.iter().all(whole) {
+            self.verify_records()?;
+        }
+        Ok(())
     }
 
     pub fn config_value(&self, key: &str) -> Result<Option<serde_json::Value>> {
@@ -2273,6 +2279,132 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         result
     }
+
+    /// A model read checks no signature of a row that the catalog checked when it came in (`import_lines`) or signed
+    /// itself under its machine's first record; any other row it checks as before. `layr fsck` checks them all, push
+    /// checks that each chain is whole, and this machine signs no row with another key than its first record's.
+    #[test]
+    fn catalog_rows_are_checked_once_and_fsck_checks_them_all() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("layr-verify-once-{}", ids::new_id()));
+        let result = (|| -> Result<()> {
+            let mut store = Store::open(&base.join("store"))?;
+            let actor = Actor { uid: rustix::process::geteuid().as_raw(), name: "test".into(), session: None };
+            let dir = store.project_dir("p")?;
+            fs::create_dir_all(dir.join("meta/db"))?;
+            fs::create_dir(dir.join("states"))?;
+            let id = ids::new_id();
+            fn open<'s>(store: &'s Store, dir: &Path, id: &str) -> Result<Project<'s>> {
+                let db = Db::open(&db_file(dir))?;
+                Ok(Project { lease: Default::default(), store, name: "p".into(), dir: dir.into(), id: id.into(), db })
+            }
+            let machines = [ids::new_id(), ids::new_id(), ids::new_id()];
+            let keys = [31u8, 32, 33, 34].map(|seed| SigningKey::from_bytes(&[seed; 32]));
+            // Record `seq` of machine `m`, signed with `key` (record 1 announces key `m`).
+            let signed = |m: usize, seq: u64, key: &SigningKey| -> Result<(Record, String)> {
+                let mut rec = Record::untrusted_preview(if seq == 1 { "machine" } else { "config" });
+                (rec.id, rec.machine, rec.seq, rec.time) = (ids::new_id(), machines[m].clone(), seq, ids::now_ms());
+                (rec.project, rec.actor) = (id.clone(), actor.clone());
+                rec.data = if seq == 1 {
+                    serde_json::json!({"name": "m", "public_key": hex::encode(keys[m].verifying_key().to_bytes())})
+                } else {
+                    serde_json::json!({"config": {"core.x": seq.to_string()}})
+                };
+                let line = oplog::sign_line(&rec, key)?;
+                Ok((rec, line))
+            };
+            let tamper = |line: &str| line.replace("\"s\":\"", "\"s\":\"AAAA");
+            let error = |result: Result<()>| result.map_err(|e| format!("{e:#}"));
+            let verifies = |run: &dyn Fn() -> Result<()>| -> Result<usize> {
+                let before = oplog::VERIFY_COUNT.with(std::cell::Cell::get);
+                run()?;
+                Ok(oplog::VERIFY_COUNT.with(std::cell::Cell::get) - before)
+            };
+            {
+                let p = open(&store, &dir, &id)?;
+                let read = || p.authorized_records().map(|records| records.len()).map_err(|e| format!("{e:#}"));
+                let fsck = || error(p.verify_records().map(|_| ()));
+                let mut project = crate::model::DraftRecord::new("project");
+                project.data = serde_json::json!({"id": id, "name": "p", "config": {}});
+                p.lock_maintenance()?.append(project, &actor)?;
+                let lines = [signed(0, 1, &keys[0])?.1, signed(0, 2, &keys[0])?.1, signed(0, 3, &keys[0])?.1];
+                assert_eq!(verifies(&|| p.lock_maintenance()?.import_lines(&lines, Trust::All).map(|_| ()))?, 3);
+                assert_eq!(read(), Ok(5));
+                assert_eq!(verifies(&|| p.check_records())?, 0, "push checks the structure");
+                assert_eq!(verifies(&|| p.verify_records().map(|_| ()))?, 5, "fsck checks every row");
+                // A bad fresh record is refused in every trust mode; a changed stored one as a fork.
+                let bad = tamper(&signed(0, 4, &keys[0])?.1);
+                let key = hex::encode(keys[0].verifying_key().to_bytes());
+                for trust in [Trust::All, Trust::Server, Trust::Known, Trust::Peer(&machines[0], &key)] {
+                    let refused = error(p.lock_maintenance()?.import_lines(std::slice::from_ref(&bad), trust).map(|_| ()));
+                    assert!(refused.as_ref().is_err_and(|e| e.contains("record signature does not verify")), "{refused:?}");
+                }
+                let fork = error(p.lock_maintenance()?.import_lines(&[tamper(&lines[1])], Trust::All).map(|_| ()));
+                assert!(fork.as_ref().is_err_and(|e| e.contains("differs from the stored record")), "{fork:?}");
+                assert_eq!(p.db.last_seq(&machines[0])?, 3);
+                // A row changed after it came in, and a row an old writer signed with another key: the read takes them
+                // (the catalog is in this machine's custody), the chain is whole, `layr fsck` finds them.
+                p.db.test_connection().execute("UPDATE records SET raw=?1 WHERE raw=?2", [&tamper(&lines[1]), &lines[1]])?;
+                let (rec, other) = signed(0, 4, &keys[3])?;
+                p.db.test_insert_record(&rec, &other)?;
+                assert_eq!(read(), Ok(6));
+                p.check_records()?;
+                assert!(fsck().is_err_and(|e| e.contains("record signature does not verify")));
+                p.db.test_connection().execute("UPDATE records SET raw=?1 WHERE raw=?2", [&lines[1], &tamper(&lines[1])])?;
+                assert!(fsck().is_err_and(|e| e.contains("record signature does not verify")), "the other key alone");
+                p.db.test_connection().execute("DELETE FROM records WHERE raw=?1", [&other])?;
+                assert_eq!(fsck(), Ok(()));
+                // A later announcement of another key changes no key: the read selects the first record's.
+                let mut later = signed(0, 4, &keys[0])?.0;
+                later.op = "machine".into();
+                later.data = serde_json::json!({"name": "m", "public_key": hex::encode(keys[3].verifying_key().to_bytes())});
+                p.lock_maintenance()?.import_lines(&[oplog::sign_line(&later, &keys[0])?], Trust::All)?;
+                let records = p.authorized_records()?;
+                let first = keys[0].verifying_key();
+                assert!(records.iter().filter(|r| r.record().machine == machines[0]).all(|r| r.key() == &first));
+                assert_eq!(records.iter().filter(|r| r.record().machine == machines[0]).count(), 4);
+                // A pinned machine without its first record: its rows are checked on every read, and push gives the
+                // reason of the full check.
+                let mut trust = crate::model::DraftRecord::new("machine.trust");
+                trust.data =
+                    serde_json::json!({"machine": machines[1], "public_key": hex::encode(keys[1].verifying_key().to_bytes())});
+                p.lock_maintenance()?.append(trust, &actor)?;
+                let (rec, line) = signed(1, 2, &keys[1])?;
+                p.db.test_insert_record(&rec, &line)?;
+                assert_eq!(read(), Ok(8));
+                let push = error(p.check_records());
+                assert!(push.as_ref().is_err_and(|e| e.ends_with("the first record is not its key")), "{push:?}");
+                assert_eq!(push, fsck());
+                p.db.test_connection().execute("UPDATE records SET raw=?1 WHERE raw=?2", [&tamper(&line), &line])?;
+                assert!(read().is_err_and(|e| e.contains("record signature does not verify")));
+                p.db.test_connection().execute("DELETE FROM records WHERE machine=?1", [&machines[1]])?;
+                // A whole chain whose pin differs from its first record: push takes it, a read refuses it as before.
+                let chain = [signed(2, 1, &keys[2])?.1, signed(2, 2, &keys[2])?.1];
+                p.lock_maintenance()?.import_lines(&chain, Trust::All)?;
+                let mut pin = crate::model::DraftRecord::new("machine.trust");
+                pin.data =
+                    serde_json::json!({"machine": machines[2], "public_key": hex::encode(keys[3].verifying_key().to_bytes())});
+                p.lock_maintenance()?.append(pin, &actor)?;
+                p.check_records()?;
+                assert!(read().is_err_and(|e| e.contains("catalog machine key differs from trusted key")));
+            }
+            // This machine with another key, under its id as written or in capitals: it signs no row of its chain, and
+            // its rows are checked again.
+            let records = open(&store, &dir, &id)?.db.all_lines()?.len();
+            store.machine.key = SigningKey::from_bytes(&[35u8; 32]);
+            for spelling in [store.machine.id.clone(), store.machine.id.to_uppercase()] {
+                store.machine.id = spelling;
+                let p = open(&store, &dir, &id)?;
+                let Err(refused) = p.lock_maintenance()?.append(crate::model::DraftRecord::new("config"), &actor) else {
+                    bail!("an append with another key is refused");
+                };
+                assert!(format!("{refused:#}").contains("differs from the key in its first record"), "{refused:#}");
+                assert_eq!(p.db.all_lines()?.len(), records);
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&base);
+        result
+    }
 }
 
 #[cfg(test)]
@@ -2565,10 +2697,13 @@ impl LockedProject<'_> {
             return Err(anyhow!("project id unknown: the project has no records yet").into());
         }
         let mut published = Vec::new();
+        // The machine id as the records carry it: the chain to extend.
+        let machine = layr_types::MachineId::parse(&m.id).map_err(anyhow::Error::from)?;
+        let chain = machine.to_string();
         let identity = |seq, time| -> Result<crate::model::RecordIdentity> {
             Ok(crate::model::RecordIdentity {
                 id: layr_types::RecordId::parse(&ids::new_id())?,
-                machine: layr_types::MachineId::parse(&m.id)?,
+                machine,
                 project: layr_types::ProjectId::parse(&project)?,
                 seq: std::num::NonZeroU64::new(seq).context("record sequence must be positive")?,
                 time,
@@ -2577,7 +2712,15 @@ impl LockedProject<'_> {
         };
         let tx = self.begin_write()?;
         {
-            let mut seq = self.db.last_seq(&m.id)?;
+            let mut seq = self.db.last_seq(&chain)?;
+            // A model read checks no signature of a row signed with the key of its machine's first record
+            // (`authorized_records`): every row of this machine is signed with that key.
+            if let Some(first) = if seq > 0 { self.db.record_line(&chain, 1)? } else { None } {
+                let first = oplog::parse_line(&first)?.record;
+                if first.op == "machine" && oplog::machine_key(&first)? != m.key.verifying_key() {
+                    return Err(anyhow!("this machine's key differs from the key in its first record").into());
+                }
+            }
             if seq == 0 {
                 // The first record of this machine publishes its key.
                 let mut mr = crate::model::DraftRecord::new("machine");

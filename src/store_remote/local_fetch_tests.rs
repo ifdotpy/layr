@@ -312,8 +312,9 @@ fn counted<T>(run: impl FnOnce() -> T) -> (T, usize, usize) {
 }
 
 /// A no-op push or fetch verifies no signature that an earlier command verified, and decodes each record at most once
-/// per pass that needs it (push: the selection; fetch: the local index, the import and the selection). One new record
-/// is the one verified. The same on a Secret store and on a Private one (no vault identity).
+/// per pass that needs it (push: the selection; fetch: the local index, the import and the selection). Push verifies
+/// none: the catalog checked each record when it came in. A fetch verifies each new record once. The same on a Secret
+/// store and on a Private one (no vault identity).
 #[test]
 fn noop_push_and_fetch_verify_only_records_that_are_new() {
     for (count, plain) in [(8, false), (64, false), (8, true)] {
@@ -331,7 +332,7 @@ fn noop_push_and_fetch_verify_only_records_that_are_new() {
         }
         let records = repo.p.export_jsonl().unwrap().lines().count();
         let (_, verifies, _) = counted(|| super::super::writer::push(&remote, &ctx, &repo, &Options::default()).unwrap());
-        assert_eq!(verifies, records, "the first push verifies the history once");
+        assert_eq!(verifies, 0, "push checks no signature of the catalog");
         let (_, verifies, _) = counted(|| fetch(&mut remote, &ctx, &mut repo, &Options::default()).unwrap());
         assert_eq!(verifies, records, "the first fetch verifies the history once");
         let (report, verifies, decodes) =
@@ -345,7 +346,7 @@ fn noop_push_and_fetch_verify_only_records_that_are_new() {
         record.data = serde_json::json!({"config": {"note": "one more"}});
         repo.p.lock_maintenance().unwrap().append(record, &ctx.actor()).unwrap();
         let (report, verifies, _) = counted(|| super::super::writer::push(&remote, &ctx, &repo, &Options::default()).unwrap());
-        assert_eq!((report.records, verifies), (1, 1));
+        assert_eq!((report.records, verifies), (1, 0));
         let (_, verifies, _) = counted(|| fetch(&mut remote, &ctx, &mut repo, &Options::default()).unwrap());
         assert_eq!(verifies, 1);
         crate::free::finish(&ctx);

@@ -47,6 +47,14 @@ pub struct Db<S = Current> {
     schema: PhantomData<S>,
 }
 
+/// One machine's stored chain (`Db::chains`).
+pub struct Chain {
+    pub min: i64,
+    pub max: i64,
+    pub count: i64,
+    pub first: Option<String>,
+}
+
 pub(crate) enum OpenedDb {
     Current(Db<Current>),
     Stale(Db<Stale>),
@@ -430,6 +438,17 @@ impl Db {
     pub fn record_machines(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached("SELECT DISTINCT machine FROM records ORDER BY machine")?;
         let v = st.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(v)
+    }
+
+    /// Each machine's chain as stored: its smallest and largest sequence number, its number of rows and its row 1.
+    pub fn chains(&self) -> Result<Vec<Chain>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT machine, MIN(seq), MAX(seq), COUNT(*), (SELECT raw FROM records f WHERE f.machine=c.machine AND f.seq=1) FROM records c GROUP BY machine",
+        )?;
+        let v = st
+            .query_map([], |r| Ok(Chain { min: r.get(1)?, max: r.get(2)?, count: r.get(3)?, first: r.get(4)? }))?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(v)
     }
 

@@ -36,7 +36,15 @@ This page is part of the [Layr documentation](../README.md#documentation).
   is set. Root may do everything, and every record names who acted.
 - Replication takes records only from trusted machines (`layr sync` trusts the peer the admin
   chose once its records passed the checks; `layr remote trust <name> <machine>`), checks the project id,
-  signatures and sequence numbers, and refuses a changed copy of a known record. Roles, deny
+  signatures and sequence numbers, and refuses a changed copy of a known record. A record's
+  signature is checked once, when it comes into the catalog. A machine signs its own records with
+  the key of its first record and refuses to sign with another key. Commands then read the catalog
+  without checking signatures again, except for rows of a machine whose first record is missing
+  or whose key differs from the trusted one. Trust, roles and limits are still applied on every
+  read. `layr fsck` checks every signature again. It also finds a record that was changed in the
+  catalog file after it came in, and rows that an older layr signed with a replaced machine
+  key. A plain read takes both. To recover, import the authentic signed history again (a new clone).
+  Roles, deny
   and protection rules, merge commands and remotes are per machine; other
   machines' records never change a local line.
 - A btrfs stream from a peer passes a check on its way to `btrfs receive`, which

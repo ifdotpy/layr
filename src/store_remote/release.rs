@@ -166,7 +166,7 @@ impl Store {
         let now = ids::now_ms();
         let writers: BTreeMap<_, _> = authorized.iter()
             .filter(|r| r.scope().terms().is_none_or(|terms| terms.live(now)))
-            .map(|r| (r.record().machine.clone(), *r.signed().key())).collect();
+            .map(|r| (r.record().machine.clone(), *r.key())).collect();
         let records: Vec<_> = authorized.iter().map(|r| r.record().clone()).collect();
         let project = layr_model::Project::from_authorized_records(&descriptor.project, authorized, &creator)?;
         let mains: Vec<_> = project.line_list().into_iter().filter(|line| line.name == "main").collect();

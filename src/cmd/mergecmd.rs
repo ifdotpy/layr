@@ -557,6 +557,8 @@ fn settled_now(ctx: &Ctx, repo: &Repo, now: &Line, head: &str, candidate: &str, 
     if rule.as_ref() != s.rule {
         return Err(exit(1, "merge protection changed during checks; run the merge again"));
     }
+    // The creator's view and its privileged checks, built at their first use; the view goes on to the approvals.
+    let mut creator: Option<(layr_model::Project, Vec<String>)> = None;
     for (name, command) in &s.commands {
         if repo.p.config_value(&format!("check.{name}"))?.and_then(|v| v.as_str().map(str::to_owned)).as_ref() != Some(command) {
             return Err(exit(1, format!("merge check '{name}' changed during checks; run the merge again")));
@@ -571,8 +573,14 @@ fn settled_now(ctx: &Ctx, repo: &Repo, now: &Line, head: &str, candidate: &str, 
             if wants.is_empty() {
                 wants.push(None);
             }
+            if creator.is_none() {
+                let project = super::checks::creator_project(repo)?;
+                let privileged = super::checks::privileged_checks(&project)?;
+                creator = Some((project, privileged));
+            }
+            let privileged = creator.as_ref().map(|(_, privileged)| privileged.as_slice()).unwrap_or_default();
             for want in wants {
-                if !super::checks::passing_required(repo, candidate, name, &argv, want.as_deref())? {
+                if !super::checks::passing_required(repo, candidate, name, &argv, want.as_deref(), privileged)? {
                     return Err(anyhow::Error::from(ChecksWaiting(format!(
                         "check '{name}' no longer has a passing executor run"
                     ))));
@@ -581,7 +589,17 @@ fn settled_now(ctx: &Ctx, repo: &Repo, now: &Line, head: &str, candidate: &str, 
         }
     }
     if candidate != head {
-        queue_approvals(ctx, repo, now, rule.as_ref(), head, s.source, s.require_approvals, s.queue_entry)?;
+        queue_approvals(
+            ctx,
+            repo,
+            now,
+            rule.as_ref(),
+            head,
+            s.source,
+            s.require_approvals,
+            s.queue_entry,
+            creator.map(|(project, _)| project),
+        )?;
     }
     Ok(())
 }
@@ -974,9 +992,13 @@ fn queue_approvals(
     theirs: &str,
     checked: bool,
     entry: Option<&crate::model::QueueEntry>,
+    creator: Option<layr_model::Project>,
 ) -> Result<()> {
     if checked {
-        let project = super::checks::creator_project(repo)?;
+        let project = match creator {
+            Some(project) => project,
+            None => super::checks::creator_project(repo)?,
+        };
         let creator_policy = project.access_policy(crate::ids::now_ms(), false);
         let creator = creator_policy.rule_for(&line.name);
         if let Some(creator) = &creator {
@@ -1305,7 +1327,13 @@ fn run_line_checks(
     quiet: bool,
     queue: Option<&QueuedMerge<'_>>,
 ) -> Result<()> {
+    let checked_only = queue.is_some_and(|q| q.checked_only);
+    let mut privileged = None;
     for (name, command) in &settled.commands {
+        if checked_only && privileged.is_none() {
+            privileged = Some(super::checks::privileged_checks(&super::checks::creator_project(repo)?)?);
+        }
+        let privileged = privileged.as_deref().unwrap_or_default();
         let argv = layr_model::protection::check_argv(command);
         // A check with platforms (`checks.platforms`) needs a passing run on each of them: a run of this machine
         // counts for its own platform only, and another platform waits for its runner.
@@ -1313,8 +1341,8 @@ fn run_line_checks(
         if !wants.is_empty() {
             let here = super::checks::platform();
             for want in &wants {
-                if queue.is_some_and(|q| q.checked_only) {
-                    if super::checks::passing_required(repo, candidate, name, &argv, Some(want))? {
+                if checked_only {
+                    if super::checks::passing_required(repo, candidate, name, &argv, Some(want), privileged)? {
                         continue;
                     }
                     if let Some(code) = failed_on(repo, candidate, &argv, want)? {
@@ -1352,8 +1380,8 @@ fn run_line_checks(
             }
             continue;
         }
-        if queue.is_some_and(|q| q.checked_only) {
-            if super::checks::passing_required(repo, candidate, name, &argv, None)? {
+        if checked_only {
+            if super::checks::passing_required(repo, candidate, name, &argv, None, privileged)? {
                 continue;
             }
             return Err(anyhow::Error::from(ChecksWaiting(format!("check '{name}' has no passing executor run"))));
@@ -2177,6 +2205,7 @@ fn merge_rev_inner(
             &theirs,
             queue.is_some_and(|q| q.checked_only),
             queue.map(|q| q.entry),
+            None,
         )?;
         if queue.is_some_and(|q| q.candidate_only) {
             commit.candidate().discard(repo);
@@ -2239,6 +2268,7 @@ fn merge_rev_inner(
                 &theirs,
                 queue.is_some_and(|q| q.checked_only),
                 queue.map(|q| q.entry),
+                None,
             )?;
             if queue.is_some_and(|q| q.candidate_only) {
                 commit.candidate().discard(repo);
@@ -2307,6 +2337,7 @@ fn merge_rev_inner(
             &theirs,
             queue.is_some_and(|q| q.checked_only),
             queue.map(|q| q.entry),
+            None,
         )
     }) {
         candidate.discard(repo);
@@ -2931,7 +2962,7 @@ mod tests {
             out: std::cell::RefCell::new(Box::new(std::io::sink())),
         };
         assert!(check_approvals(&root_ctx, &repo, &line, Some(&rule), &base.id, &ordinary.id, false).is_ok());
-        let error = queue_approvals(&root_ctx, &repo, &line, Some(&rule), &base.id, &ordinary.id, true, None).unwrap_err();
+        let error = queue_approvals(&root_ctx, &repo, &line, Some(&rule), &base.id, &ordinary.id, true, None, None).unwrap_err();
         assert!(error.downcast_ref::<ChecksWaiting>().is_some());
         assert!(error.to_string().contains("approval required"));
         drop(root_ctx);

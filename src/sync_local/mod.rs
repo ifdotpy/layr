@@ -69,7 +69,7 @@ impl LocalReplica for Local<'_, '_> {
         self.repo().p.db.record_line(machine, seq)
     }
     fn verify_records(&self) -> Result<()> {
-        self.repo().p.check_records().map(|_| ())
+        self.repo().p.check_records()
     }
     fn import_records(
         &mut self,

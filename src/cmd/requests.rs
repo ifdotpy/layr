@@ -54,7 +54,7 @@ pub fn request(ctx: &Ctx, args: &[String]) -> Result<i32> {
             },
         },
         ("comment", [change, text]) => {
-            let change_id = super::change::find(&h.repo, change)?;
+            let change_id = super::change::find(&h.repo, &mut None, change)?;
             let versions = h.repo.p.db.change_versions(&change_id)?;
             let n = a.get("--version").map(super::change::version).transpose()?.unwrap_or(versions.len().saturating_sub(1));
             Action::Comment {
