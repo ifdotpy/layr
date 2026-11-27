@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.57.1](https://github.com/ifdotpy/layr/compare/v0.57.0...v0.57.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **git:** Free the shadow of a fast line before waiting for the line
+
+
+## [0.57.0](https://github.com/ifdotpy/layr/compare/v0.56.4...v0.57.0) (2026-11-27)
+
+
+### Features
+
+* **git:** Copy the git blobs into the git store when their folder does not mount
+
 ## [0.55.2](https://github.com/ifdotpy/layr/compare/v0.55.1...v0.55.2) (2026-11-23)
 
 
