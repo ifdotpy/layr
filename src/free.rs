@@ -642,7 +642,8 @@ fn pin_using<D: ReleasePins>(p: &Project, release: D, states: &[&str]) -> Result
         }
         Pin { db: release, holder, states: pinned, path }
     };
-    hold_for_tests();
+    // Test only (tests/t100-pin-reads.sh): `LAYR_TEST_SAVE_PIN_BARRIER` holds a reader with its pins taken.
+    crate::repo::save_barrier("pin")?;
     Ok(guard)
 }
 
@@ -662,14 +663,6 @@ pub fn hold(pin: Pin) {
 fn release_held() {
     let pins = HELD.with(|h| std::mem::take(&mut *h.borrow_mut()));
     drop(pins);
-}
-
-/// Test only (tests/t_pin_free.sh): `LAYR_TEST_PIN_HOLD_MS` sleeps once per process after its
-/// first pins, so a second process can free the pinned states while this one holds them.
-fn hold_for_tests() {
-    static HELD_ONCE: std::sync::Once = std::sync::Once::new();
-    let Some(ms) = std::env::var("LAYR_TEST_PIN_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
-    HELD_ONCE.call_once(|| std::thread::sleep(std::time::Duration::from_millis(ms)));
 }
 
 impl<D: ReleasePins> Drop for Pin<D> {

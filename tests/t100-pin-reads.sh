@@ -1,10 +1,11 @@
 #!/bin/bash
 # ci: macos overlayfs
 # Pins (docs/ownership.md, "Pins"): a command that reads saved states keeps them on disk until it
-# ends, though another command frees their last owner meanwhile. Test hook: LAYR_TEST_PIN_HOLD_MS
-# makes the reader sleep once its pins are taken (test only). A merge source, a direct reader
-# and an overlap compare survive concurrent ownership removal. A save also holds its line lock:
-# its reset must wait, and its automatic state keeps the old parent until replaced.
+# ends, though another command frees their last owner meanwhile. Test hook:
+# LAYR_TEST_SAVE_PIN_BARRIER holds the reader with its pins taken until the test releases it (test
+# only). A merge source, a direct reader and an overlap compare survive concurrent ownership removal.
+# A save also holds its line lock: its reset must wait, and its automatic state keeps the old parent
+# until replaced.
 . "$(dirname "$0")/lib.sh"
 
 sample $T/src
@@ -22,14 +23,19 @@ dashed() {
     printf '%s-%s-%s-%s-%s' "${u:0:8}" "${u:8:4}" "${u:12:4}" "${u:16:4}" "${u:20:12}"
 }
 on_disk() { state_available "$P" "$(dashed "$1")"; }
-wait_pin() { # the reader holds a pin: its rows are in the database
-    for _ in $(seq 1 100); do [ "$(q "select count(*) from owners where kind='pin'")" -gt 0 ] && return 0; sleep 0.1; done
-    return 1
+hold() { # hold <dir> <out> <command...>: the reader runs in the background and stops at its first pins
+    local dir=$1; READER=$2; shift 2
+    mkdir "$READER.gate"
+    (cd "$dir" && env LAYR_TEST_SAVE_PIN_BARRIER="$READER.gate" "$LAYR" "$@" > "$READER" 2>&1; echo $? > "$READER.rc") &
 }
-hold() { # hold <dir> <out> <command...>: the reader runs in the background with the hook
-    local dir=$1 out=$2; shift 2
-    (cd "$dir" && env LAYR_TEST_PIN_HOLD_MS=4000 "$LAYR" "$@" > "$out" 2>&1; echo $? > "$out.rc") &
+wait_pin() { # wait_pin <state>: the held reader is stopped and its pin of the state is in the database
+    for _ in $(seq 1 600); do # a hang guard only: a reader that ends early stops the wait at once
+        if [ -f "$READER.gate/ready" ] || [ -f "$READER.rc" ]; then break; fi
+        sleep 0.1
+    done
+    [ -f "$READER.gate/ready" ] && [ "$(q "select count(*) from owners where kind='pin' and state='$(dashed "$1")'")" -gt 0 ]
 }
+release() { touch "$READER.gate/release"; wait; } # the held reader goes on to its end
 
 # Only the pins keep the states below: no undo record or deleted-line ring names them.
 l config undo.ops 0 >/dev/null
@@ -44,10 +50,10 @@ S=$(l rev-parse head)
 cd $M/main || exit 1
 echo main change > other.txt; l add other.txt >/dev/null; l save -qam "main change" >/dev/null
 hold $M/main $T/merge.out merge "$S"
-ok "the merge holds its source" wait_pin
-l line delete -D src >/dev/null 2>&1
+ok "the merge holds its source" wait_pin "$S"
+ok "the source line goes while the merge holds it" l line delete -D src
 ok "a pinned merge source stays on disk after its last owner goes" on_disk "$S"
-wait
+release
 eq "the merge finishes" 0 "$(cat $T/merge.out.rc)"
 has "the merge has the source change" "src change" "$(l show head:notes.txt)"
 has "the merge has the main change" "main change" "$(l show head:other.txt)"
@@ -115,11 +121,11 @@ echo pin-only >> notes.txt; l save -qam pin-only >/dev/null
 R=$(l rev-parse head)
 cd $M/main || exit 1
 hold $M/main $T/read.out show "$R:notes.txt"
-ok "the direct reader holds its state" wait_pin
-l line delete -D --discard pin-only >/dev/null 2>&1
+ok "the direct reader holds its state" wait_pin "$R"
+ok "the line goes while the reader holds its state" l line delete -D --discard pin-only
 eq "only the reader's pin still owns the state" 0 "$(q "select count(*) from owners where state='$(dashed "$R")' and kind!='pin'")"
 ok "the pin keeps the state after concurrent deletion" on_disk "$R"
-wait
+release
 eq "the direct reader finishes" 0 "$(cat $T/read.out.rc)"
 has "the direct reader returns its pinned content" "pin-only" "$(cat $T/read.out)"
 no "the state goes when its only pin is released" on_disk "$R"
@@ -146,11 +152,12 @@ echo a change >> notes.txt; l save -qam "a change" >/dev/null
 cd $M/b || exit 1
 echo b change >> notes.txt; l save -qam "b change" >/dev/null
 B=$(l rev-parse head)
+cd $M/main || exit 1
 hold $M/a $T/status.out status
-ok "the status holds the compared heads" wait_pin
-(cd $M/main && l line delete -D b >/dev/null 2>&1)
+ok "the status holds the compared heads" wait_pin "$B"
+ok "the compared line goes while the status holds its head" l line delete -D b
 ok "a pinned compared head stays on disk after its owner goes" on_disk "$B"
-wait
+release
 eq "the status finishes" 0 "$(cat $T/status.out.rc)"
 has "the status reports the overlap with b" "notes.txt (b," "$(cat $T/status.out)"
 no "the compared head goes after the status" on_disk "$B"

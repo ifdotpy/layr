@@ -264,9 +264,9 @@ Covered (each call site pins its states for the whole command):
 - diff, show and log (the revisions they name and the line head);
 - `try` and checks (the state under test).
 
-Test: tests/t100-pin-reads.sh. The test hook `LAYR_TEST_PIN_HOLD_MS` (test only) sleeps once per
-process after its pins are taken, so a second process can drop the last owner of a state that the
-reader holds.
+Test: tests/t100-pin-reads.sh. The test hook `LAYR_TEST_SAVE_PIN_BARRIER=<dir>` (test only) holds
+a reader after its pins are taken until `<dir>/release` exists, so a second process can drop the
+last owner of a state that the reader holds.
 
 ## Temporary objects
 

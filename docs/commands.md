@@ -429,8 +429,8 @@ macOS user daemon runs no gc).
 
 Test only (tests/t99-ownership-free.sh): `LAYR_TEST_EXIT_AFTER_COMMIT=1` exits with status 86
 after a commit that queued states, before the free step. Test only (tests/t100-pin-reads.sh):
-`LAYR_TEST_PIN_HOLD_MS=<ms>` sleeps once per process after its pins are taken. Neither is for use
-otherwise.
+with `LAYR_TEST_SAVE_PIN_BARRIER=<dir>`, after its pins are taken, a command writes `<dir>/ready`
+and waits for `<dir>/release`; it fails after 30 s. Neither is for use otherwise.
 
 Reads of imported states (`log -p`, `log <path>`, `show`, `diff`, `blame`, `grep <rev>`) take the
 bytes from Git and build no tree. `line new`, `try`, `bisect run` and `reset --hard` build the tree
