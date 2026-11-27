@@ -454,6 +454,19 @@ fn lock_shadow(vdir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Free the shadow of the fast line `line_id` if this command holds it, and what it knew of it;
+/// a later read locks and brings the shadow up to its view again. A command frees it before it
+/// gives up a line lock that it took it under: the lock of a line comes before the lock of its
+/// shadow, so a command that holds a shadow never waits for that line (`cmd::adopt_git`).
+/// Copies of the shadow stay known: only layr writes them.
+pub fn release_shadow(p: &Project, line_id: &str) {
+    let vdir = dir(p, line_id);
+    let shadow = vdir.join("shadow");
+    KNOWN.lock().unwrap_or_else(|e| e.into_inner()).retain(|(k, _)| k != &shadow);
+    MOUNT_SHADOWS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, (s, _))| s != &shadow);
+    SHADOW_LOCKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(d, _)| d != &vdir);
+}
+
 /// One command (`cmd::run`): at the end of the outermost one, its shadows and what it knew of
 /// them are free.
 pub struct CommandScope;

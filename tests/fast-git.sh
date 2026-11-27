@@ -179,6 +179,17 @@ $L protect fast --remove >/dev/null 2>&1
 has "adopt after the protection went" "$($L git adopt 2>&1)" "head is at"
 is "state after adopt" "$($L log -n 1 --format=%s 2>&1)" "git: on a protected line"
 
+# Commits in a quick row: the hooks of git run at the same time. Each waits for the line, and no
+# layr command waits forever (a hook kept the shadow of the line while it waited for the line).
+limit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+for i in 1 2 3 4 5 6; do
+  printf 'row %s\n' $i >> f2; git commit -q -am "git: row $i" || bad "git commit $i of a row"
+done
+limit 120 $L status >/dev/null 2>&1 && ok || bad "layr status after commits in a row: no end in 120 s"
+for _ in $(seq 120); do [ "$($L log -n 1 --format=%s 2>/dev/null)" = "git: row 6" ] && break; sleep 0.5; done
+is "the line follows the last commit of the row" "$(limit 60 $L log -n 1 --format=%s 2>&1)" "git: row 6"
+pgrep -f "$L git adopt --hook" >/dev/null && bad "a hook of git still runs" || ok
+
 # The folder goes with the line.
 gitdir=$(readlink .git)
 cd $src

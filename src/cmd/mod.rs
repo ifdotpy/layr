@@ -223,6 +223,8 @@ pub fn adopt_git(
     line: &crate::model::Line,
     wait: Option<std::time::Duration>,
 ) -> Result<Option<crate::model::Line>> {
+    // A shadow that this command holds waits for the line only after it (`views::release_shadow`).
+    crate::views::release_shadow(&repo.p, &line.id);
     let lock = match wait {
         None => Some(repo.line_lock(line)?),
         Some(limit) => {
@@ -241,6 +243,10 @@ pub fn adopt_git(
     let Some(_lock) = lock else {
         bail!("another command holds the line; run 'layr git adopt' when it ends");
     };
+    // The reset reads the shadow under the line lock: the shadow goes free before the line (this
+    // guard drops first), or a command that then waits for a line holds the shadow that the next
+    // holder of the line waits for.
+    let _free = FreeShadow(&repo.p, &line.id);
     let line = repo.line(&line.id)?;
     let Some((commit, state)) = crate::gitbridge::git_moved(ctx, repo, &line)? else { return Ok(None) };
     // The move leaves git's HEAD and its index as they are (`gitbridge::following_git`).
@@ -256,6 +262,15 @@ pub fn adopt_git(
         }
         Err(e) => Err(e),
         Ok(code) => bail!("layr reset {} ended with code {code}", crate::ids::short(&state)),
+    }
+}
+
+/// Frees the shadow of a line when dropped (`views::release_shadow`).
+struct FreeShadow<'a, 'b>(&'a crate::store::Project<'b>, &'a str);
+
+impl Drop for FreeShadow<'_, '_> {
+    fn drop(&mut self) {
+        crate::views::release_shadow(self.0, self.1);
     }
 }
 

@@ -229,6 +229,10 @@ pub fn fast_move(repo: &Repo, line: &Line, from: &Path, to: &Path) -> Result<()>
 }
 
 /// A line whose folder is a LayrFS mount on this machine.
+/// The macOS views keep the shadow of a fast line locked for a command; a Linux fast line has
+/// no shadow, so there is nothing to free (`cmd::adopt_git`).
+pub fn release_shadow(_p: &crate::store::Project, _line_id: &str) {}
+
 pub fn is_layrfs_line(p: &crate::store::Project, id: &str) -> bool {
     std::fs::read(p.meta_dir().join("vlines").join(id).join("native.json"))
         .ok()
