@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.56.3](https://github.com/ifdotpy/layr/compare/v0.56.2...v0.56.3) (2026-11-27)
+
+
+### Performance Improvements
+
+* **storage:** Batch initial object durability and avoid redundant syncs
+
+
+## [0.56.2](https://github.com/ifdotpy/layr/compare/v0.56.1...v0.56.2) (2026-11-27)
+
+
+### Performance Improvements
+
+* **status:** Join the status cache with one merge pass and store its entries compactly
+
 ## [0.55.2](https://github.com/ifdotpy/layr/compare/v0.55.1...v0.55.2) (2026-11-23)
 
 
