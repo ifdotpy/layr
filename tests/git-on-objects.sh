@@ -79,6 +79,21 @@ printf 'second\n' >> n1
 git commit -q -am "git: n1 again" || bad "a commit after gc"
 is "git diff after gc" "$(git diff HEAD~1 --stat | tail -1 | tr -s ' ')" " 1 file changed, 1 insertion(+)"
 
+# The folder does not mount: gc writes the blobs into the git store and git reads them there.
+# When the folder mounts again, the next gc removes the copy.
+if [ "$(uname -s)" = Darwin ]; then umount $mp; else fusermount3 -u $mp 2>/dev/null || fusermount -u $mp; fi
+mount | grep -q " on $mp " && bad "the folder stays mounted" || ok
+LAYR_TEST_GITPACK_NO_MOUNT=1 $L gc >$work/gc-copy.out 2>$work/gc-copy.err || { bad "gc without the folder"; cat $work/gc-copy.err >&2; }
+has "gc says the git store holds the blobs" "$(cat $work/gc-copy.out $work/gc-copy.err)" "the git store holds the blobs"
+mount | grep -q " on $mp " && bad "the folder mounts with LAYR_TEST_GITPACK_NO_MOUNT" || ok
+[ "$(local_blobs $s)" -gt 0 ] && ok || bad "the git store holds no copy of the blobs"
+is "git log -p without the folder" "$(git log -p --format='%H %s' $head | sum)" "$want_log"
+is "git reads the new blob without the folder" "$(git cat-file -p $blob 2>&1)" "new file of git"
+$L gc -q >/dev/null 2>$work/gc-back.err || { bad "gc with the folder again"; cat $work/gc-back.err >&2; }
+mount | grep -q " on $mp " && ok || bad "the folder does not mount again"
+is "gc removes the copy" "$(local_blobs $s)" 0
+is "git log -p with the folder again" "$(git log -p --format='%H %s' $head | sum)" "$want_log"
+
 # A push sends compressed objects that a clone reads.
 git init -q --bare $work/remote.git
 $L git remote add origin $work/remote.git >/dev/null 2>&1 || bad "git remote add"

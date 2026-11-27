@@ -55,10 +55,21 @@ pack). A store push of git packs (`docs/remote-format.md`, "Git packs") makes it
 ## Limits
 
 - Linux builds without LayrFS (`layrfs-fuse`) do not mount the folder: there the git store keeps
-  every blob, as before. On macOS the LayrFS extension must be on.
+  every blob, as before (a store from a build with LayrFS gets a copy, see above). On macOS the LayrFS extension must be on.
 - `git.objects = "git"` in the project config keeps every blob in the git store.
 - A git command in a line that needs a file reads it through the folder. When the folder does
   not answer, the command fails until a layr command or the service mounts it again.
+
+## When the folder does not mount
+
+A layr command that opens the git store, `layr gc`, and on macOS the user service at login try to
+mount the folder. When the mount fails (the LayrFS extension is off or broken, or the build has no
+LayrFS), they write each segment as a normal pack of the git store, with its index. Git then reads
+every file without the folder, as before the object store. `meta/gitpack/local` names the
+segments copied and their packs, so each one is written once.
+
+The copy takes the space of the blobs again. When the folder mounts, the next `layr gc` removes
+it with the other packs of the git store (step 4 above).
 
 Run `tests/git-on-objects.sh` (Linux with a private root daemon, or macOS with the LayrFS
 extension). It checks a history with changed, added and removed files, an executable, a link and a

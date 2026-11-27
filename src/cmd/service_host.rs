@@ -348,9 +348,11 @@ fn remount_fast_lines_of(root: &Path, uid: u32) {
         }
         // The folder of the git blobs of the object store (docs/git-on-objects.md), an FSKit
         // mount of this user too.
-        if crate::gitpack::uses_folder(&repo.p.git_dir()) {
+        // When it does not mount, git in the lines of this user reads a copy in the git store.
+        if crate::gitpack::uses_folder(&repo.p.git_dir()) && !crate::gitpack::copy_is_complete(&repo.p) {
             if let Err(e) = crate::gitpack::ensure_mounted(&repo.p) {
                 eprintln!("layr git objects of {name}: not mounted: {e:#}");
+                crate::gitpack::fall_back(&repo.p, &format!("{e:#}"));
             }
         }
     }

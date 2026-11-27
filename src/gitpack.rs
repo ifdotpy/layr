@@ -452,6 +452,137 @@ pub fn entry_of(store: &Store, e: &Ent) -> Result<Vec<u8>> {
     Ok(entry(&data))
 }
 
+// ---------------------------------------------------------------- the copy in the git store
+
+/// The segments that the git store holds as packs of its own, one `<segment file> <pack name>`
+/// per line (`copy_to_git_store`).
+fn copy_list(p: &Project) -> PathBuf {
+    dir(p).join("local")
+}
+
+/// The segments whose pack is in the git store now: segment file name, pack name.
+fn copied(p: &Project) -> std::collections::BTreeMap<String, String> {
+    let packs = p.git_dir().join("objects/pack");
+    std::fs::read_to_string(copy_list(p))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, pack)| packs.join(format!("{pack}.idx")).is_file())
+        .map(|(seg, pack)| (seg.to_string(), pack.to_string()))
+        .collect()
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// Whether the git store holds a pack of every segment: git reads every file without the folder.
+pub fn copy_is_complete(p: &Project) -> bool {
+    let have = copied(p);
+    segment_paths(&dir(p)).is_ok_and(|v| v.iter().all(|path| have.contains_key(&file_name(path))))
+}
+
+/// When the folder does not serve the blobs: write each segment that the git store does not hold
+/// yet as a pack of the git store, so git reads every file without the folder. `layr gc` removes
+/// these packs when the folder mounts again (`drop_git_blobs`). Returns the packs and bytes written.
+pub fn copy_to_git_store(p: &Project) -> Result<(usize, u64)> {
+    let root = dir(p);
+    // Two commands that find the folder gone write each pack once.
+    let lock = std::fs::File::create(root.join("local.lock"))?;
+    lock.lock()?;
+    let have = copied(p);
+    let mut list: String = have.iter().map(|(seg, pack)| format!("{seg} {pack}\n")).collect();
+    let packs = p.git_dir().join("objects/pack");
+    std::fs::create_dir_all(&packs)?;
+    let mut store = None;
+    let (mut n, mut bytes) = (0, 0);
+    for path in segment_paths(&root)? {
+        let seg = file_name(&path);
+        if have.contains_key(&seg) {
+            continue;
+        }
+        let ents = read_segment(&path)?;
+        if ents.is_empty() {
+            continue;
+        }
+        if store.is_none() {
+            store = Some(crate::objstore::open_existing(p)?);
+        }
+        let store = store.as_ref().expect("opened");
+        let (name, len) = write_pack(ents, &packs, &|e| entry_of(store, e))?;
+        list.push_str(&format!("{seg} {name}\n"));
+        crate::fsutil::atomic_write(&copy_list(p), list.as_bytes(), 0o644)?;
+        n += 1;
+        bytes += len;
+    }
+    Ok((n, bytes))
+}
+
+/// Write the pack of `ents` into the folder `packs` with its index: a complete git pack, with the
+/// real checksum; `entry_bytes` makes the pack entry of a map entry. Returns its name
+/// (`pack-<checksum>`) and its length.
+fn write_pack(ents: Vec<Ent>, packs: &Path, entry_bytes: &(dyn Fn(&Ent) -> Result<Vec<u8>> + Sync)) -> Result<(String, u64)> {
+    use layr_hashers::Digest;
+    use rayon::prelude::*;
+    let pack = Pack::new(ents);
+    let tmp = packs.join(format!("tmp_layr_{}.pack", crate::ids::new_id()));
+    let r = (|| -> Result<(String, u64)> {
+        let mut h = layr_hashers::GitCompatible::new();
+        let mut w = BufWriter::new(std::fs::File::create(&tmp)?);
+        h.update(pack.head);
+        w.write_all(&pack.head)?;
+        let order: Vec<usize> = (0..pack.ents.len()).collect();
+        for chunk in order.chunks(256) {
+            let made: Vec<Vec<u8>> = chunk.par_iter().map(|&i| entry_bytes(&pack.ents[i])).collect::<Result<_>>()?;
+            for (&i, b) in chunk.iter().zip(&made) {
+                ensure!(b.len() as u64 == pack.offsets[i + 1] - pack.offsets[i], "pack entry {i} has the wrong length");
+                h.update(b);
+                w.write_all(b)?;
+            }
+        }
+        let sum: [u8; 20] = h.finalize().into();
+        w.write_all(&sum)?;
+        let f = w.into_inner().map_err(|e| e.into_error())?;
+        f.sync_all()?;
+        drop(f);
+        // The index names the real checksum of the pack, then its own.
+        let mut idx = pack.idx[..pack.idx.len() - 40].to_vec();
+        idx.extend_from_slice(&sum);
+        let idx_sum: [u8; 20] = {
+            let mut h = layr_hashers::GitCompatible::new();
+            h.update(&idx);
+            h.finalize().into()
+        };
+        idx.extend_from_slice(&idx_sum);
+        let name = format!("pack-{}", hex::encode(sum));
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o444))?;
+        std::fs::rename(&tmp, packs.join(format!("{name}.pack")))?;
+        // The index last: git finds a pack by its index.
+        crate::fsutil::atomic_write(&packs.join(format!("{name}.idx")), &idx, 0o444)?;
+        Ok((name, pack.len()))
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+/// The folder does not serve the blobs (`why`): copy them into the git store and say so.
+pub fn fall_back(p: &Project, why: &str) {
+    if copy_is_complete(p) {
+        return;
+    }
+    eprintln!("warning: the git blobs of the object store are not mounted: {why}; writing them into the git store");
+    match copy_to_git_store(p) {
+        Ok((n, bytes)) => eprintln!(
+            "warning: the git store holds the blobs again ({n} pack(s), {} MB); `layr gc` removes the copy when the folder mounts",
+            bytes / 1_000_000
+        ),
+        Err(e) => eprintln!("warning: the git blobs are not in the git store: {e:#}"),
+    }
+}
+
 // ---------------------------------------------------------------- the mount (Linux)
 
 #[cfg(all(target_os = "linux", feature = "layrfs-fuse"))]
@@ -484,12 +615,16 @@ pub fn serve_if_used(p: &Project, s: &Path) {
     if !CHECKED.with(|c| c.borrow_mut().insert(s.to_path_buf())) || !uses_folder(s) || is_mounted(s) {
         return;
     }
+    // A copy in the git store serves git until `layr gc` mounts the folder again.
+    if copy_is_complete(p) {
+        return;
+    }
     #[cfg(any(all(target_os = "linux", feature = "layrfs-fuse"), target_os = "macos"))]
     if let Err(e) = ensure_mounted(p) {
-        eprintln!("warning: the git blobs of the object store are not mounted: {e:#}");
+        fall_back(p, &format!("{e:#}"));
     }
     #[cfg(not(any(all(target_os = "linux", feature = "layrfs-fuse"), target_os = "macos")))]
-    let _ = p;
+    fall_back(p, "this build of layr has no LayrFS");
 }
 
 /// Whether the git store `s` reads blobs from the FUSE folder (its alternates name it).
@@ -857,6 +992,10 @@ mod mount {
         if !has_map(p) || !s.join("objects").is_dir() {
             return Ok(false);
         }
+        // Test only (tests/git-on-objects.sh): the folder cannot mount.
+        if std::env::var_os("LAYR_TEST_GITPACK_NO_MOUNT").is_some() {
+            bail!("LAYR_TEST_GITPACK_NO_MOUNT is set");
+        }
         clear_dead(&mount_dir(&s));
         let exe = std::env::current_exe()?;
         let log = std::fs::OpenOptions::new().create(true).append(true).open(dir(p).join("server.log"))?;
@@ -1163,6 +1302,10 @@ mod fsk {
         if !has_map(p) || !s.join("objects").is_dir() {
             return Ok(false);
         }
+        // Test only (tests/git-on-objects.sh): the folder cannot mount.
+        if std::env::var_os("LAYR_TEST_GITPACK_NO_MOUNT").is_some() {
+            bail!("LAYR_TEST_GITPACK_NO_MOUNT is set");
+        }
         let d = pipes(&p.dir);
         std::fs::create_dir_all(&d)?;
         if !running(&d) {
@@ -1340,12 +1483,28 @@ mod ops {
         }
         let built = crate::gitbridge::build_import_objects(ctx, repo)?;
         let u = update(p)?;
-        if !has_map(p) || !ensure_mounted(p)? {
+        if !has_map(p) {
             return Ok(Some(format!("git objects: {built} imported states got objects, {} files mapped", u.objects)));
+        }
+        match ensure_mounted(p) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Some(format!("git objects: {built} imported states got objects, {} files mapped", u.objects))),
+            // The git store reads the folder: without it git needs a copy of the blobs.
+            Err(e) if uses_folder(&s) => {
+                let (n, bytes) = copy_to_git_store(p).with_context(|| format!("the folder does not mount ({e:#})"))?;
+                return Ok(Some(format!(
+                    "git objects: {built} imported states got objects, {} files mapped; the folder does not mount ({e:#}): the git store holds the blobs ({n} new pack(s), {} MB)",
+                    u.objects,
+                    bytes / 1_000_000
+                )));
+            }
+            Err(e) => return Err(e),
         }
         add_alternate(&s)?;
         let _refs = crate::gitbridge::refs_lock(repo)?;
         let (removed, gone) = drop_git_blobs(p)?;
+        // The copy in the git store is gone with the old packs.
+        let _ = std::fs::remove_file(copy_list(p));
         if !removed.is_empty() {
             crate::gitbridge::refresh_line_packs(repo, &removed);
         }
@@ -1420,6 +1579,35 @@ mod tests {
             })
             .unwrap();
         assert_eq!(part, bytes[20..120]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The copy of a segment in the git store is a complete pack: `git verify-pack` checks its
+    /// checksums and every entry, and git reads every blob from it without the folder.
+    #[test]
+    fn the_copy_in_the_git_store_is_a_complete_pack() {
+        let dir = std::env::temp_dir().join(format!("layr-gitpack-{}", crate::ids::new_id()));
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(git(&["init", "-q", "--bare"]).status.success());
+        let datas: Vec<Vec<u8>> = vec![b"hello\n".to_vec(), vec![1u8; 70_000], b"x".to_vec(), Vec::new()];
+        let ents: Vec<Ent> = datas.iter().map(|d| ent(d, Src::Link(d.clone()))).collect();
+        let packs = dir.join("objects/pack");
+        let (name, len) = write_pack(ents.clone(), &packs, &|e| {
+            let Src::Link(d) = &e.src else { unreachable!() };
+            Ok(entry(d))
+        })
+        .unwrap();
+        assert_eq!(std::fs::metadata(packs.join(format!("{name}.pack"))).unwrap().len(), len);
+        let idx = packs.join(format!("{name}.idx"));
+        let v = git(&["verify-pack", "-v", idx.to_str().unwrap()]);
+        assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+        for (e, d) in ents.iter().zip(&datas) {
+            let out = git(&["cat-file", "blob", &hex::encode(e.sha)]);
+            assert!(out.status.success());
+            assert_eq!(&out.stdout, d);
+        }
+        assert!(std::fs::read_dir(&packs).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with("tmp_")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
