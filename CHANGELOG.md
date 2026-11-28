@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.57.5](https://github.com/ifdotpy/layr/compare/v0.57.4...v0.57.5) (2026-11-28)
+
+
+### Bug Fixes
+
+* **ls-files:** List the files of the state or view in a copy of layr try
+
+
+## [0.57.4](https://github.com/ifdotpy/layr/compare/v0.57.3...v0.57.4) (2026-11-28)
+
+
+### Performance Improvements
+
+* **remote:** read only the new epoch log segments, and list a large pack folder in parts
+
 ## [0.57.4](https://github.com/ifdotpy/layr/compare/v0.57.3...v0.57.4) (2026-11-28)
 
 
