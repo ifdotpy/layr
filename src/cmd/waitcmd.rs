@@ -118,7 +118,7 @@ pub fn wait(ctx: &Ctx, args: &[String]) -> Result<i32> {
     if let Some(deadline) = deadline {
         store.set_wait_deadline(deadline)?;
     }
-    let Some(()) = initialize(deadline, || store.prepare_requests(ctx))? else {
+    let Some(()) = initialize(deadline, || store.prepare_events(ctx))? else {
         return report(&End::Timeout, None, as_json);
     };
     let backend = store.backend();

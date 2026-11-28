@@ -99,6 +99,16 @@ no "the untrusted machine has no slot" grep -q "machine-$w_id" <<<"$(epoch_slots
 has "a trusted machine keeps its slot" "machine-$r_id" "$(epoch_slots)"
 no "a second untrust of an unknown machine fails" l remote untrust cloud 01a1aaaa-0000-7000-8000-000000000000
 
+# A machine trusted after a rotation gets its slot in the newest epoch, not only at the root of the store: its
+# clone failed with "no slot for the current project epoch" (studio, 2026-11-24).
+read n_id n_key <<<"$(self n)"
+l remote trust cloud "$n_id" --public-key "$n_key" >/dev/null
+has "a machine trusted after a rotation has a slot in the newest epoch" "machine-$n_id" "$(epoch_slots)"
+l push cloud -q >/dev/null 2>&1
+nl() { env LAYR_ROOT="$T/n/store" "$LAYR" "$@"; }
+(cd "$T" && nl clone "file://$T/archive" p >/dev/null 2>"$T/n-clone.err") || cat "$T/n-clone.err"
+ok "and its clone opens the project" test -d "$T/n/store/projects/p/lines/main"
+
 # A connect checks the epoch against both record logs once: a later fetch with no new segment reads neither log
 # again (each fetch of project layr read both logs whole, 2026-11-24). A memo that is not this machine's is ignored.
 reads() { LAYR_TRACE=1 l fetch cloud 2>&1 | grep -c "store records read"; }

@@ -880,6 +880,13 @@ pub fn remote(ctx: &Ctx, args: &[String]) -> Result<i32> {
                         replicate::trust(&_lock, ctx, &repo.p, &full, &key, limits.as_ref())?;
                     }
                     store.trust(repo, &full, Some(&key))?;
+                    // `configure` opens only the root of the store, so the slot above opens the first key. A project
+                    // with key epochs reads from its newest epoch, and a machine trusted after a rotation found no
+                    // slot there: its clone failed with "no slot for the current project epoch" (2026-11-24).
+                    store.connect(ctx)?;
+                    if store.in_epoch() {
+                        store.trust(repo, &full, Some(&key))?;
+                    }
                 }
                 Kind::Peer { .. } => {
                     let _lock = repo.p.lock_maintenance()?;

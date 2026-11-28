@@ -1006,6 +1006,14 @@ impl Store {
         Ok(())
     }
 
+    /// The transport and its login, with no key epoch: the events of a project need no project key. `connect` reads
+    /// both record logs whole after each new record segment to check the epoch, and each on-change job starts a wait
+    /// after each event: the waits of three machines read about 231 MB each time and the gateway ran out of memory
+    /// every 22 minutes (2026-11-26). The job that the wait starts connects in full.
+    pub(crate) fn prepare_events(&mut self, ctx: &Ctx) -> Result<()> {
+        self.connect_transport(ctx)
+    }
+
     pub(crate) fn backend(&self) -> &Backend {
         &self.backend
     }
@@ -1454,6 +1462,11 @@ impl Store {
                 .context("the person slot is in place, but the invite did not reach the inbox; register the person key and run grant again")?;
         }
         Ok(created)
+    }
+
+    /// True when `connect` found a key epoch: reads and slots then use its backend and key.
+    pub(crate) fn in_epoch(&self) -> bool {
+        self.epoch.is_some()
     }
 
     pub fn trust(&self, repo: &Repo, machine: &str, public_key: Option<&str>) -> Result<()> {

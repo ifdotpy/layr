@@ -1113,7 +1113,10 @@ impl<'a> Repo<'a> {
             if damaged.contains(&folder) || !self.cache_dir(line, &w, &folder).is_ok_and(|p| crate::fs::host().namespace.managed(&p)) {
                 continue;
             }
-            let orepo = self.overlay_repo(&name)?;
+            // An overlay that is not on this machine has no cache here to save, as for `has_overlay_here`. Before, it
+            // failed each follow pass of a new clone ("project 'layr%folder-….macos-aarch64' not found", studio
+            // 2026-11-26), and the release job stopped on "main does not follow the cloud".
+            let Ok(orepo) = self.overlay_repo(&name) else { continue };
             let ol = crate::overlay::find_overlay_line(&orepo.p.db, &self.need_overlay(&name)?, line)?;
             let of = match ol {
                 Some(ol) => orepo.p.db.state(&ol.head)?.and_then(|s| s.cache_of),
