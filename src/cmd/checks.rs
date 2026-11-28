@@ -970,7 +970,11 @@ fn execute(
         crate::privs::command_as(
             &mut command,
             0,
-            &[("HOME".into(), "/home/check".into()), ("LAYR_TRY_STATE".into(), state.to_string())],
+            &[
+                ("HOME".into(), "/home/check".into()),
+                ("LAYR_TRY_STATE".into(), state.to_string()),
+                ("LAYR_TRY_ROOT".into(), "/work".into()),
+            ],
         )?;
     } else {
         // The check sees the copy at /work: its warm caches must not name the line they were built in.
@@ -1012,6 +1016,9 @@ fn execute(
                 "--setenv",
                 "LAYR_TRY_STATE",
                 state,
+                "--setenv",
+                "LAYR_TRY_ROOT",
+                "/work",
                 "--bind",
             ])
             .arg(dir)
@@ -1322,6 +1329,7 @@ fn execute(
         ("TMPDIR".into(), _link.0.display().to_string()),
         ("LAYR_CHECK_TMPDIR".into(), _link.0.display().to_string()),
         ("LAYR_TRY_STATE".into(), state.into()),
+        ("LAYR_TRY_ROOT".into(), dir.display().to_string()),
         ("LAYR_CHECK_SEED".into(), seed.display().to_string()),
         ("PATH".into(), "/opt/homebrew/opt/coreutils/libexec/gnubin:/opt/homebrew/opt/gnu-sed/libexec/gnubin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()),
     ])?;

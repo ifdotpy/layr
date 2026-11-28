@@ -572,7 +572,9 @@ want.
 - The command runs as the caller, from the root of the copy, with the caller's environment
   except the variables that would point git or layr elsewhere (`GIT_DIR`, `GIT_WORK_TREE`,
   `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_COMMON_DIR`, `LAYR_LINE`). `LAYR_TRY_STATE` is
-  the state id and `LAYR_PROJECT` the project.
+  the state id, `LAYR_TRY_ROOT` the root of the copy and `LAYR_PROJECT` the project. The copy is no line:
+  `layr ls-files` (`-c`, `-s`) in it lists the files of `LAYR_TRY_STATE` (with the files of the overlays of
+  `LAYR_TRY_VIEW`), relative to the current folder; other layr commands that need a line fail there.
 - The caller's line does not change. The copy is deleted afterwards (`--keep` keeps it and prints
   its path); the exit code is the command's, and the result is recorded as a check of the state
   (`layr attestations <state> --kind check`).

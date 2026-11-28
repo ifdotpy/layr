@@ -133,6 +133,17 @@ eq "the HEAD push publishes the current commit" "$h3" "$(git -C $R rev-parse hea
 l try -q head~1 -- sh -c 'git rev-parse HEAD; git status --porcelain; cat head.txt' > $T/try.out
 eq "try: .git HEAD of the copy is the commit of the state, clean" "$h1 h1" "$(xargs < $T/try.out)"
 eq "try: the line did not change" "$h3" "$(git rev-parse HEAD)"
+l try -q head~1 -- sh -c 'git ls-files' > $T/try-git-ls.out
+l try -q head~1 -- "$LAYR" ls-files > $T/try-ls.out 2>&1
+eq "try: layr ls-files lists the files of the state, as git does" "$(cat $T/try-git-ls.out)" "$(cat $T/try-ls.out)"
+eq "ls-files in a subfolder of the line lists its files, as git does" "$(cd src && git ls-files)" "$(cd src && $LAYR ls-files)"
+l try -q head~1 -- sh -c 'cd src && git ls-files' > $T/try-git-ls-sub.out
+l try -q head~1 -- sh -c 'cd src && "$1" ls-files' sh "$LAYR" > $T/try-ls-sub.out 2>&1
+eq "try: ls-files in a subfolder lists paths relative to it, as git does" "$(cat $T/try-git-ls-sub.out)" "$(cat $T/try-ls-sub.out)"
+has "try: ls-files outside the copy is refused" "outside the copy of layr try" "$(l try -q head -- sh -c 'cd / && "$1" ls-files' sh "$LAYR" 2>&1)"
+mkdir -p 'star*' starx; echo a > 'star*/in.txt'; echo b > starx/out.txt; l add 'star*' starx; l save -qm "a folder named with a star"
+eq "ls-files in a folder named with * lists only its own files" "in.txt" "$(cd 'star*' && $LAYR ls-files)"
+has "try: ls-files -o names what it cannot list" "layr try, ls-files lists the files" "$(l try -q head -- "$LAYR" ls-files -o 2>&1)"
 has "try: a missing command is named" "cannot run 'no-such-command-x'" "$(l try -q head -- no-such-command-x 2>&1)"
 has "try: a bad revision is named" "layr try: unknown revision 'nope'" "$(l try -q nope -- true 2>&1)"
 

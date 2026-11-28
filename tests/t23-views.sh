@@ -61,6 +61,7 @@ ok "try of a line uses its stack" l try -q main -- sh -c 'test "$(cat .private.e
 JSON=$(l attestations "views/$V" --kind check --json)
 ok "checks have view subjects" python3 -c 'import json,sys; rows=json.loads(sys.argv[1]); assert len(rows)==2 and all(x["subject"]=={"kind":"view","id":sys.argv[2]} for x in rows)' "$JSON" "$V"
 eq "a line check names its current view" 1 "$(l attestations "views/$V2" --kind check --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+has "ls-files in a try copy of a view lists the files of its overlays" ".private.env" "$(l try -q "views/$V" -- "$LAYR" ls-files)"
 ok "a state-only try has no private content" l try -q "$SHARED" -- sh -c 'test ! -e .private.env'
 eq "a state-only check retains its state subject" state "$(l attestations "$SHARED" --kind check --json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["subject"]["kind"])')"
 A=$(l attest origin "views/$V" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["attestation_id"])')

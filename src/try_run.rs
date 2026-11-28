@@ -67,6 +67,7 @@ pub fn try_command(
     }
     let mut env = env.to_vec();
     env.push(("LAYR_TRY_STATE".into(), ids::display(state)));
+    env.push(("LAYR_TRY_ROOT".into(), dir.display().to_string()));
     env.retain(|(k, _)| k != "LAYR_PROJECT");
     env.push(("LAYR_PROJECT".into(), repo.p.name.clone()));
     crate::privs::command_as_caller(&mut command, ctx, &env)?;

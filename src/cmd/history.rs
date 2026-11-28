@@ -12,7 +12,7 @@ use crate::repo::{skip_path, snap, Repo, Snap, Temp};
 use crate::revs;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn diff_spec() -> Spec {
     Spec::new()
@@ -1960,6 +1960,25 @@ fn rev_argument<'a>(args: &'a [String], printed: usize, is_rev: impl Fn(&str) ->
     args.iter().find(|a| is_rev(a))
 }
 
+/// The folder `cwd` relative to the root of a copy of `layr try` ("" at the root, None outside it).
+fn try_sub(root: &Path, cwd: &Path) -> Option<String> {
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canonical(cwd).strip_prefix(canonical(root)).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The pathspec of exactly the folder `sub` and the paths in it: `*`, `?` and `[` in its name
+/// match only themselves.
+fn folder_spec(sub: &str) -> String {
+    let mut out = String::new();
+    for c in sub.chars() {
+        match c {
+            '*' | '?' | '[' => out.push_str(&format!("[{c}]")),
+            c => out.push(c),
+        }
+    }
+    out + "/*"
+}
+
 pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
     let spec = Spec::new()
         .flag("-c|--cached")
@@ -1973,19 +1992,68 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
         .flag("--full-name")
         .flag("--directory");
     let a = parse(&spec, args)?;
-    let h = here(ctx)?;
-    let line = h.line()?.clone();
-    let filtered = h.repo.filtered_view(ctx, &line)?;
+    let mut h = here(ctx)?;
+    // A copy of `layr try` is no line: its index is the state that `LAYR_TRY_STATE` names, and
+    // its files are not compared with it (`git ls-files` there reads the same commit).
+    let try_state = if h.line.is_none() { ctx.env("LAYR_TRY_STATE").map(str::to_owned) } else { None };
+    if try_state.is_some() {
+        // Paths are relative to the working folder in the copy (`LAYR_TRY_ROOT`), as in a line.
+        if let Some(root) = ctx.env("LAYR_TRY_ROOT") {
+            h.loc.sub = try_sub(Path::new(root), &ctx.cwd).ok_or_else(|| {
+                exit(128, format!("{} is outside the copy of layr try ({root})", ctx.cwd.display()))
+            })?;
+        }
+    }
+    if let Some(state) = &try_state {
+        if a.has("-o") || a.has("-m") || a.has("-d") || a.has("-i") {
+            return Err(exit(
+                128,
+                format!("in a copy of layr try, ls-files lists the files of the state {} only (-c, -s); use git status for the rest", ids::short(state)),
+            ));
+        }
+    }
+    let line = match &try_state {
+        Some(_) => None,
+        None => Some(h.line()?.clone()),
+    };
+    let filtered = match &line {
+        Some(line) => h.repo.filtered_view(ctx, line)?,
+        None => None,
+    };
     let rest = a.rest();
-    let specs = h.specs(&rest)?;
+    // As git: without paths, the files of the current folder.
+    let specs = match () {
+        // A folder named with `*`, `?` or `[` is no glob here.
+        _ if rest.is_empty() && h.loc.sub.contains(['*', '?', '[']) => vec![folder_spec(&h.loc.sub)],
+        _ if rest.is_empty() => h.specs(&[".".to_string()])?,
+        _ => h.specs(&rest)?,
+    };
     let end = if a.has("-z") { "\0" } else { "\n" };
     let mut printed = 0usize;
     let show = |p: &str| if a.has("--full-name") { p.to_string() } else { h.rel(p) };
     let want_cached = a.has("-c") || !(a.has("-o") || a.has("-m") || a.has("-d") || a.has("-i"));
     if want_cached || a.has("-s") {
-        let (idx, _t) = match &filtered {
-            Some(view) => (snap(&view.path), None),
-            None => h.repo.index_view(&line)?,
+        let (idx, _t) = match (&filtered, &line, &try_state) {
+            (Some(view), _, _) => (snap(&view.path), None),
+            (None, Some(line), _) => h.repo.index_view(line)?,
+            // A copy of a view with layers (`LAYR_TRY_VIEW`) holds the files of its overlays too.
+            (None, None, Some(state)) => match ctx.env("LAYR_TRY_VIEW") {
+                Some(id) => {
+                    let view = h.repo.saved_view(id)?;
+                    h.repo.check_view_read(ctx, &view)?;
+                    let owner = Line {
+                        id: "try-ls-files".into(),
+                        name: "try-ls-files".into(),
+                        head: view.shared.clone(),
+                        owner: ctx.caller.uid,
+                        machine: h.repo.p.store.machine.id.clone(),
+                    };
+                    let assembled = h.repo.assemble(&owner, &view.shared, &view.layers)?;
+                    (snap(&assembled.path), Some(assembled))
+                }
+                None => (h.repo.state_src(&revs::resolve_state(&h.repo, None, state)?)?, None),
+            },
+            (None, None, None) => unreachable!("a line or a try state"),
         };
         let mut v = Vec::new();
         fsutil::walk(&idx, "", &mut |rel, m| {
@@ -2011,8 +2079,8 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if a.has("-o") || a.has("-m") || a.has("-d") || a.has("-i") {
-        let st = if filtered.is_some() { h.repo.snapshot_status(ctx, &line)? } else { h.repo.status(&line)?.0 };
+    if let (Some(line), true) = (&line, a.has("-o") || a.has("-m") || a.has("-d") || a.has("-i")) {
+        let st = if filtered.is_some() { h.repo.snapshot_status(ctx, line)? } else { h.repo.status(line)?.0 };
         if a.has("-m") || a.has("-d") {
             for c in &st.unstaged {
                 if (a.has("-m") || c.new().is_none()) && matches(&specs, c.path()) {
@@ -2039,7 +2107,7 @@ pub fn ls_files(ctx: &Ctx, args: &[String]) -> Result<i32> {
             }
         }
     }
-    if let Some(arg) = rev_argument(&rest, printed, |r| revs::resolve_state(&h.repo, Some(&line), r).is_ok()) {
+    if let Some(arg) = rev_argument(&rest, printed, |r| revs::resolve_state(&h.repo, line.as_ref(), r).is_ok()) {
         return Err(exit(
             128,
             format!("ls-files takes paths of the line's index, not states: '{arg}' is a revision. To list a state, use `layr show {arg}:<folder>`."),
