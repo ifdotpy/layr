@@ -189,6 +189,17 @@ const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 /// gateway by some seconds must not send a proof that the gateway sees as expired.
 const PROOF_RENEW_MS: i64 = 60_000;
 
+/// The gateway's own reason (its JSON `error`) after the status, so a refusal says why. Only a short
+/// printable reason is kept: a body never carries secrets, but it may be large or not text.
+fn gateway_reason(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned))
+        .filter(|e| e.len() <= 200 && e.chars().all(|c| !c.is_control()))
+        .map(|e| format!(" ({e})"))
+        .unwrap_or_default()
+}
+
 fn valid_token_expiry(expires: i64, now: i64, lifetime: i64) -> bool {
     expires > now && expires <= now + lifetime + CLOCK_SKEW_MS
 }
@@ -486,8 +497,8 @@ impl Gateway {
     fn json<T: serde::de::DeserializeOwned>(&self, response: Response, limit: usize) -> Result<T> {
         if !response.status().is_success() {
             let status = response.status().as_u16();
-            let _ = self.bytes(response, limit);
-            bail!("gateway: HTTP {status}");
+            let body = self.bytes(response, limit.min(4096)).unwrap_or_default();
+            bail!("gateway: HTTP {status}{}", gateway_reason(&body));
         }
         serde_json::from_slice(&self.bytes(response, limit)?).map_err(|_| anyhow!("invalid gateway JSON response"))
     }
@@ -2809,6 +2820,18 @@ pub(super) mod tests {
             assert!(!valid_token_expiry(client_now, client_now, lifetime));
             assert!(!valid_token_expiry(client_now - 1, client_now, lifetime));
         }
+    }
+
+    #[test]
+    fn a_refusal_names_the_gateway_reason() {
+        let reason = |body: &[u8]| super::gateway_reason(body);
+        assert_eq!(
+            reason(br#"{"error":"a read challenge token or scoped write token is required"}"#),
+            " (a read challenge token or scoped write token is required)"
+        );
+        assert_eq!(reason(b"<html>"), "");
+        assert_eq!(reason(br#"{"error":"a\nb"}"#), "");
+        assert_eq!(reason(format!(r#"{{"error":"{}"}}"#, "x".repeat(201)).as_bytes()), "");
     }
 
     #[test]
