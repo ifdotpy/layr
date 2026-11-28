@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.57.3](https://github.com/ifdotpy/layr/compare/v0.57.2...v0.57.3) (2026-11-28)
+
+
+### Bug Fixes
+
+* **remote:** Name the gateway's reason in a refused request
+
+
+## [0.57.2](https://github.com/ifdotpy/layr/compare/v0.57.1...v0.57.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **follow:** pass when a folder cache overlay is not on this machine
+
 ## [0.57.1](https://github.com/ifdotpy/layr/compare/v0.57.0...v0.57.1) (2026-11-27)
 
 

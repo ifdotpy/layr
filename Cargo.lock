@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "layr"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "age",
  "anyhow",
@@ -1950,7 +1950,7 @@ version = "0.1.0"
 
 [[package]]
 name = "layr-api"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1969,14 +1969,14 @@ dependencies = [
 
 [[package]]
 name = "layr-fs-common"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "layr-fs-core",
 ]
 
 [[package]]
 name = "layr-fs-core"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "layr-fs-plain"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "layr-fs-common",
  "layr-fs-core",
@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "layr-fs-unix"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "layr-fs-core",
  "rustix",
@@ -2103,14 +2103,14 @@ dependencies = [
 
 [[package]]
 name = "layr-stream-codec"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "criterion 0.8.2",
 ]
 
 [[package]]
 name = "layr-types"
-version = "0.57.1"
+version = "0.57.3"
 dependencies = [
  "hex",
  "uuid",
