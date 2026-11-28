@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.57.4](https://github.com/ifdotpy/layr/compare/v0.57.3...v0.57.4) (2026-11-28)
+
+
+### Performance Improvements
+
+* **remote:** read only the new epoch log segments, and list a large pack folder in parts
+
+
+## [0.57.3](https://github.com/ifdotpy/layr/compare/v0.57.2...v0.57.3) (2026-11-28)
+
+
+### Bug Fixes
+
+* **remote:** Name the gateway's reason in a refused request
+
 ## [0.57.1](https://github.com/ifdotpy/layr/compare/v0.57.0...v0.57.1) (2026-11-27)
 
 
