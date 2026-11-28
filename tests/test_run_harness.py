@@ -17,9 +17,8 @@ class OrderTest(unittest.TestCase):
             tests = root / "tests"
             tests.mkdir()
             shutil.copy(Path(__file__).with_name("run.sh"), tests / "run.sh")
-            started = root / "started"
             for name in ("ta", "tb", "tc"):
-                (tests / f"{name}.sh").write_text(f'#!/bin/bash\necho {name} >> {started}\necho "1 passed, 0 failed"\n')
+                (tests / f"{name}.sh").write_text(f'#!/bin/bash\necho "{name}: 1 passed, 0 failed"\n')
             (tests / "durations.txt").write_text("# seconds name\n300 tc\n50 ta\n")
             env = dict(os.environ, TMPDIR=tmp, LAYR_ROOT=str(root / "store"), LAYR_TEST_JOBS="2")
             result = subprocess.run([bash, "-c", 'v=${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}; [[ $v > 4.2 ]] || exit 77; '
@@ -28,9 +27,10 @@ class OrderTest(unittest.TestCase):
             if result.returncode == 77:
                 self.skipTest("parallel tests need bash 4.3")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            # tb is not listed: it counts as 10 s, after ta (50 s).
-            self.assertEqual(started.read_text().split()[0], "tc")
-            self.assertEqual(result.stdout.split().count("passed,"), 3)
+            # The runner reports in its start order. Two jobs start at once, so the order of their own
+            # writes is random; the reports are not. tb is not listed: it counts as 10 s, after ta (50 s).
+            order = [line.split(":")[0] for line in result.stdout.splitlines() if line.endswith(", 0 failed")]
+            self.assertEqual(order, ["tc", "ta", "tb"], result.stdout)
 
 if __name__ == "__main__":
     unittest.main()
