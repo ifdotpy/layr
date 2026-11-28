@@ -118,6 +118,16 @@ has "the epoch check leaves its memo" "verified-epoch" "$memo"
 eq "a fetch with no new segment reads neither epoch log again" "$((first - 2))" "$(reads)"
 printf '00\n%s' "$(tail -n1 "$memo")" > "$memo"
 eq "a memo with a wrong MAC makes the full check" "$first" "$(reads)"
+# The check keeps the lines that it checked: a memo that does not hold (each new record makes a new segment, and the
+# jobs run on each new record) reads only the new segments, not both logs whole (238 MB each pass of a follow job of
+# project layr, 2026-11-25).
+gets() { LAYR_TRACE=1 l fetch cloud 2>&1 | sed -n 's/.*remote get records: \([0-9]*\) request.*/\1/p' | head -1; }
+has "the check keeps the lines of both logs" "records" "$(ls "$(dirname "$memo")"/epoch-logs/*/ 2>&1)"
+printf '00\n%s' "$(tail -n1 "$memo")" > "$memo"
+eq "a check with its lines reads no segment" "" "$(gets)"
+printf '00\n%s' "$(tail -n1 "$memo")" > "$memo"
+rm -rf "$(dirname "$memo")/epoch-logs"
+ok "a check without its lines reads the logs" test "$(gets)" -gt 0
 
 garbage_check
 finish

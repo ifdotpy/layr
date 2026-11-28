@@ -121,9 +121,8 @@ impl Memo<'_> {
     }
 
     fn save(&self, stamp: &str) {
-        let written = self
-            .mac(stamp)
-            .and_then(|tag| crate::fsutil::atomic_write(&self.path, format!("{tag}\n{stamp}").as_bytes(), 0o600));
+        let written =
+            self.mac(stamp).and_then(|tag| crate::fsutil::atomic_write(&self.path, format!("{tag}\n{stamp}").as_bytes(), 0o600));
         if let Err(e) = written {
             eprintln!("warning: {}: {e:#}", self.path.display());
         }
@@ -176,7 +175,9 @@ fn resolve_chain(
     let stamp = memo.as_ref().map(|_| Memo::stamp(root, &scoped, &chain)).transpose()?;
     let checked = memo.as_ref().zip(stamp.as_deref()).is_some_and(|(memo, stamp)| memo.holds(stamp));
     if !checked {
-        check_logs(root, root_identity, &scoped, &identity, descriptor, &chain, latest)?;
+        let logs = memo.as_ref().and_then(|memo| Some((memo.path.parent()?.join(EPOCH_LOGS), memo.key)));
+        let logs = logs.as_ref().map(|(dir, key)| (dir.as_path(), *key));
+        check_logs(root, root_identity, &scoped, &identity, descriptor, &chain, latest, logs)?;
         if let Some((memo, stamp)) = memo.as_ref().zip(stamp.as_deref()) {
             memo.save(stamp);
         }
@@ -185,8 +186,48 @@ fn resolve_chain(
     Ok(Some((backend, Current { key: latest.key.clone(), identity }, public)))
 }
 
+/// The folder beside the memo with the checked lines of each epoch log (`log_records`).
+const EPOCH_LOGS: &str = "epoch-logs";
+
+/// The records of one epoch log: `name` is "root" or the epoch. With `logs` (the folder of this store and this machine's
+/// key), the lines that an earlier check read are given to the read as local records, with the stamps of their
+/// segments: only a new or changed segment is read (`reader::records_with_local`). The memo alone did not do: each
+/// new record makes a new segment, the jobs run on each new record, and so each connect read both logs whole again
+/// (238 MB a pass of `layr follow --tick` and about 700 GB of Layr Cloud traffic a day, 2026-11-25). A cache that
+/// fails the read is removed and the log is read whole.
+fn log_records(
+    backend: &Backend,
+    identity: &str,
+    project: &str,
+    logs: Option<(&std::path::Path, &ed25519_dalek::SigningKey)>,
+    name: &str,
+) -> Result<reader::Records> {
+    let Some((logs, key)) = logs else { return reader::records(backend, identity, project) };
+    let dir = logs.join(name);
+    let file = dir.join("records");
+    let local: Vec<String> =
+        std::fs::read_to_string(&file).map(|text| text.lines().map(str::to_owned).collect()).unwrap_or_default();
+    let records = match reader::records_with_local(backend, identity, project, &local, Some((&reader::seen_file(&dir), key))) {
+        Ok(records) => records,
+        Err(_) if !local.is_empty() => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return reader::records(backend, identity, project);
+        }
+        Err(e) => return Err(e),
+    };
+    let written = std::fs::create_dir_all(&dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|_| crate::fsutil::atomic_write(&file, format!("{}\n", records.lines.join("\n")).as_bytes(), 0o600));
+    if let Err(e) = written {
+        eprintln!("warning: {}: {e:#}", file.display());
+    }
+    Ok(records)
+}
+
 /// The current epoch keeps the whole root log and its root writers, its chain is signed by trusted writers and is in
-/// its encrypted history, and its reader set is the one its key names. Reads both logs whole.
+/// its encrypted history, and its reader set is the one its key names. Reads the new segments of both logs
+/// (`log_records`), or both logs whole without `logs`.
+#[allow(clippy::too_many_arguments)]
 fn check_logs(
     root: &Backend,
     root_identity: &str,
@@ -195,11 +236,12 @@ fn check_logs(
     descriptor: &Descriptor,
     chain: &[Published],
     latest: &Published,
+    logs: Option<(&std::path::Path, &ed25519_dalek::SigningKey)>,
 ) -> Result<()> {
-    let original = reader::records(root, root_identity, &descriptor.project)?;
+    let original = log_records(root, root_identity, &descriptor.project, logs, "root")?;
     let root_writers = layr_store::public::trusted_writers_checked(&descriptor.project, &original.lines)?;
     root.unlock_reader(&identity)?;
-    let current = reader::records(scoped, identity, &descriptor.project)?;
+    let current = log_records(scoped, identity, &descriptor.project, logs, &latest.key.epoch)?;
     if current.lines.is_empty() || !current.gaps.is_empty() {
         bail!("rotation in progress: current epoch record history is incomplete; retry after the writer resumes");
     }

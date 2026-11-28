@@ -1519,7 +1519,14 @@ impl Gateway {
         }
     }
 
+    /// The objects under `prefix`. A listing of a folder of chunk packs over the bound of the gateway (100,000
+    /// objects, HTTP 413) comes in parts (`list_parts`): the key change of the cache overlay target.macos-aarch64
+    /// of layr listed 100,000 objects of its old epoch, was refused, and stopped each push (2026-11-28).
     pub fn list(&self, prefix: &str) -> Result<Vec<Object>> {
+        list_parts(prefix, &mut |prefix| self.list_bounded(prefix))
+    }
+
+    fn list_bounded(&self, prefix: &str) -> Result<Bounded> {
         use super::listing_cache::Entry;
         #[derive(Deserialize)]
         struct Objects {
@@ -1535,7 +1542,7 @@ impl Gateway {
                 && !logical.starts_with("states/")
                 && !logical.starts_with("files/")
             {
-                return Ok(Vec::new());
+                return Ok(Bounded::All(Vec::new()));
             }
         }
         let cache_path = self.listing_cache_path(prefix, false);
@@ -1599,6 +1606,10 @@ impl Gateway {
                 continuation = None;
                 continue;
             }
+            if response.status().as_u16() == 413 {
+                let _ = self.bytes(response, 4096);
+                return Ok(Bounded::TooMany(objects.into_iter().map(|entry: Entry| entry.key).collect()));
+            }
             if response.status().as_u16() == 304 {
                 let cached = conditional.context("gateway returned 304 without a cached listing")?;
                 let mut objects: Vec<_> = cached
@@ -1607,7 +1618,7 @@ impl Gateway {
                     .map(|entry| Object { key: entry.key.clone(), modified: entry.modified / 1000, size: entry.size })
                     .collect();
                 objects.sort_by(|a, b| a.key.cmp(&b.key));
-                return Ok(objects);
+                return Ok(Bounded::All(objects));
             }
             if continuation.is_none() {
                 etag = super::listing_cache::etag(&response);
@@ -1616,7 +1627,7 @@ impl Gateway {
             // New gateways return at most 1,000 objects per page, each at most 8 MiB.
             let listing: Objects = self.json(response, 8 << 20)?;
             if objects.len() + listing.objects.len() > 100_000 {
-                bail!("too many gateway objects");
+                return Ok(Bounded::TooMany(objects.into_iter().map(|entry| entry.key).collect()));
             }
             for entry in listing.objects {
                 super::backend::check_key(&entry.key)?;
@@ -1636,10 +1647,12 @@ impl Gateway {
             super::listing_cache::store(&path, verified, &objects);
         }
         objects.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(objects
-            .into_iter()
-            .map(|entry| Object { key: entry.key, modified: entry.modified / 1000, size: entry.size })
-            .collect())
+        Ok(Bounded::All(
+            objects
+                .into_iter()
+                .map(|entry| Object { key: entry.key, modified: entry.modified / 1000, size: entry.size })
+                .collect(),
+        ))
     }
 
     /// Bind the cache to the canonical host/project, public route, full epoch prefix and listing mode.
@@ -1878,9 +1891,93 @@ fn epoch_path(key: &str) -> Option<(&str, &str)> {
     super::format::is_uuid(epoch).then_some((epoch, inner))
 }
 
+/// One listing of the gateway: all objects, or the first keys in key order when the listing is over its bound.
+enum Bounded {
+    All(Vec<Object>),
+    TooMany(Vec<String>),
+}
+
+/// The characters of chunk pack names after `chunks/` (UUIDs), in key order.
+const PACK_NAME: &[u8] = b"-0123456789abcdef";
+
+/// A folder of chunk packs (`chunks/`, of the project or of an epoch or overlay layer), or a part of one.
+fn pack_folder(prefix: &str) -> bool {
+    (prefix.starts_with("chunks/") || prefix.contains("/chunks/"))
+        && prefix.rsplit_once("chunks/").is_some_and(|(_, rest)| rest.bytes().all(|b| PACK_NAME.contains(&b)))
+}
+
+/// The prefixes that hold the keys after `seen`, the first keys of the listing of `prefix` in key order. With
+/// `common`, the longest prefix of all of `seen`: each later key has `common` and then any character, or a part
+/// of `common` and then a character after the next one of `common`. A key with a smaller character there comes
+/// before the keys of `seen`.
+fn later_parts(prefix: &str, seen: &[String]) -> Vec<String> {
+    let mut common = seen.first().map_or(prefix, String::as_str);
+    for key in seen {
+        let same = common.bytes().zip(key.bytes()).take_while(|(a, b)| a == b).count();
+        common = &common[..same];
+    }
+    if common.len() < prefix.len() || !pack_folder(common) {
+        common = prefix;
+    }
+    let tail = &common.as_bytes()[prefix.len()..];
+    let mut parts = Vec::new();
+    for i in 0..=tail.len() {
+        let base = &common[..prefix.len() + i];
+        for c in PACK_NAME.iter().filter(|c| tail.get(i).is_none_or(|next| *c > next)) {
+            parts.push(format!("{base}{}", *c as char));
+        }
+    }
+    parts
+}
+
+/// The objects under `prefix` from `bounded` listings: a pack folder over the bound comes in parts (`later_parts`),
+/// each listed the same way. Another folder over the bound fails.
+fn list_parts(prefix: &str, bounded: &mut dyn FnMut(&str) -> Result<Bounded>) -> Result<Vec<Object>> {
+    let seen = match bounded(prefix)? {
+        Bounded::All(objects) => return Ok(objects),
+        Bounded::TooMany(seen) => seen,
+    };
+    if !pack_folder(prefix) {
+        bail!("gateway: the listing of {prefix} has more than 100000 objects");
+    }
+    let mut objects = Vec::new();
+    for part in later_parts(prefix, &seen) {
+        objects.extend(list_parts(&part, bounded)?);
+    }
+    objects.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(objects)
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    /// A pack folder over the bound comes whole from its parts, with no key twice; another folder fails.
+    #[test]
+    fn a_pack_folder_over_the_bound_comes_in_parts() {
+        let prefix = "overlays/01a1d09b-464b-7738-a9e0-c3a659f5fb10/epochs/01a1d12e-45dd-75df-9966-089266edb7f5/chunks/";
+        let mut keys = std::collections::BTreeSet::new();
+        for n in 0..300u32 {
+            let pack = format!("01a1d1{:02x}-{:04x}-7000-8000-{:012x}", n % 7, n * 37 % 4096, n);
+            keys.insert(format!("{prefix}{pack}.pack.age"));
+            keys.insert(format!("{prefix}{pack}.index.age"));
+        }
+        keys.insert(format!("{prefix}ffffffff-0000-7000-8000-000000000000.pack.age"));
+        let mut requests = 0;
+        let mut bounded = |part: &str| -> Result<Bounded> {
+            requests += 1;
+            let under: Vec<&String> = keys.iter().filter(|key| key.starts_with(part)).collect();
+            if under.len() > 40 {
+                return Ok(Bounded::TooMany(under.iter().take(40).map(|key| key.to_string()).collect()));
+            }
+            Ok(Bounded::All(under.into_iter().map(|key| Object { key: key.clone(), modified: 0, size: None }).collect()))
+        };
+        let listed: Vec<String> = list_parts(prefix, &mut bounded).unwrap().into_iter().map(|o| o.key).collect();
+        assert_eq!(listed, keys.iter().cloned().collect::<Vec<_>>());
+        assert!(requests < 600, "{requests} listings");
+        let mut refused = |_: &str| -> Result<Bounded> { Ok(Bounded::TooMany(vec!["records/a".into()])) };
+        assert!(list_parts("records/", &mut refused).is_err());
+    }
 
     #[test]
     fn an_overlay_folder_listing_names_only_overlay_folders() {
