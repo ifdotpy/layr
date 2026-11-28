@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.57.2](https://github.com/ifdotpy/layr/compare/v0.57.1...v0.57.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **follow:** pass when a folder cache overlay is not on this machine
+
+
+## [0.57.1](https://github.com/ifdotpy/layr/compare/v0.57.0...v0.57.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* **git:** Free the shadow of a fast line before waiting for the line
+
 ## [0.57.1](https://github.com/ifdotpy/layr/compare/v0.57.0...v0.57.1) (2026-11-27)
 
 
